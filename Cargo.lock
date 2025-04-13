@@ -382,7 +382,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "inflation-2025"
+name = "inflat"
 version = "0.1.0"
 dependencies = [
  "dft",
