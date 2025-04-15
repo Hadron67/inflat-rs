@@ -4,13 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-dft = "0.5.5"
 libm = "0.2.11"
 ndarray = "0.16.1"
 ndarray-npy = "0.9.1"
+num-complex = "0.4.6"
 num-traits = "0.2.19"
 plotly = { version = "0.12.1", features = ["plotly_ndarray"] }
+random = "0.14.0"
 rayon = "1.10.0"
+rustfft = "6.2.0"
 
 [lib]
 name = "inflat"

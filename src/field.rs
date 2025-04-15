@@ -1,6 +1,6 @@
-use std::{iter::Sum, ops::{Add, AddAssign, DerefMut, Div, Index, Mul, Sub}};
+use std::{fmt::Display, iter::Sum, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, DerefMut, Div, Index, Mul, Sub}};
 
-use num_traits::{FromPrimitive, Num, NumAssign};
+use num_traits::{FromPrimitive, NumAssign, Zero};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 #[derive(Copy, Clone)]
@@ -11,6 +11,9 @@ pub struct Dim {
 }
 
 impl Dim {
+    pub fn new_equal(size: usize) -> Self {
+        Self { x: size, y: size, z: size }
+    }
     pub fn coord_to_index(self, coord: Vec3<i32>) -> usize {
         let x: usize = coord.x.try_into().unwrap();
         let y: usize = coord.y.try_into().unwrap();
@@ -30,11 +33,54 @@ impl Dim {
     }
 }
 
+impl<T> TryInto<Vec3<T>> for Dim where
+    T: TryFrom<usize>,
+{
+    type Error = <T as TryFrom<usize>>::Error;
+
+    fn try_into(self) -> Result<Vec3<T>, Self::Error> {
+        Ok(Vec3 { x: self.x.try_into()?, y: self.y.try_into()?, z: self.z.try_into()? })
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct Vec3<T> {
     pub x: T,
     pub y: T,
     pub z: T,
+}
+
+impl<T> Vec3<T> {
+    pub fn new(x: T, y: T, z: T) -> Self {
+        Self { x, y, z }
+    }
+}
+
+impl<T> Vec3<T> where
+    T: Mul<T, Output = T> + Add<T, Output = T>,
+{
+    pub fn inner(self, other: Self) -> T {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+}
+
+impl<T> Vec3<T> where
+    T: Sub<T, Output = T> + PartialEq<T> + Zero,
+{
+    pub fn flip_wrap_around(self, sizes: Vec3<T>) -> Self {
+        let x = if self.x == T::zero() { self.x } else { sizes.x - self.x };
+        let y = if self.y == T::zero() { self.y } else { sizes.y - self.y };
+        let z = if self.z == T::zero() { self.z } else { sizes.z - self.z };
+        Vec3 { x, y, z }
+    }
+}
+
+impl<T> Display for Vec3<T> where
+    T: Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("({}, {}, {})", self.x, self.y, self.z))
+    }
 }
 
 impl<T: NumAssign + PartialOrd> Vec3<T> {
@@ -79,11 +125,53 @@ impl<T: NumAssign + PartialOrd> Vec3<T> {
     }
 }
 
-impl<T> Vec3<T> where
-    T: Mul<T, Output = T> + Add<T, Output = T>,
+impl<T> Mul<T> for Vec3<T> where
+    T: Mul<T, Output = T> + Copy,
 {
-    pub fn inner(self, other: Self) -> T {
-        self.x * other.x + self.y * other.y + self.z * other.z
+    type Output = Self;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        Self { x: self.x * rhs, y: self.y * rhs, z: self.z * rhs }
+    }
+}
+
+impl<T> Add<Vec3<T>> for Vec3<T> where
+    T: Add<T, Output = T>,
+{
+    type Output = Self;
+
+    fn add(self, rhs: Vec3<T>) -> Self::Output {
+        Self { x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z }
+    }
+}
+
+impl<T: Copy> Add<T> for Vec3<T> where
+    T: Add<T, Output = T>,
+{
+    type Output = Self;
+
+    fn add(self, rhs: T) -> Self::Output {
+        Self { x: self.x + rhs, y: self.y + rhs, z: self.z + rhs }
+    }
+}
+
+impl<T> Sub<Vec3<T>> for Vec3<T> where
+    T: Sub<T, Output = T>,
+{
+    type Output = Self;
+
+    fn sub(self, rhs: Vec3<T>) -> Self::Output {
+        Self { x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z }
+    }
+}
+
+impl<T: Copy> Sub<T> for Vec3<T> where
+    T: Sub<T, Output = T>,
+{
+    type Output = Self;
+
+    fn sub(self, rhs: T) -> Self::Output {
+        Self { x: self.x - rhs, y: self.y - rhs, z: self.z - rhs }
     }
 }
 
@@ -103,6 +191,7 @@ impl<T> Lattice<T> {
     }
     pub fn data(&self) -> &[T] { self.data.as_ref() }
     pub fn dim(&self) -> Dim { self.dim }
+    pub fn ref_mut(&mut self) -> &mut Self { self }
 }
 
 impl<T: Copy> LatticeLike<T> for &Lattice<T> {
@@ -115,16 +204,31 @@ impl<T: Copy> LatticeLike<T> for &Lattice<T> {
     }
 }
 
-impl<'data, T: Copy> LatticeMutLike<'data, T> for Lattice<T> where
-    [T]: IntoParallelRefMutIterator<'data>,
-    <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
-    <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
-{
-    fn map_mut<F>(&'data mut self, provider: F) where F: Fn(T, usize) -> T + Send + Sync {
+impl<T: Copy> LatticeLike<T> for &mut Lattice<T> {
+    fn dim(&self) -> Dim {
+        self.dim
+    }
+
+    fn get_by_index(&self, index: usize) -> T {
+        self.data[index]
+    }
+}
+
+impl<T: Copy> LatticeMutLike<T> for &mut Lattice<T> {
+    fn par_map_mut<'data, F>(&'data mut self, provider: F) where
+        F: Fn(T, usize) -> T + Send + Sync,
+        [T]: IntoParallelRefMutIterator<'data>,
+        <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
+        <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
+    {
         let len = self.data.len();
         self.data.par_iter_mut().zip(0..len).for_each(|(mut ptr, index)| {
             *ptr = provider(*ptr, index);
         });
+    }
+
+    fn set_by_index(&mut self, index: usize, value: T) {
+        self.data[index] = value;
     }
 }
 
@@ -186,6 +290,12 @@ impl<'data, T> LatticeViewMut<'data, T> {
     pub fn len(&self) -> usize { self.ptr.len() }
 }
 
+impl<T> LatticeViewMut<'_, T> {
+    pub unsafe fn from_raw<'data>(ptr: *mut [T], dim: Dim) -> LatticeViewMut<'data, T> {
+        LatticeViewMut { ptr: unsafe { &mut *ptr }, dim }
+    }
+}
+
 impl<'data, T: Copy> LatticeLike<T> for LatticeViewMut<'data, T> {
     fn dim(&self) -> Dim {
         self.dim
@@ -196,37 +306,40 @@ impl<'data, T: Copy> LatticeLike<T> for LatticeViewMut<'data, T> {
     }
 }
 
-impl<'data, T> LatticeMutLike<'data, T> for LatticeViewMut<'data, T> where
-    [T]: IntoParallelRefMutIterator<'data>,
-    <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
-    <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
-    T: 'data + Copy,
-{
-    fn map_mut<F>(&'data mut self, provider: F) where
+impl<T: Copy> LatticeMutLike<T> for LatticeViewMut<'_, T> {
+    fn par_map_mut<'data, F>(&'data mut self, provider: F) where
         F: Fn(T, usize) -> T + Send + Sync,
+        [T]: IntoParallelRefMutIterator<'data>,
+        <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
+        <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
     {
         let len = self.ptr.len();
         self.ptr.par_iter_mut().zip(0..len).for_each(|(mut ptr, index)| {
             *ptr = provider(*ptr, index);
         });
     }
+
+    fn set_by_index(&mut self, index: usize, value: T) {
+        self.ptr[index] = value;
+    }
 }
 
 #[must_use = "Lattice operations do nothing unless used"]
-pub struct LatticeMap<F, M> {
+pub struct LatticeMap<T, F, M> {
     mapper: M,
     field: F,
+    _marker: PhantomData<T>,
 }
 
-impl<T, F, M> LatticeLike<T> for LatticeMap<F, M> where
+impl<T, T2, F, M> LatticeLike<T2> for LatticeMap<T, F, M> where
     F: LatticeLike<T>,
-    M: Fn(T) -> T,
+    M: Fn(T) -> T2,
 {
     fn dim(&self) -> Dim {
         self.field.dim()
     }
 
-    fn get_by_index(&self, index: usize) -> T {
+    fn get_by_index(&self, index: usize) -> T2 {
         (self.mapper)(self.field.get_by_index(index))
     }
 }
@@ -335,11 +448,109 @@ impl<T, F1, F2> LatticeLike<T> for LatticeAdd<F1, F2> where
     }
 }
 
+pub struct LatticeFlip<F> {
+    field: F,
+}
+
+impl<T, F> LatticeLike<T> for LatticeFlip<F> where
+    F: LatticeLike<T>,
+{
+    fn dim(&self) -> Dim {
+        self.field.dim()
+    }
+
+    fn get_by_index(&self, index: usize) -> T {
+        self.get(self.field.dim().index_to_coord(index))
+    }
+
+    fn get(&self, coord: Vec3i) -> T {
+        self.field.get(coord.flip_wrap_around(self.field.dim().try_into().unwrap()))
+    }
+}
+
+fn inverse_permute<T: Copy>(list: [T; 3], perm: [u8; 3]) -> [T; 3] {
+    [list[perm[0] as usize], list[perm[1] as usize], list[perm[2] as usize]]
+}
+
+fn permute<T: Copy>(list: [T; 3], perm: [u8; 3]) -> [T; 3] {
+    let mut ret: [T; 3] = unsafe { MaybeUninit::uninit().assume_init() };
+    ret[perm[0] as usize] = list[0];
+    ret[perm[1] as usize] = list[1];
+    ret[perm[2] as usize] = list[2];
+    ret
+}
+
+fn transposed_dim(dim: Dim, perm: [u8; 3]) -> Dim {
+    let d = permute([dim.x, dim.y, dim.z], perm);
+    Dim { x: d[0], y: d[1], z: d[2] }
+}
+
+fn permute_vec3<T: Copy>(vec: Vec3<T>, perm: [u8; 3]) -> Vec3<T> {
+    let c = permute([vec.x, vec.y, vec.z], perm);
+    Vec3 { x: c[0], y: c[1], z: c[2] }
+}
+
+fn inverse_permute_vec3<T: Copy>(vec: Vec3<T>, perm: [u8; 3]) -> Vec3<T> {
+    let c = inverse_permute([vec.x, vec.y, vec.z], perm);
+    Vec3 { x: c[0], y: c[1], z: c[2] }
+}
+
+pub struct LatticeTranspose<F> {
+    field: F,
+    perm: [u8; 3],
+}
+
+impl<T, F> LatticeLike<T> for LatticeTranspose<F> where
+    F: LatticeLike<T>,
+{
+    fn dim(&self) -> Dim {
+        transposed_dim(self.field.dim(), self.perm)
+    }
+
+    fn get_by_index(&self, index: usize) -> T {
+        self.get(self.dim().index_to_coord(index))
+    }
+
+    fn get(&self, coord: Vec3<i32>) -> T {
+        self.field.get(inverse_permute_vec3(coord, self.perm))
+    }
+}
+
+impl<T, F> LatticeMutLike<T> for LatticeTranspose<F> where
+    F: LatticeMutLike<T>,
+{
+    fn par_map_mut<'data, F2>(&'data mut self, mapper: F2) where
+        F2: Fn(T, usize) -> T + Send + Sync,
+        [T]: IntoParallelRefMutIterator<'data>,
+        <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
+        <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
+    {
+        let dim = self.field.dim();
+        let self_dim = self.dim();
+        self.field.par_map_mut(|f, index|{
+            mapper(f, self_dim.coord_to_index(permute_vec3(dim.index_to_coord(index), self.perm)))
+        });
+    }
+
+    fn set_by_index(&mut self, index: usize, value: T) {
+        let coord = self.dim().index_to_coord(index);
+        self.field.set_by_index(self.field.dim().coord_to_index(inverse_permute_vec3(coord, self.perm)), value);
+    }
+}
+
 pub trait LatticeLike<T> {
     fn dim(&self) -> Dim;
     fn get_by_index(&self, index: usize) -> T;
     fn get(&self, coord: Vec3<i32>) -> T {
         self.get_by_index(self.dim().coord_to_index(coord))
+    }
+    fn for_each<F>(&self, mut consumer: F) where
+        F: FnMut(T, Vec3i, usize) -> (),
+    {
+        let dim = self.dim();
+        for index in 0..dim.total_size() {
+            consumer(self.get_by_index(index), dim.index_to_coord(index), index);
+        }
     }
     fn derivative_at(&self, coord: Vec3<i32>) -> Vec3<T> where
         T: Sub<T, Output = T> + Div<T, Output = T> + From<i32>,
@@ -388,11 +599,14 @@ pub trait LatticeLike<T> {
     {
         self.sum() / T::from_usize(self.dim().total_size()).unwrap()
     }
-    fn map<M>(self, mapper: M) -> LatticeMap<Self, M> where
+    fn as_ref<'data>(&'data self) -> RefLatticeLike<'data, Self> {
+        RefLatticeLike { field: self }
+    }
+    fn map<T2, M>(self, mapper: M) -> LatticeMap<T, Self, M> where
         Self: Sized,
-        M: Fn(T) -> T,
+        M: Fn(T) -> T2,
     {
-        LatticeMap { mapper, field: self }
+        LatticeMap { mapper, field: self, _marker: PhantomData }
     }
     fn derivative_square(self) -> LatticeDerivativeSquare<Self> where
         T: Sub<T, Output = T> + Mul<T, Output = T> + Add<T, Output = T> + Div<T, Output = T> + From<i32> + Copy,
@@ -422,6 +636,22 @@ pub trait LatticeLike<T> {
     {
         LatticeAdd { lhs: self, rhs: other }
     }
+    fn transpose(self, perm: [u8; 3]) -> LatticeTranspose<Self> where
+        Self: Sized,
+    {
+        LatticeTranspose { field: self, perm }
+    }
+    fn flip(self) -> LatticeFlip<Self> where
+        Self: Sized,
+    {
+        LatticeFlip { field: self }
+    }
+    fn show_as_array_rules<F>(self, filter: F) -> ShowAsArrayRules<T, Self, F> where
+        F: Fn(T) -> bool,
+        Self: Sized,
+    {
+        ShowAsArrayRules { field: self, filter, _marker: PhantomData }
+    }
 }
 
 impl<T: Clone + Copy> LatticeLike<T> for LatticeView<'_, T> {
@@ -434,14 +664,95 @@ impl<T: Clone + Copy> LatticeLike<T> for LatticeView<'_, T> {
     }
 }
 
-pub trait LatticeMutLike<'data, T> {
-    fn map_mut<F>(&'data mut self, mapper: F) where F: Fn(T, usize) -> T + Send + Sync;
-    fn add_assign<F>(&'data mut self, provider: F) where
+pub trait LatticeMutLike<T>: LatticeLike<T> {
+    fn set_by_index(&mut self, index: usize, value: T);
+    fn set(&mut self, coord: Vec3i, value: T) {
+        self.set_by_index(self.dim().coord_to_index(coord), value);
+    }
+    fn map_mut<F>(&mut self, mut mapper: F) where
+        F: FnMut(T, usize) -> T,
+    {
+        for index in 0..self.dim().total_size() {
+            self.set_by_index(index, mapper(self.get_by_index(index), index));
+        }
+    }
+    // XXX: these trait bounds are here to makes it possible to use rayon iterators, but how to put these on the impl bound?
+    fn par_map_mut<'data, F>(&'data mut self, mapper: F) where
+        [T]: IntoParallelRefMutIterator<'data>,
+        <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
+        <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
+        F: Fn(T, usize) -> T + Send + Sync,
+    ;
+    fn as_ref_mut<'data2>(&'data2 mut self) -> RefMutLatticeLike<'data2, Self> {
+        RefMutLatticeLike { field: self }
+    }
+    fn par_add_assign<'data, F>(&'data mut self, provider: F) where
         F: LatticeLike<T> + Sync + Send,
         T: Add<T, Output = T>,
+        [T]: IntoParallelRefMutIterator<'data>,
+        <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
+        <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
     {
         // no need to move here?
-        self.map_mut(move |f, index|f + provider.get_by_index(index));
+        self.par_map_mut(move |f, index|f + provider.get_by_index(index));
+    }
+    fn par_assign<'data, F>(&'data mut self, provider: F) where
+        F: LatticeLike<T> + Sync + Send,
+        T: Add<T, Output = T>,
+        [T]: IntoParallelRefMutIterator<'data>,
+        <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
+        <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
+    {
+        self.par_map_mut(move|_, index|provider.get_by_index(index));
+    }
+}
+
+pub struct RefLatticeLike<'data, F: ?Sized> {
+    field: &'data F,
+}
+
+impl<T, F> LatticeLike<T> for RefLatticeLike<'_, F> where
+    F: LatticeLike<T> + ?Sized,
+{
+    fn dim(&self) -> Dim {
+        self.field.dim()
+    }
+
+    fn get_by_index(&self, index: usize) -> T {
+        self.field.get_by_index(index)
+    }
+}
+
+pub struct RefMutLatticeLike<'data, F: ?Sized> {
+    field: &'data mut F,
+}
+
+impl<T, F> LatticeLike<T> for RefMutLatticeLike<'_, F> where
+    F: LatticeLike<T> + ?Sized,
+{
+    fn dim(&self) -> Dim {
+        self.field.dim()
+    }
+
+    fn get_by_index(&self, index: usize) -> T {
+        self.field.get_by_index(index)
+    }
+}
+
+impl<T, F> LatticeMutLike<T> for RefMutLatticeLike<'_, F> where
+    F: LatticeMutLike<T>,
+{
+    fn par_map_mut<'data, F2>(&'data mut self, mapper: F2) where
+        F2: Fn(T, usize) -> T + Send + Sync,
+        [T]: IntoParallelRefMutIterator<'data>,
+        <[T] as IntoParallelRefMutIterator<'data>>::Iter: IndexedParallelIterator,
+        <[T] as IntoParallelRefMutIterator<'data>>::Item: DerefMut<Target = T>,
+    {
+        self.field.par_map_mut(mapper);
+    }
+
+    fn set_by_index(&mut self, index: usize, value: T) {
+        self.field.set_by_index(index, value);
     }
 }
 
@@ -457,5 +768,65 @@ impl<T: Copy> LatticeLike<T> for ConstantField<T> {
 
     fn get_by_index(&self, _: usize) -> T {
         self.value
+    }
+}
+
+pub struct ShowAsArrayRules<T, F, Fil> {
+    field: F,
+    filter: Fil,
+    _marker: PhantomData<T>,
+}
+
+impl<T, F, Fil> Display for ShowAsArrayRules<T, F, Fil> where
+    F: LatticeLike<T>,
+    Fil: Fn(T) -> bool,
+    T: Display + Copy,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Lattice {")?;
+        let mut first = true;
+        let mut ret: std::fmt::Result = Ok(());
+        self.field.for_each(|value, coord, _|{
+            if ret.is_ok() && (self.filter)(value) {
+                if first {
+                    first = false;
+                } else {
+                    ret = f.write_str(", ");
+                }
+                if ret.is_err() { return; }
+                ret = f.write_fmt(format_args!("{} -> {}", coord, value));
+            }
+        });
+        ret?;
+        f.write_str("}")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dim, Lattice, LatticeLike, LatticeMutLike, Vec3i};
+
+    #[test]
+    fn test_transpose() {
+        let dim = Dim::new_equal(16);
+        let mut lat = Lattice::<i32>::new(dim);
+        lat.ref_mut().par_map_mut(|_, _|0);
+        lat.ref_mut().set(Vec3i::new(1, 2, 3), -10);
+        let mut transposed = lat.ref_mut().transpose([1, 2, 0]);
+        assert_eq!(transposed.get(Vec3i::new(3, 1, 2)), -10);
+        transposed.set(Vec3i::new(4, 5, 6), -7);
+        assert_eq!(transposed.get(Vec3i::new(4, 5, 6)), -7);
+
+        drop(lat);
+        let mut lat = Lattice::<i32>::new(dim);
+        lat.ref_mut().par_map_mut(|_, _|0);
+        lat.ref_mut().set(Vec3i::new(1, 2, 3), -10);
+        lat.ref_mut().set(Vec3i::new(4, 5, 6), -5);
+        let mut lat2 = Lattice::new(dim);
+        let mut transposed = lat2.ref_mut().transpose([1, 2, 0]);
+        transposed.par_assign(&lat);
+        assert_eq!((&lat2).get(Vec3i::new(2, 3, 1)), -10);
+        assert_eq!((&lat2).get(Vec3i::new(5, 6, 4)), -5);
     }
 }

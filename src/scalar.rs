@@ -98,7 +98,7 @@ impl<T1: (Fn(f64) -> f64) + Send + Sync, T2: (Fn(f64) -> f64) + Send + Sync> Sim
         let a = self.scale_factor;
         let a2 = a * a;
         self.mom_scale_factor += summed_mom_phi2 / a / a2 * delta_t;
-        self.phi.add_assign(self.mom_phi.mul_scalar(delta_t / a2));
+        self.phi.ref_mut().par_add_assign(self.mom_phi.mul_scalar(delta_t / a2));
     }
     fn apply_k3(&mut self, delta_t: f64) {
         // let len = self.phi.len();
@@ -109,7 +109,7 @@ impl<T1: (Fn(f64) -> f64) + Send + Sync, T2: (Fn(f64) -> f64) + Send + Sync> Sim
         let a4 = a2 * a2;
         self.mom_scale_factor += (-summed_d2_phi * a - 4.0 * summed_potential * a2 * a) * delta_t;
         let v_d = self.phi.map(&self.potential_d);
-        self.mom_phi.add_assign(
+        self.mom_phi.ref_mut().par_add_assign(
             self.phi.laplacian().mul_scalar(a2)
                 .add(v_d.mul_scalar(-a4)).mul_scalar(delta_t)
         );
@@ -136,9 +136,9 @@ impl<T1: (Fn(f64) -> f64) + Send + Sync, T2: (Fn(f64) -> f64) + Send + Sync> Sim
     }
     pub fn initialize(&mut self, a: f64, phi: f64, d_phi: f64) {
         let volumn = self.params.dim.total_size() as f64;
-        self.phi.map_mut(|_, _|phi);
+        self.phi.ref_mut().par_map_mut(|_, _|phi);
         let mom_phi = d_phi * a * a;
-        self.mom_phi.map_mut(|_, _|mom_phi);
+        self.mom_phi.ref_mut().par_map_mut(|_, _|mom_phi);
         // TODO: initialize fluctuations
         let averaged_mom_phi2 = self.mom_phi.map(|f|f * f).average();
         let averaged_d2_phi = self.phi.derivative_square().average();
