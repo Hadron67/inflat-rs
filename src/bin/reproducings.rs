@@ -1,10 +1,11 @@
 use std::{env::args, path::Path, time::SystemTime};
 use inflat::{field::Dim, scalar::{FullSimulateParams, SimulateParams, Simulator}};
 use libm::{cosh, round, tanh};
-use ndarray::{s, Array2, ArrayView1};
+use ndarray::{s, Array2, Array3, ArrayView1, ArrayView2, ArrayViewMut2, Axis, Slice};
 use ndarray_npy::{read_npy, write_npy};
 use num_traits::Zero;
 use plotly::{layout::{GridPattern, LayoutGrid}, Configuration, Layout, Plot, Scatter};
+use rayon::iter::IntoParallelRefMutIterator;
 
 const OUT_DIR: &'static str = "out";
 
@@ -54,8 +55,7 @@ fn run_simulation<T1: Fn(f64) -> f64 + Send + Sync, T2: Fn(f64) -> f64 + Send + 
     } else {
         println!("File exists, proceeding");
     }
-    let measurables: Array2<f64> = read_npy(npy_path).unwrap();
-    // let measurables = limit_plot_array_length(measurables, 100);
+    let mut measurables: Array2<f64> = read_npy(npy_path).unwrap();
     let efoldings = measurables.slice(s![0, ..]);
     let hamitonian_data = measurables.slice(s![1, ..]);
     let hubble_constraint_data = measurables.slice(s![2, ..]);
@@ -79,16 +79,17 @@ fn run_simulation<T1: Fn(f64) -> f64 + Send + Sync, T2: Fn(f64) -> f64 + Send + 
 fn run_massive_free_scalar_sim(force_rerun: bool) {
     let mass: f64 = 0.51e-5;
     let l = 1.4 / mass;
-    let size: usize = 16;
+    let size: usize = 128;
     let params = FullSimulateParams {
         params: SimulateParams {
             kappa: 1.0,
-            time_step: 0.1,
-            dim: Dim { x: size, y: size, z: size },
+            time_step: 1.0,
+            dim: Dim::new_equal(size),
             lattice_spacing: l / (size as f64),
             initial_scale_factor: 1.0,
             initial_phi: 14.5,
             initial_d_phi: -0.8152 * mass,
+            random_seed: 0,
         },
         potential: |phi|mass * mass / 2.0 * phi * phi,
         potential_d: |phi|mass * mass * phi,
@@ -113,6 +114,7 @@ fn run_stepped_potential(force_rerun: bool) {
             initial_scale_factor: 1.0,
             initial_phi: 14.5,
             initial_d_phi: -0.8152 * mass,
+            random_seed: 0,
         },
         potential: |phi|0.5 * mass * mass * phi * phi * (1.0 + s * tanh((phi - phi_step) / d)),
         potential_d: |phi|mass * mass * phi * (1.0 + s * tanh((phi - phi_step) / d)) + 0.5 * mass * mass * phi * phi * s / d * { let h = cosh((phi - phi_step) / d); 1.0 / h / h},
@@ -132,6 +134,7 @@ fn run_oscillator() {
             initial_scale_factor: 1.0,
             initial_phi: 1.0,
             initial_d_phi: 0.0,
+            random_seed: 0,
         },
         potential: |phi|mass * mass * phi * phi / 2.0,
         potential_d: |phi|mass * mass * phi
@@ -168,6 +171,6 @@ fn main() {
         }
     }
     run_massive_free_scalar_sim(force_rerun);
-    run_stepped_potential(force_rerun);
+    // run_stepped_potential(force_rerun);
     // run_oscillator();
 }

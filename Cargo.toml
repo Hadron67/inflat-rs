@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bincode = "2.0.1"
 libm = "0.2.11"
-ndarray = "0.16.1"
+ndarray = { version = "0.16.1", features = ["rayon"] }
 ndarray-npy = "0.9.1"
 num-complex = "0.4.6"
 num-traits = "0.2.19"
@@ -13,6 +14,7 @@ plotly = { version = "0.12.1", features = ["plotly_ndarray"] }
 random = "0.14.0"
 rayon = "1.10.0"
 rustfft = "6.2.0"
+serde = "1.0.219"
 
 [lib]
 name = "inflat"
@@ -21,3 +23,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "reproducings"
 path = "src/bin/reproducings.rs"
+
+[[bin]]
+name = "parameter-resonance"
+path = "src/bin/parameter-resonance.rs"

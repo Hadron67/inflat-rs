@@ -1,7 +1,7 @@
-use std::{fmt::Display, iter::Sum, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, DerefMut, Div, Index, Mul, Sub}};
+use std::{fmt::Display, iter::Sum, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, DerefMut, Div, Index, Mul, Range, Sub}};
 
 use num_traits::{FromPrimitive, NumAssign, Zero};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, Map, ParallelIterator};
 
 #[derive(Copy, Clone)]
 pub struct Dim {
@@ -53,6 +53,16 @@ pub struct Vec3<T> {
 impl<T> Vec3<T> {
     pub fn new(x: T, y: T, z: T) -> Self {
         Self { x, y, z }
+    }
+    pub fn map<T2, F>(self, mut mapper: F) -> Vec3<T2> where
+        F: FnMut(T) -> T2,
+    {
+        Vec3 { x: mapper(self.x), y: mapper(self.y), z: mapper(self.z) }
+    }
+    pub fn total(self) -> T where
+        T: Add<T, Output = T>,
+    {
+        self.x + self.y + self.z
     }
 }
 
@@ -211,6 +221,19 @@ impl<T: Copy> LatticeLike<T> for &mut Lattice<T> {
 
     fn get_by_index(&self, index: usize) -> T {
         self.data[index]
+    }
+}
+
+impl<'data, T> IntoParallelIterator for &'data mut Lattice<T> where
+    T: Send,
+{
+    type Iter = rayon::iter::Zip<<[T] as IntoParallelRefMutIterator<'data>>::Iter, rayon::range::Iter<usize>>;
+
+    type Item = (<[T] as IntoParallelRefMutIterator<'data>>::Item, usize);
+
+    fn into_par_iter(self) -> Self::Iter {
+        let len = self.data.len();
+        self.data.par_iter_mut().zip(0..len)
     }
 }
 
@@ -495,12 +518,13 @@ fn inverse_permute_vec3<T: Copy>(vec: Vec3<T>, perm: [u8; 3]) -> Vec3<T> {
     Vec3 { x: c[0], y: c[1], z: c[2] }
 }
 
-pub struct LatticeTranspose<F> {
+pub struct LatticeTranspose<T, F> {
     field: F,
     perm: [u8; 3],
+    _marker: PhantomData<T>,
 }
 
-impl<T, F> LatticeLike<T> for LatticeTranspose<F> where
+impl<T, F> LatticeLike<T> for LatticeTranspose<T, F> where
     F: LatticeLike<T>,
 {
     fn dim(&self) -> Dim {
@@ -516,7 +540,7 @@ impl<T, F> LatticeLike<T> for LatticeTranspose<F> where
     }
 }
 
-impl<T, F> LatticeMutLike<T> for LatticeTranspose<F> where
+impl<T, F> LatticeMutLike<T> for LatticeTranspose<T, F> where
     F: LatticeMutLike<T>,
 {
     fn par_map_mut<'data, F2>(&'data mut self, mapper: F2) where
@@ -636,10 +660,10 @@ pub trait LatticeLike<T> {
     {
         LatticeAdd { lhs: self, rhs: other }
     }
-    fn transpose(self, perm: [u8; 3]) -> LatticeTranspose<Self> where
+    fn transpose(self, perm: [u8; 3]) -> LatticeTranspose<T, Self> where
         Self: Sized,
     {
-        LatticeTranspose { field: self, perm }
+        LatticeTranspose { field: self, perm, _marker: PhantomData }
     }
     fn flip(self) -> LatticeFlip<Self> where
         Self: Sized,
@@ -695,6 +719,12 @@ pub trait LatticeMutLike<T>: LatticeLike<T> {
     {
         // no need to move here?
         self.par_map_mut(move |f, index|f + provider.get_by_index(index));
+    }
+    fn par_add_assign2<'data, F>(&'data mut self, provider: F) where
+        Self: IntoParallelRefMutIterator<'data, Item = (&'data mut T, usize)>,
+        T: 'data,
+    {
+        self.par_iter_mut();
     }
     fn par_assign<'data, F>(&'data mut self, provider: F) where
         F: LatticeLike<T> + Sync + Send,

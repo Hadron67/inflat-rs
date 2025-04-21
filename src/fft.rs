@@ -1,4 +1,4 @@
-use std::{cmp::max, sync::Arc};
+use std::{cmp::max, sync::{Arc, Mutex}};
 
 use num_traits::{Float, FloatConst};
 use rayon::{iter::{IndexedParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn fft_test() {
-        let dim = Dim::new_equal(8);
+        let dim = Dim::new_equal(128);
         let mut lat = Lattice::<Complex64>::new(dim);
         let mut transformed = Lattice::<Complex64>::new(dim);
         let mut plan = Dft3DPlan::<f64>::new(dim, FftDirection::Forward);
