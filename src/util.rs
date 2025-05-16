@@ -1,6 +1,42 @@
-use std::{marker::PhantomData, ops::Range};
+use std::{marker::PhantomData, ops::{Add, Div, Mul, Range, Sub}};
 
+use num_traits::{Float, FromPrimitive};
 use rayon::iter::{plumbing::{bridge, Consumer, Producer, ProducerCallback, UnindexedConsumer}, IndexedParallelIterator, ParallelIterator};
+
+pub fn derivative_2<T, T2>(dx: &[T], y: &[T2], i: usize) -> T2 where
+    T: Copy,
+    T2: Copy + Add<T2, Output = T2> + Div<T2, Output = T2> + Mul<T2, Output = T2> + Sub<T2, Output = T2> + FromPrimitive + From<T>,
+{
+    let s: T2 = dx[i - 1].into();
+    let t: T2 = dx[i].into();
+    let one = T2::from_usize(1).unwrap();
+    (y[i - 1] / s + y[i + 1] / t - (one / s + one / t) * y[i]) / (s + t) * T2::from_usize(2).unwrap()
+}
+
+pub fn linear_interp<T>(a: T, b: T, i: T) -> T where
+    T: Mul<T, Output = T> + Add<T, Output = T> + Sub<T, Output = T> + Copy,
+{
+    a + (b - a) * i
+}
+
+pub fn power_interp<T>(a: T, b: T, i: T) -> T where
+    T: Float,
+{
+    a * (b / a).powf(i)
+}
+
+pub fn limit_length<T: Clone>(arr: Vec<T>, max_length: usize) -> Vec<T> {
+    if arr.len() > max_length {
+        let mut arr2 = vec![];
+        arr2.reserve(max_length);
+        for i in 0..max_length {
+            arr2.push(arr[((i as f64) / ((max_length - 1) as f64) * ((arr.len() - 1) as f64)) as usize].clone());
+        }
+        arr2
+    } else {
+        arr
+    }
+}
 
 pub trait IndexMapOp {
     type Item;
