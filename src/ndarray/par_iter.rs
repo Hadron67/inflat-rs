@@ -1,6 +1,12 @@
 use std::ops::{Index, IndexMut, Range};
 
-use rayon::{iter::{plumbing::{bridge, Consumer, Producer, ProducerCallback}, IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator}, range};
+use rayon::{
+    iter::{
+        IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
+        plumbing::{Consumer, Producer, ProducerCallback, bridge},
+    },
+    range,
+};
 
 use super::array::{ArrayViewMut, ListLike, RemovableList, SliceIterMut};
 
@@ -15,14 +21,16 @@ impl<'data, T, D> ArrayViewMutParallelIter<'data, T, D> {
     }
 }
 
-impl<'data, T, D> ParallelIterator for ArrayViewMutParallelIter<'data, T, D> where
+impl<'data, T, D> ParallelIterator for ArrayViewMutParallelIter<'data, T, D>
+where
     T: Send + Sync,
     D: IndexMut<usize, Output = usize> + RemovableList + ListLike + Clone,
     <D as RemovableList>::Removed: ListLike + IndexMut<usize, Output = usize> + Clone,
 {
     type Item = ArrayViewMut<'data, T, D::Removed>;
 
-    fn drive_unindexed<C>(self, consumer: C) -> C::Result where
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
         C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
     {
         bridge(self, consumer)
@@ -33,7 +41,8 @@ impl<'data, T, D> ParallelIterator for ArrayViewMutParallelIter<'data, T, D> whe
     }
 }
 
-impl<'data, T, D> IndexedParallelIterator for ArrayViewMutParallelIter<'data, T, D> where
+impl<'data, T, D> IndexedParallelIterator for ArrayViewMutParallelIter<'data, T, D>
+where
     T: Send + Sync,
     D: IndexMut<usize, Output = usize> + RemovableList + ListLike + Clone,
     <D as RemovableList>::Removed: ListLike + IndexMut<usize, Output = usize> + Clone,
@@ -51,7 +60,8 @@ impl<'data, T, D> IndexedParallelIterator for ArrayViewMutParallelIter<'data, T,
     }
 }
 
-impl<'data, T, D> Producer for ArrayViewMutParallelIter<'data, T, D> where
+impl<'data, T, D> Producer for ArrayViewMutParallelIter<'data, T, D>
+where
     D: IndexMut<usize, Output = usize> + ListLike + RemovableList + Clone,
     <D as RemovableList>::Removed: ListLike + IndexMut<usize, Output = usize> + Clone,
     T: Send + Sync,
@@ -62,18 +72,23 @@ impl<'data, T, D> Producer for ArrayViewMutParallelIter<'data, T, D> where
 
     fn into_iter(self) -> Self::IntoIter {
         let len = self.len();
-        self.array.slice_axis_move(self.axis, 0..len).slice_iter_mut_move(self.axis)
+        self.array
+            .slice_axis_move(self.axis, 0..len)
+            .slice_iter_mut_move(self.axis)
     }
 
     fn split_at(self, index: usize) -> (Self, Self) {
         let (arr1, arr2) = self.array.split_axis_move(self.axis, index);
-        (Self {
-            array: arr1,
-            axis: self.axis,
-        }, Self {
-            array: arr2,
-            axis: self.axis,
-        })
+        (
+            Self {
+                array: arr1,
+                axis: self.axis,
+            },
+            Self {
+                array: arr2,
+                axis: self.axis,
+            },
+        )
     }
 }
 
@@ -88,11 +103,9 @@ mod tests {
         let shape = ArrayShape::from_dims([8, 8, 8]);
         let mut arr_data = unsafe { Box::<[i32]>::new_uninit_slice(shape.size()).assume_init() };
         let arr = ArrayViewMut::from_shape_ref_mut(&mut arr_data, shape.clone());
-        arr.par_iter_mut_move(0).for_each(|arr2|{
-            arr2.par_iter_mut_move(1).for_each(|mut arr3|{
-                arr3.map_indexed_mut(|val, coord|{
-                    coord[0] as i32
-                });
+        arr.par_iter_mut_move(0).for_each(|arr2| {
+            arr2.par_iter_mut_move(1).for_each(|mut arr3| {
+                arr3.map_indexed_mut(|val, coord| coord[0] as i32);
             });
         });
         let arr = ArrayViewMut::from_shape_ref_mut(&mut arr_data, shape);

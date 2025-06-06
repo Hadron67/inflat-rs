@@ -1,25 +1,50 @@
-use std::{marker::PhantomData, ops::{Add, Div, Mul, Range, Sub}};
+use std::{
+    error::Error,
+    fmt::Display,
+    fs::File,
+    io::{self, BufReader, BufWriter},
+    marker::PhantomData,
+    ops::{Add, Div, Mul, Range, Sub},
+};
 
+use bincode::{
+    Decode, Encode,
+    config::Config,
+    decode_from_std_read, encode_into_std_write,
+    error::{DecodeError, EncodeError},
+};
 use num_traits::{Float, FromPrimitive};
-use rayon::iter::{plumbing::{bridge, Consumer, Producer, ProducerCallback, UnindexedConsumer}, IndexedParallelIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, ParallelIterator,
+    plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge},
+};
 
-pub fn derivative_2<T, T2>(dx: &[T], y: &[T2], i: usize) -> T2 where
+pub fn derivative_2<T, T2>(dx1: T, dx2: T, y1: T2, y2: T2, y3: T2) -> T2
+where
     T: Copy,
-    T2: Copy + Add<T2, Output = T2> + Div<T2, Output = T2> + Mul<T2, Output = T2> + Sub<T2, Output = T2> + FromPrimitive + From<T>,
+    T2: Copy
+        + Add<T2, Output = T2>
+        + Div<T2, Output = T2>
+        + Mul<T2, Output = T2>
+        + Sub<T2, Output = T2>
+        + FromPrimitive
+        + From<T>,
 {
-    let s: T2 = dx[i - 1].into();
-    let t: T2 = dx[i].into();
+    let s: T2 = dx1.into();
+    let t: T2 = dx2.into();
     let one = T2::from_usize(1).unwrap();
-    (y[i - 1] / s + y[i + 1] / t - (one / s + one / t) * y[i]) / (s + t) * T2::from_usize(2).unwrap()
+    (y1 / s + y3 / t - (one / s + one / t) * y2) / (s + t) * T2::from_usize(2).unwrap()
 }
 
-pub fn linear_interp<T>(a: T, b: T, i: T) -> T where
+pub fn linear_interp<T>(a: T, b: T, i: T) -> T
+where
     T: Mul<T, Output = T> + Add<T, Output = T> + Sub<T, Output = T> + Copy,
 {
     a + (b - a) * i
 }
 
-pub fn power_interp<T>(a: T, b: T, i: T) -> T where
+pub fn power_interp<T>(a: T, b: T, i: T) -> T
+where
     T: Float,
 {
     a * (b / a).powf(i)
@@ -30,12 +55,77 @@ pub fn limit_length<T: Clone>(arr: Vec<T>, max_length: usize) -> Vec<T> {
         let mut arr2 = vec![];
         arr2.reserve(max_length);
         for i in 0..max_length {
-            arr2.push(arr[((i as f64) / ((max_length - 1) as f64) * ((arr.len() - 1) as f64)) as usize].clone());
+            arr2.push(
+                arr[((i as f64) / ((max_length - 1) as f64) * ((arr.len() - 1) as f64)) as usize]
+                    .clone(),
+            );
         }
         arr2
     } else {
         arr
     }
+}
+
+#[derive(Debug)]
+pub enum EncodeOrIoError {
+    Encode(EncodeError),
+    Decode(DecodeError),
+    Io(io::Error),
+}
+
+impl From<EncodeError> for EncodeOrIoError {
+    fn from(value: EncodeError) -> Self {
+        Self::Encode(value)
+    }
+}
+
+impl From<io::Error> for EncodeOrIoError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<DecodeError> for EncodeOrIoError {
+    fn from(value: DecodeError) -> Self {
+        Self::Decode(value)
+    }
+}
+
+impl Display for EncodeOrIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encode(err) => err.fmt(f),
+            Self::Decode(err) => err.fmt(f),
+            Self::Io(err) => err.fmt(f),
+        }
+    }
+}
+
+impl Error for EncodeOrIoError {}
+
+pub type Result<T> = std::result::Result<T, EncodeOrIoError>;
+
+pub fn lazy_file<T, F, C>(name: &str, config: C, mut creator: F) -> Result<T>
+where
+    T: Encode + Decode<()>,
+    F: FnMut() -> T,
+    C: Config,
+{
+    if let Ok(file) = File::open(name) {
+        Ok(decode_from_std_read(&mut BufReader::new(file), config)?)
+    } else {
+        let value = creator();
+        let file = File::create(name).unwrap();
+        encode_into_std_write(&value, &mut BufWriter::new(file), config)?;
+        Ok(value)
+    }
+}
+
+pub fn sigmoid<T>(x: T) -> T
+where
+    T: Float,
+{
+    T::one() / (T::one() + x.neg().exp())
 }
 
 pub trait IndexMapOp {
@@ -50,13 +140,15 @@ pub struct RangeBasedProducer<T, M> {
     _marker: PhantomData<T>,
 }
 
-impl<T, M> ParallelIterator for RangeBasedProducer<T, M> where
+impl<T, M> ParallelIterator for RangeBasedProducer<T, M>
+where
     T: Send,
     M: IndexMapOp<Item = T> + Sync + Send + Clone,
 {
     type Item = T;
 
-    fn drive_unindexed<C>(self, consumer: C) -> C::Result where
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
         C: UnindexedConsumer<Self::Item>,
     {
         bridge(self, consumer)
@@ -67,7 +159,8 @@ impl<T, M> ParallelIterator for RangeBasedProducer<T, M> where
     }
 }
 
-impl<T, M> IndexedParallelIterator for RangeBasedProducer<T, M> where
+impl<T, M> IndexedParallelIterator for RangeBasedProducer<T, M>
+where
     T: Send,
     M: IndexMapOp<Item = T> + Send + Sync + Clone,
 {
@@ -84,7 +177,8 @@ impl<T, M> IndexedParallelIterator for RangeBasedProducer<T, M> where
     }
 }
 
-impl<T, M> Producer for RangeBasedProducer<T, M> where
+impl<T, M> Producer for RangeBasedProducer<T, M>
+where
     T: Send,
     M: IndexMapOp<Item = T> + Send + Sync + Clone,
 {
@@ -94,19 +188,25 @@ impl<T, M> Producer for RangeBasedProducer<T, M> where
 
     fn into_iter(self) -> Self::IntoIter {
         let cursor = self.range.start;
-        RangeBasedParallelIterator { producer: self, cursor }
+        RangeBasedParallelIterator {
+            producer: self,
+            cursor,
+        }
     }
 
     fn split_at(self, index: usize) -> (Self, Self) {
-        (Self {
-            range: self.range.start..index,
-            mapper: self.mapper.clone(),
-            _marker: PhantomData,
-        }, Self {
-            range: index..self.range.end,
-            mapper: self.mapper,
-            _marker: PhantomData,
-        })
+        (
+            Self {
+                range: self.range.start..index,
+                mapper: self.mapper.clone(),
+                _marker: PhantomData,
+            },
+            Self {
+                range: index..self.range.end,
+                mapper: self.mapper,
+                _marker: PhantomData,
+            },
+        )
     }
 }
 
@@ -115,7 +215,8 @@ pub struct RangeBasedParallelIterator<T, M> {
     cursor: usize,
 }
 
-impl<T, M> Iterator for RangeBasedParallelIterator<T, M> where
+impl<T, M> Iterator for RangeBasedParallelIterator<T, M>
+where
     M: IndexMapOp<Item = T>,
 {
     type Item = T;
@@ -125,11 +226,14 @@ impl<T, M> Iterator for RangeBasedParallelIterator<T, M> where
             let ret = self.cursor;
             self.cursor += 1;
             Some(self.producer.mapper.map_index(ret))
-        } else { None }
+        } else {
+            None
+        }
     }
 }
 
-impl<T, M> ExactSizeIterator for RangeBasedParallelIterator<T, M> where
+impl<T, M> ExactSizeIterator for RangeBasedParallelIterator<T, M>
+where
     M: IndexMapOp<Item = T>,
 {
     fn len(&self) -> usize {
@@ -137,7 +241,8 @@ impl<T, M> ExactSizeIterator for RangeBasedParallelIterator<T, M> where
     }
 }
 
-impl<T, M> DoubleEndedIterator for RangeBasedParallelIterator<T, M> where
+impl<T, M> DoubleEndedIterator for RangeBasedParallelIterator<T, M>
+where
     M: IndexMapOp<Item = T>,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -145,6 +250,8 @@ impl<T, M> DoubleEndedIterator for RangeBasedParallelIterator<T, M> where
             let ret = self.cursor;
             self.cursor += 1;
             Some(self.producer.mapper.map_index(ret))
-        } else { None }
+        } else {
+            None
+        }
     }
 }

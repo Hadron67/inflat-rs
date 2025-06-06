@@ -14,7 +14,8 @@ impl WlEncode for f64 {
     }
 }
 
-impl<T: WlEncode> WlEncode for Complex<T> where
+impl<T: WlEncode> WlEncode for Complex<T>
+where
     T: PartialOrd + FromPrimitive,
 {
     fn encode<W: Write>(&self, write: &mut W) -> io::Result<()> {
@@ -60,6 +61,4 @@ pub enum FunctionHead<'a> {
     Other(&'a str),
 }
 
-pub fn write_array<T, W: Write>(arr: &[T], write: &mut W, packed: bool) {
-
-}
+pub fn write_array<T, W: Write>(arr: &[T], write: &mut W, packed: bool) {}

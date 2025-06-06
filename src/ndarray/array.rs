@@ -1,4 +1,8 @@
-use std::{marker::PhantomData, mem::MaybeUninit, ops::{Index, IndexMut, Range}};
+use std::{
+    marker::PhantomData,
+    mem::MaybeUninit,
+    ops::{Index, IndexMut, Range},
+};
 
 use num_traits::Zero;
 
@@ -15,7 +19,8 @@ pub trait RemovableList {
     fn remove_one_item(self, index: usize) -> Self::Removed;
 }
 
-impl<T, const N: usize> ListLike for [T; N] where
+impl<T, const N: usize> ListLike for [T; N]
+where
     T: Zero + Copy,
 {
     fn zeros(len: usize) -> Self {
@@ -38,7 +43,8 @@ fn permute<T: Copy, const N: usize>(list: [T; N], perm: &[u8]) -> [T; N] {
 
 macro_rules! impl_array_shape_for_array {
     ($len:expr) => {
-        impl<T> RemovableList for [T; $len] where
+        impl<T> RemovableList for [T; $len]
+        where
             T: Copy + Zero,
         {
             type Removed = [T; $len - 1];
@@ -76,7 +82,8 @@ impl<D> ArrayShape<D> {
     pub fn strides(&self) -> &D {
         &self.strides
     }
-    pub fn remove_axis(self, axis: usize) -> ArrayShape<D::Removed> where
+    pub fn remove_axis(self, axis: usize) -> ArrayShape<D::Removed>
+    where
         D: RemovableList,
     {
         ArrayShape {
@@ -84,7 +91,8 @@ impl<D> ArrayShape<D> {
             strides: self.strides.remove_one_item(axis),
         }
     }
-    pub fn size(&self) -> usize where
+    pub fn size(&self) -> usize
+    where
         D: Index<usize, Output = usize> + ListLike,
     {
         let mut ret = 1usize;
@@ -93,7 +101,8 @@ impl<D> ArrayShape<D> {
         }
         ret
     }
-    pub fn encode_coord<D2>(&self, coord: &D2) -> usize where
+    pub fn encode_coord<D2>(&self, coord: &D2) -> usize
+    where
         D: Index<usize, Output = usize> + ListLike,
         D2: Index<usize, Output = usize>,
     {
@@ -105,7 +114,8 @@ impl<D> ArrayShape<D> {
         }
         ret
     }
-    pub fn decode_coord(&self, mut index: usize) -> D where
+    pub fn decode_coord(&self, mut index: usize) -> D
+    where
         D: IndexMut<usize, Output = usize> + ListLike,
     {
         let mut ret = D::zeros(self.dims.len());
@@ -119,7 +129,8 @@ impl<D> ArrayShape<D> {
     }
 }
 
-impl<D> ArrayShape<D> where
+impl<D> ArrayShape<D>
+where
     D: IndexMut<usize, Output = usize> + ListLike,
 {
     pub fn from_dims(dims: D) -> Self {
@@ -128,15 +139,20 @@ impl<D> ArrayShape<D> where
     }
 }
 
-impl<D> Clone for ArrayShape<D> where
+impl<D> Clone for ArrayShape<D>
+where
     D: Clone,
 {
     fn clone(&self) -> Self {
-        Self { dims: self.dims.clone(), strides: self.strides.clone() }
+        Self {
+            dims: self.dims.clone(),
+            strides: self.strides.clone(),
+        }
     }
 }
 
-pub fn strides_from_dim<D>(dim: &D) -> D where
+pub fn strides_from_dim<D>(dim: &D) -> D
+where
     D: IndexMut<usize, Output = usize> + ListLike,
 {
     let len = dim.len();
@@ -164,7 +180,8 @@ impl<'data, T, D> ArrayViewMut<'data, T, D> {
 }
 
 impl<'data, T, D> ArrayViewMut<'data, T, D> {
-    pub fn map_indexed_mut<F>(&mut self, mut mapper: F) where
+    pub fn map_indexed_mut<F>(&mut self, mut mapper: F)
+    where
         F: FnMut(T, &D) -> T,
         D: IndexMut<usize, Output = usize> + ListLike + Clone,
         T: Copy,
@@ -177,7 +194,8 @@ impl<'data, T, D> ArrayViewMut<'data, T, D> {
     }
 }
 
-impl<'data, T, D> ArrayViewMut<'data, T, D> where
+impl<'data, T, D> ArrayViewMut<'data, T, D>
+where
     D: IndexMut<usize, Output = usize> + ListLike + Clone,
 {
     pub fn from_dims_ref_mut(ptr: &'data mut [T], dims: D) -> Self {
@@ -197,7 +215,8 @@ impl<'data, T, D> ArrayViewMut<'data, T, D> where
             shape,
         }
     }
-    pub fn slice_axis_move(self, axis: usize, range: Range<usize>) -> ArrayViewMut<'data, T, D> where
+    pub fn slice_axis_move(self, axis: usize, range: Range<usize>) -> ArrayViewMut<'data, T, D>
+    where
         D: RemovableList,
     {
         let mut shape = self.shape;
@@ -218,17 +237,24 @@ impl<'data, T, D> ArrayViewMut<'data, T, D> where
         let mut shape2 = self.shape.clone();
         self.shape.dims[axis] = index;
         shape2.dims[axis] -= index;
-        (Self {
-            ptr: self.ptr,
-            _ptr: PhantomData,
-            shape: self.shape.clone(),
-        }, Self {
-            ptr: unsafe { self.ptr.add(index * shape2.strides[axis]) },
-            _ptr: PhantomData,
-            shape: shape2,
-        })
+        (
+            Self {
+                ptr: self.ptr,
+                _ptr: PhantomData,
+                shape: self.shape.clone(),
+            },
+            Self {
+                ptr: unsafe { self.ptr.add(index * shape2.strides[axis]) },
+                _ptr: PhantomData,
+                shape: shape2,
+            },
+        )
     }
-    pub fn slice_iter_mut_move(self, axis: usize) -> SliceIterMut<'data, T, <D as RemovableList>::Removed> where
+    pub fn slice_iter_mut_move(
+        self,
+        axis: usize,
+    ) -> SliceIterMut<'data, T, <D as RemovableList>::Removed>
+    where
         D: IndexMut<usize, Output = usize> + ListLike + Clone + RemovableList,
         <D as RemovableList>::Removed: ListLike,
     {
@@ -248,7 +274,8 @@ impl<'data, T, D> ArrayViewMut<'data, T, D> where
     }
 }
 
-impl<'data, T, D, D2> Index<D2> for ArrayViewMut<'data, T, D> where
+impl<'data, T, D, D2> Index<D2> for ArrayViewMut<'data, T, D>
+where
     D: Index<usize, Output = usize> + ListLike,
     D2: Index<usize, Output = usize>,
 {
@@ -259,7 +286,8 @@ impl<'data, T, D, D2> Index<D2> for ArrayViewMut<'data, T, D> where
     }
 }
 
-impl<'data, T, D, D2> IndexMut<D2> for ArrayViewMut<'data, T, D> where
+impl<'data, T, D, D2> IndexMut<D2> for ArrayViewMut<'data, T, D>
+where
     D: Index<usize, Output = usize> + ListLike,
     D2: Index<usize, Output = usize>,
 {
@@ -277,14 +305,20 @@ pub struct SliceIterMut<'a, T, D> {
     cursor: usize,
 }
 
-impl<'a, T, D> Iterator for SliceIterMut<'a, T, D> where
+impl<'a, T, D> Iterator for SliceIterMut<'a, T, D>
+where
     D: IndexMut<usize, Output = usize> + Clone + ListLike,
 {
     type Item = ArrayViewMut<'a, T, D>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor < self.len {
-            let ret = unsafe { ArrayViewMut::from_shape_ptr_mut(self.ptr.add(self.stride * self.cursor), self.shape.clone()) };
+            let ret = unsafe {
+                ArrayViewMut::from_shape_ptr_mut(
+                    self.ptr.add(self.stride * self.cursor),
+                    self.shape.clone(),
+                )
+            };
             self.cursor += 1;
             Some(ret)
         } else {
@@ -293,7 +327,8 @@ impl<'a, T, D> Iterator for SliceIterMut<'a, T, D> where
     }
 }
 
-impl<'a, T, D> ExactSizeIterator for SliceIterMut<'a, T, D> where
+impl<'a, T, D> ExactSizeIterator for SliceIterMut<'a, T, D>
+where
     D: IndexMut<usize, Output = usize> + Clone + ListLike,
 {
     fn len(&self) -> usize {
@@ -301,12 +336,18 @@ impl<'a, T, D> ExactSizeIterator for SliceIterMut<'a, T, D> where
     }
 }
 
-impl<'a, T, D> DoubleEndedIterator for SliceIterMut<'a, T, D> where
+impl<'a, T, D> DoubleEndedIterator for SliceIterMut<'a, T, D>
+where
     D: IndexMut<usize, Output = usize> + Clone + ListLike,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.cursor > 0 {
-            let ret = unsafe { ArrayViewMut::from_shape_ptr_mut(self.ptr.add(self.stride * self.cursor), self.shape.clone()) };
+            let ret = unsafe {
+                ArrayViewMut::from_shape_ptr_mut(
+                    self.ptr.add(self.stride * self.cursor),
+                    self.shape.clone(),
+                )
+            };
             self.cursor -= 1;
             Some(ret)
         } else {
@@ -330,7 +371,7 @@ mod tests {
         part1[[1, 1, 3]] = 13;
         part2[[1, 1, 1]] = 14;
         part2[[2, 2, 1]] = 15;
-        let arr =ArrayViewMut::from_dims_ref_mut(&mut data, [8, 8, 8]);
+        let arr = ArrayViewMut::from_dims_ref_mut(&mut data, [8, 8, 8]);
         assert_eq!(arr[[1, 0, 1]], 12);
         assert_eq!(arr[[1, 1, 3]], 13);
         assert_eq!(arr[[1, 5, 1]], 14);
