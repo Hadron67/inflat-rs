@@ -80,7 +80,11 @@ pub trait ScaleFactor {
 }
 
 pub trait ScaleFactorD {
-    fn v_scale_factor(&self) -> f64;
+    fn v_scale_factor(&self, kappa: f64) -> f64;
+}
+
+pub trait Kappa {
+    fn kappa(&self) -> f64;
 }
 
 #[derive(Clone, Copy, Encode, Decode, Debug)]
@@ -245,8 +249,8 @@ impl Dt for BackgroundState {
 
 #[derive(Debug, Clone, Copy, Encode, Decode)]
 pub struct TwoFieldBackgroundState {
-    pub a: f64,
-    pub mom_a: f64,
+    pub b: f64,
+    pub mom_b: f64,
     pub phi: f64,
     pub mom_phi: f64,
     pub chi: f64,
@@ -288,21 +292,15 @@ impl TwoFieldBackgroundState {
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        let a2 = a * a;
-        let a4 = a2 * a2;
-        let a6 = a2 * a4;
-        let mom_phi = v_phi * a * a;
-        let mom_chi = v_chi * a * a * exp(2.0 * input.b.value(phi));
-        let mom_a = -sqrt(
-            (exp(-2.0 * input.b.value(phi)) * mom_chi * mom_chi
-                + mom_phi * mom_phi
-                + 2.0 * input.v.value_00(phi, chi) * a6)
-                * 6.0
-                / input.kappa,
-        ) / a;
+        let b = 2.0 / 3.0 * pow(a, 3.0 / 2.0);
+        let mom_phi = v_phi * 9.0 / 4.0 * b * b;
+        let mom_chi = v_chi * 9.0 / 4.0 * b * b * exp(2.0 * input.b.value(phi));
+        let mom_b = -sqrt(
+            (v_phi * v_phi + exp(2.0 * input.b.value(phi)) * v_chi * v_chi + 2.0 * input.v.value_00(phi, chi)) * 3.0 / 2.0 / input.kappa
+        ) * 3.0 * b;
         Self {
-            a,
-            mom_a,
+            b,
+            mom_b,
             phi,
             mom_phi,
             chi,
@@ -321,24 +319,15 @@ impl TwoFieldBackgroundState {
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        let a2 = a * a;
-        let a4 = a2 * a2;
-        let a6 = a4 * a2;
+        let b = 2.0 / 3.0 * pow(a, 3.0 / 2.0);
         let mom_chi = v_chi * a * a * exp(2.0 * input.b.value(phi));
-        let mom_a = -sqrt(
-            (exp(-2.0 * input.b.value(phi)) * mom_chi * mom_chi
-                + 2.0 * input.v.value_00(phi, chi) * a6)
-                * 6.0
-                / input.kappa,
-        ) / a;
-        let mom_phi = 2.0 * a4 * a * input.v.value_10(phi, chi) / mom_a / input.kappa
-            - 2.0 * exp(-2.0 * input.b.value(phi)) * mom_chi * mom_chi * input.b.value_d(phi)
-                / mom_a
-                / input.kappa
-                / a;
+        let mom_b = -sqrt(
+            (exp(2.0 * input.b.value(phi)) * v_chi * v_chi + 2.0 * input.v.value_00(phi, chi)) * 3.0 / 2.0 / input.kappa
+        ) * 3.0 * b;
+        let mom_phi = -27.0 / 4.0 * 1.0 / mom_b * 1.0 / input.kappa * b * b * b * exp(2.0 * input.b.value(phi)) * v_chi * v_chi * input.b.value_d(phi) + -1.0 * input.v.value_10(phi,chi);
         Self {
-            a,
-            mom_a,
+            b,
+            mom_b,
             phi,
             mom_phi,
             chi,
@@ -351,38 +340,35 @@ impl TwoFieldBackgroundState {
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        self.a += -dt * self.mom_a * input.kappa / 6.0;
+        self.b += -dt * self.mom_b * input.kappa / 6.0;
     }
     fn apply_k2<F1, F2>(&mut self, dt: f64, input: &TwoFieldBackgroundInput<F1, F2>)
     where
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        let a2 = self.a * self.a;
-        let a3 = self.a * a2;
+        let b2 = self.b * self.b;
+        self.mom_b += dt * 4.0 / 9.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi / self.b * self.mom_chi / b2;
         self.mom_phi += dt
-            * exp(-2.0 * input.b.value(self.phi))
-            * self.mom_chi
-            * self.mom_chi
-            * input.b.value_d(self.phi)
-            / a2;
-        self.chi += dt * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi / a2;
-        self.mom_a += dt * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi / a3;
+            * 4.0 / 9.0 * exp(-2.0 * input.b.value(self.phi))
+            * self.mom_chi / self.b
+            * self.mom_chi / self.b
+            * input.b.value_d(self.phi);
+        self.chi += dt * 4.0 / 9.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi / b2;
     }
     fn apply_k3(&mut self, dt: f64) {
-        self.phi += dt * self.mom_phi / self.a / self.a;
-        self.mom_a += dt * self.mom_phi * self.mom_phi / self.a / self.a / self.a;
+        self.mom_b += dt * 4.0 / 9.0 * self.mom_phi / self.b * self.mom_phi / self.b / self.b;
+        self.phi += dt * 4.0 / 9.0 * self.mom_phi / self.b / self.b;
     }
     fn apply_k4<F1, F2>(&mut self, dt: f64, input: &TwoFieldBackgroundInput<F1, F2>)
     where
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        let a2 = self.a * self.a;
-        let a4 = a2 * a2;
-        self.mom_phi += -dt * a4 * input.v.value_10(self.phi, self.chi);
-        self.mom_chi += -dt * a4 * input.v.value_01(self.phi, self.chi);
-        self.mom_a += -dt * 4.0 * a2 * self.a * input.v.value_00(self.phi, self.chi);
+        let b2 = self.b * self.b;
+        self.mom_b += -dt * 4.5 * self.b * input.v.value_00(self.phi, self.chi);
+        self.mom_phi += -dt * 9.0 / 4.0 * b2 * input.v.value_10(self.phi, self.chi);
+        self.mom_chi += -dt * 9.0 / 4.0 * b2 * input.v.value_01(self.phi, self.chi);
     }
     pub fn apply_full_k_order2<F1, F2>(&mut self, dt: f64, input: &TwoFieldBackgroundInput<F1, F2>)
     where
@@ -402,75 +388,88 @@ impl TwoFieldBackgroundState {
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        3.0 - 36.0 * input.v.value_00(self.phi, self.chi) * self.a * self.a * self.a * self.a
-            / input.kappa
-            / self.mom_a
-            / self.mom_a
+        3.0 + -81.0 * 1.0 / self.mom_b / self.mom_b * 1.0 / input.kappa * input.v.value_00(self.phi,self.chi) * self.b * self.b
     }
     pub fn hubble_constraint<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64
     where
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        let a2 = self.a * self.a;
-        let a4 = a2 * a2;
-        let a6 = a4 * a2;
-        0.5 * input.v.value_00(self.phi, self.chi)
-            + exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi / 4.0 / a6
-            + self.mom_phi * self.mom_phi / 4.0 / a6
-            - self.mom_a * self.mom_a * input.kappa / 24.0 / a4
-    }
-    #[rustfmt::skip]
-    pub fn intermediate_potential<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>, k: f64, alpha: f64, lambda: f64) -> f64 where
-        F1: C2Fn<f64>,
-        F2: C2Fn2<f64, f64, Ret = f64>,
-    {
-        5.0 / 36.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * self.mom_a * self.mom_a * alpha * input.kappa * input.kappa * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a + exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * k * k * alpha * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a + -1.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * alpha * input.kappa * input.kappa * lambda * input.v.value_00(self.phi,self.chi) * 1.0 / self.a / self.a + -1.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * self.mom_phi * self.mom_a * alpha * input.kappa * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) + -1.0 / 6.0 * exp(-2.0 * input.b.value(self.phi)) * k * self.mom_a * alpha * input.kappa * input.kappa * lambda * 1.0 / self.a * input.v.value_01(self.phi,self.chi)
+        1.0 / 4.0 * self.v_phi() * self.v_phi() + 1.0 / 4.0 * exp(2.0 * input.b.value(self.phi)) * self.v_chi(input) * self.v_chi(input) + 1.0 / 2.0 * input.v.value_00(self.phi,self.chi) + -3.0 / 2.0 * 1.0 / input.kappa * 1.0 / self.a() / self.a() * self.v_a(input) * self.v_a(input)
     }
     #[rustfmt::skip]
     pub fn normalized_potential<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>, k: f64, alpha: f64, lambda: f64) -> f64 where
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        let num = 1.0 / 3.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * self.mom_a * self.mom_a * alpha * alpha * input.kappa * input.kappa * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a + 2.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * self.mom_a * self.mom_a * alpha * input.kappa * input.kappa * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a + -4.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * alpha * alpha * input.kappa * input.kappa * input.kappa * lambda * lambda * input.v.value_00(self.phi,self.chi) * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a + -8.0 / 3.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * self.mom_phi * self.mom_a * alpha * alpha * input.kappa * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) + -16.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * self.mom_phi * self.mom_a * alpha * input.kappa * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) + 4.0 * exp(-6.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * self.mom_chi * self.mom_chi * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 12.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * self.mom_phi * self.mom_phi * alpha * alpha * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -4.0 / 3.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * self.mom_a * self.mom_a * alpha * alpha * input.kappa * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 4.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * self.mom_chi * k * alpha * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * self.mom_phi * self.mom_phi * alpha * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -4.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * self.mom_a * self.mom_a * alpha * input.kappa * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * input.v.value_00(self.phi,self.chi) * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * alpha * input.kappa * lambda * input.v.value_00(self.phi,self.chi) * 1.0 / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 4.0 * exp(-6.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * self.mom_chi * self.mom_chi * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_dd(self.phi) + -2.0 / 3.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * self.mom_a * self.mom_a * alpha * alpha * input.kappa * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_dd(self.phi) + 4.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * self.mom_chi * k * alpha * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_dd(self.phi) + -2.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * self.mom_a * self.mom_a * alpha * input.kappa * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_dd(self.phi) + 8.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * input.v.value_00(self.phi,self.chi) * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_dd(self.phi) + 8.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * alpha * input.kappa * lambda * input.v.value_00(self.phi,self.chi) * 1.0 / self.a / self.a * input.b.value_dd(self.phi) + 2.0 / 3.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * k * k * self.mom_a * alpha * alpha * input.kappa * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a * input.v.value_01(self.phi,self.chi) + -2.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * k * self.mom_a * alpha * input.kappa * input.kappa * lambda * 1.0 / self.a * input.v.value_01(self.phi,self.chi) + 4.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * k * k * self.mom_phi * alpha * alpha * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + 8.0 * exp(-2.0 * input.b.value(self.phi)) * k * self.mom_phi * alpha * input.kappa * lambda * 1.0 / self.a / self.a * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + -1.0 * exp(-4.0 * input.b.value(self.phi)) * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * input.v.value_01(self.phi,self.chi) * input.v.value_01(self.phi,self.chi) + -2.0 * exp(-6.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.v.value_02(self.phi,self.chi) + -2.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * k * alpha * input.kappa * lambda * 1.0 / self.a / self.a * input.v.value_02(self.phi,self.chi) + 4.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * alpha * input.kappa * lambda * 1.0 / self.a / self.a * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + -2.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * k * k * self.mom_phi * alpha * alpha * input.kappa * input.kappa * lambda * lambda * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.v.value_11(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * self.mom_phi * alpha * input.kappa * lambda * 1.0 / self.a / self.a * input.v.value_11(self.phi,self.chi);
-        let den = 2.0 + 2.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * alpha * input.kappa * lambda * 1.0 / self.a / self.a / self.a / self.a;
-        num / den / den
+        // TODO
+        0.0
     }
     pub fn normalized_horizon_potential<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>, k: f64, alpha: f64, lambda: f64) -> f64 where
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        let num = 1.0 / 9.0 * self.mom_a * self.mom_a * input.kappa * input.kappa * self.a * self.a + -4.0 * input.kappa * input.v.value_00(self.phi,self.chi) * self.a * self.a * self.a * self.a * self.a * self.a;
-        let den = 2.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * k * alpha * input.kappa * lambda * 1.0 / self.a / self.a + self.a * self.a;
-        num / den / den
-    }
-    pub fn vv_chi<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64 where
-        F1: C2Fn<f64>,
-        F2: C2Fn2<f64, f64, Ret = f64>,
-    {
-        1.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_a * input.kappa * 1.0 / self.a / self.a / self.a + -2.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_phi * 1.0 / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) + -1.0 * exp(-2.0 * input.b.value(self.phi)) * self.a * self.a * input.v.value_01(self.phi,self.chi)
-    }
-    #[rustfmt::skip]
-    pub fn vvv_chi<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64 where
-        F1: C2Fn<f64>,
-        F2: C2Fn2<f64, f64, Ret = f64>,
-    {
-        -2.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * input.kappa * input.v.value_00(self.phi,self.chi) + 2.0 / 9.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_a * self.mom_a * input.kappa * input.kappa * 1.0 / self.a / self.a / self.a / self.a + -2.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_phi * self.mom_a * input.kappa * 1.0 / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) + 8.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * input.v.value_00(self.phi,self.chi) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 2.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * self.mom_chi * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 8.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_phi * self.mom_phi * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -2.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_a * self.mom_a * input.kappa * 1.0 / self.a / self.a / self.a / self.a * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * input.v.value_00(self.phi,self.chi) * input.b.value_dd(self.phi) + 2.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_chi * self.mom_chi * 1.0 / self.a / self.a / self.a / self.a / self.a / self.a * input.b.value_dd(self.phi) + -1.0 / 3.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * self.mom_a * self.mom_a * input.kappa * 1.0 / self.a / self.a / self.a / self.a * input.b.value_dd(self.phi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_phi * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + -1.0 * exp(-4.0 * input.b.value(self.phi)) * self.mom_chi * input.v.value_02(self.phi,self.chi) + 2.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + -1.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_phi * input.v.value_11(self.phi,self.chi)
+        // TODO
+        0.0
     }
     pub fn v_chi<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64
     where
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        exp(-2.0 * input.b.value(self.phi)) * self.mom_chi / self.a / self.a
+        4.0 / 9.0 * exp(-2.0 * input.b.value(self.phi)) * self.mom_chi * 1.0 / self.b / self.b
     }
-    pub fn vv_a<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64
+    pub fn vv_chi<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64
     where
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
     {
-        -1.0 / 36.0 * self.mom_a * self.mom_a * input.kappa * input.kappa * 1.0 / self.a
-            + input.kappa * input.v.value_00(self.phi, self.chi) * self.a * self.a * self.a
+        -2.0 * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) + -3.0 * self.v_chi(input) * 1.0 / self.a() * self.v_a(input) + -1.0 * exp(-2.0 * input.b.value(self.phi)) * input.v.value_01(self.phi,self.chi)
+    }
+    pub fn v_phi(&self) -> f64 {
+        4.0 / 9.0 * self.mom_phi * 1.0 / self.b / self.b
+    }
+    pub fn a(&self) -> f64 {
+        pow(1.5 * self.b, 2.0 / 3.0)
+    }
+    pub fn v_a<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64 {
+        self.v_b(input) / self.a().sqrt()
+    }
+    pub fn v_b<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64 {
+        -self.mom_b * input.kappa / 6.0
+    }
+    pub fn horizon<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>, k: f64, alpha: f64, lambda: f64) -> f64
+    where
+        F1: C2Fn<f64>,
+        F2: C2Fn2<f64, f64, Ret = f64>,
+    {
+        let num = -4.0 * self.v_a(input) * self.v_a(input) + 24.0 * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) + 12.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * self.v_chi(input) + 4.0 * self.a() * self.a() * input.kappa * input.v.value_00(self.phi,self.chi) + -4.0 * k * k * alpha * alpha * input.kappa * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_00(self.phi,self.chi) + 32.0 * k * alpha * input.kappa * lambda * self.v_a(input) * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) + 16.0 * k * k * 1.0 / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_a(input) * self.v_phi() * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) + -48.0 * k * 1.0 / self.a() * alpha * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * k * self.a() * alpha * input.kappa * lambda * self.v_phi() * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -48.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * lambda * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 12.0 * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_phi() * self.v_phi() * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * self.a() * alpha * input.kappa * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * k * self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -24.0 * k * 1.0 / self.a() * alpha * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * input.b.value_dd(self.phi) + -24.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * lambda * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * self.a() * alpha * input.kappa * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 8.0 * k * self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_dd(self.phi) + 8.0 * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_dd(self.phi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * k * alpha * input.kappa * lambda * self.v_a(input) * input.v.value_01(self.phi,self.chi) + -4.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_a(input) * self.v_chi(input) * input.v.value_01(self.phi,self.chi) + 8.0 * exp(-2.0 * input.b.value(self.phi)) * k * self.a() * alpha * input.kappa * lambda * self.v_phi() * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + -1.0 * exp(-4.0 * input.b.value(self.phi)) * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * input.v.value_01(self.phi,self.chi) * input.v.value_01(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.v.value_02(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_02(self.phi,self.chi) + 4.0 * k * self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + 4.0 * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * self.a() * alpha * input.kappa * lambda * self.v_phi() * input.v.value_11(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_phi() * self.v_chi(input) * input.v.value_11(self.phi,self.chi);
+        let den = 2.0 + 2.0 * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input);
+        num / den / den
+    }
+    pub fn fa<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>, k: f64, alpha: f64, lambda: f64) -> f64
+    where
+        F1: C2Fn<f64>,
+        F2: C2Fn2<f64, f64, Ret = f64>,
+    {
+        let a = self.a();
+        a * sqrt(a + k * lambda * alpha * input.kappa * self.v_chi(input)) / 2.0 / input.kappa.sqrt()
+    }
+    pub fn fa_potential<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>, k: f64, alpha: f64, lambda: f64) -> f64
+    where
+        F1: C2Fn<f64>,
+        F2: C2Fn2<f64, f64, Ret = f64>,
+    {
+        let num = -9.0 * 1.0 / self.a() / self.a() * self.v_a(input) * self.v_a(input) + 14.0 * k * 1.0 / self.a() / self.a() / self.a() * alpha * input.kappa * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) + 7.0 * k * k * 1.0 / self.a() / self.a() / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * self.v_chi(input) + 6.0 * input.kappa * input.v.value_00(self.phi,self.chi) + 4.0 * k * 1.0 / self.a() * alpha * input.kappa * input.kappa * lambda * self.v_chi(input) * input.v.value_00(self.phi,self.chi) + -2.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_00(self.phi,self.chi) + 32.0 * k * 1.0 / self.a() / self.a() * alpha * input.kappa * lambda * self.v_a(input) * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) + 16.0 * k * k * 1.0 / self.a() / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_a(input) * self.v_phi() * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) + -48.0 * k * 1.0 / self.a() / self.a() / self.a() * alpha * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_phi() * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -48.0 * k * k * 1.0 / self.a() / self.a() / self.a() / self.a() * alpha * alpha * input.kappa * lambda * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 12.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_phi() * self.v_phi() * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 16.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -24.0 * k * 1.0 / self.a() / self.a() / self.a() * alpha * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * input.b.value_dd(self.phi) + -24.0 * k * k * 1.0 / self.a() / self.a() / self.a() / self.a() * alpha * alpha * input.kappa * lambda * lambda * self.v_a(input) * self.v_a(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 4.0 * exp(2.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 8.0 * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_dd(self.phi) + 8.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_dd(self.phi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * k * 1.0 / self.a() / self.a() * alpha * input.kappa * lambda * self.v_a(input) * input.v.value_01(self.phi,self.chi) + -4.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_a(input) * self.v_chi(input) * input.v.value_01(self.phi,self.chi) + 8.0 * exp(-2.0 * input.b.value(self.phi)) * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_phi() * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + -1.0 * exp(-4.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * input.v.value_01(self.phi,self.chi) * input.v.value_01(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.v.value_02(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.v.value_02(self.phi,self.chi) + 4.0 * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input) * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + 4.0 * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_phi() * input.v.value_11(self.phi,self.chi) + -2.0 * exp(-2.0 * input.b.value(self.phi)) * k * k * 1.0 / self.a() / self.a() * alpha * alpha * input.kappa * input.kappa * lambda * lambda * self.v_phi() * self.v_chi(input) * input.v.value_11(self.phi,self.chi);
+        let den = 2.0 + 2.0 * k * 1.0 / self.a() * alpha * input.kappa * lambda * self.v_chi(input);
+        num / den / den
+    }
+    pub fn vvv_chi<F1, F2>(&self, input: &TwoFieldBackgroundInput<F1, F2>) -> f64
+    where
+        F1: C2Fn<f64>,
+        F2: C2Fn2<f64, f64, Ret = f64>,
+    {
+        18.0 * 1.0 / self.a() / self.a() * self.v_a(input) * self.v_a(input) * self.v_chi(input) + -3.0 * input.kappa * self.v_chi(input) * input.v.value_00(self.phi,self.chi) + 18.0 * 1.0 / self.a() * self.v_a(input) * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) + -24.0 * 1.0 / self.a() / self.a() * 1.0 / input.kappa * self.v_a(input) * self.v_a(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 8.0 * self.v_phi() * self.v_phi() * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 2.0 * exp(2.0 * input.b.value(self.phi)) * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + 8.0 * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_d(self.phi) * input.b.value_d(self.phi) + -12.0 * 1.0 / self.a() / self.a() * 1.0 / input.kappa * self.v_a(input) * self.v_a(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 2.0 * exp(2.0 * input.b.value(self.phi)) * self.v_chi(input) * self.v_chi(input) * self.v_chi(input) * input.b.value_dd(self.phi) + 4.0 * self.v_chi(input) * input.v.value_00(self.phi,self.chi) * input.b.value_dd(self.phi) + 3.0 * exp(-2.0 * input.b.value(self.phi)) * 1.0 / self.a() * self.v_a(input) * input.v.value_01(self.phi,self.chi) + 4.0 * exp(-2.0 * input.b.value(self.phi)) * self.v_phi() * input.b.value_d(self.phi) * input.v.value_01(self.phi,self.chi) + -1.0 * exp(-2.0 * input.b.value(self.phi)) * self.v_chi(input) * input.v.value_02(self.phi,self.chi) + 2.0 * self.v_chi(input) * input.b.value_d(self.phi) * input.v.value_10(self.phi,self.chi) + -1.0 * exp(-2.0 * input.b.value(self.phi)) * self.v_phi() * input.v.value_11(self.phi,self.chi)
     }
     pub fn update<F1, F2>(&mut self, dt: f64, input: &TwoFieldBackgroundInput<F1, F2>)
     where
@@ -491,15 +490,17 @@ impl TwoFieldBackgroundState {
         F1: C2Fn<f64>,
         F2: C2Fn2<f64, f64, Ret = f64>,
         Cond: FnMut(&Self) -> bool,
-        Step: FnMut(&Self),
+        Step: FnMut(&Self, f64),
     {
+        let mut time = 0.0;
         let mut state = *self;
         let mut ret = vec![state];
         while !stop_condition(&state) {
-            state.dt = fmin(-dn * state.a / state.mom_a / input.kappa * 6.0, min_dt);
+            state.dt = fmin(-dn * state.b / state.mom_b / input.kappa * 6.0, min_dt);
             state.update(state.dt, input);
-            step_monitor(&state);
+            step_monitor(&state, time);
             ret.push(state);
+            time += state.dt;
         }
         ret
     }
@@ -507,7 +508,19 @@ impl TwoFieldBackgroundState {
 
 impl TimeStateData for TwoFieldBackgroundState {
     fn interpolate(&self, other: &Self, l: f64) -> Self {
-        interpolate_fields!(Self, self, other, l, a, mom_a, phi, mom_phi, chi, mom_chi)
+        interpolate_fields!(Self, self, other, l, b, mom_b, phi, mom_phi, chi, mom_chi)
+    }
+}
+
+impl ScaleFactor for TwoFieldBackgroundState {
+    fn scale_factor(&self) -> f64 {
+        pow(1.5 * self.b, 2.0 / 3.0)
+    }
+}
+
+impl ScaleFactorD for TwoFieldBackgroundState {
+    fn v_scale_factor(&self, kappa: f64) -> f64 {
+        -self.mom_b * kappa / 6.0 / self.scale_factor().sqrt()
     }
 }
 
@@ -585,23 +598,43 @@ impl LinearInterpolator {
 }
 
 pub trait BackgroundFn<Context: ?Sized, Background: ?Sized> {
-    fn apply(&self, context: &Context, state: &Background, k: f64) -> f64;
+    type Output;
+    fn apply(&self, context: &Context, state: &Background, k: f64) -> Self::Output;
 }
 
-pub struct HamitonianSimulator<'a, 'c, Ctx: ?Sized, I: ?Sized, B, Mass, SubHorizon, SuperHorizon> {
-    context: &'c Ctx,
+pub struct TensorPerturbationInitializer;
+impl<Ctx, B> BackgroundFn<Ctx, B> for TensorPerturbationInitializer where
+    B: ScaleFactorD + ScaleFactor,
+    Ctx: Kappa,
+{
+    type Output = (Complex64, Complex64);
+
+    fn apply(&self, context: &Ctx, state: &B, k: f64) -> Self::Output {
+        let a = state.scale_factor();
+        let v_a = state.v_scale_factor(context.kappa());
+        let h0 = 1.0 / sqrt(2.0 * k);
+        let x = Complex64::new(h0 * a.sqrt(), 0.0);
+        let v = Complex64::new(
+            v_a / a.sqrt() / 2.0 * h0,
+            -k * h0 / a.sqrt(),
+        );
+        (x, v)
+    }
+}
+
+pub struct HamitonianSimulator<'a, 'b, Ctx: ?Sized, I: ?Sized, B, Initializer, Potential, Horizon, PertCoef> {
+    context: &'b Ctx,
     length: usize,
     background_state: &'a I,
     _background_elem: PhantomData<&'a [B]>,
-    time_interpolator: LinearInterpolator,
-    state: HamitonianState<Complex64>,
-    mass: Mass,
-    subhorizon_potential: SubHorizon,
-    superhorizon_potential: SuperHorizon,
+    potential: Potential,
+    horizon: Horizon,
+    initializer: Initializer,
+    pert_coef: PertCoef,
 }
 
-impl<'a, 'c, Ctx, I, B, Mass, SubHorizon, SuperHorizon>
-    HamitonianSimulator<'a, 'c, Ctx, I, B, Mass, SubHorizon, SuperHorizon>
+impl<'a, 'c, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
+    HamitonianSimulator<'a, 'c, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
 where
     I: Index<usize, Output = B> + ?Sized,
     Ctx: ?Sized,
@@ -610,46 +643,38 @@ where
         context: &'c Ctx,
         length: usize,
         background_state: &'a I,
-        mass: Mass,
-        subhorizon_potential: SubHorizon,
-        superhorizon_potential: SuperHorizon,
+        initializer: Initializer,
+        potential: Potential,
+        horizon: Horizon,
+        pert_coef: PertCoef,
     ) -> Self {
         Self {
             context,
             length,
             background_state,
             _background_elem: PhantomData,
-            time_interpolator: LinearInterpolator {
-                cursor: 0,
-                local_time: 0.0,
-            },
-            state: HamitonianState {
-                x: 0.0.into(),
-                mom: 0.0.into(),
-            },
-            mass,
-            subhorizon_potential,
-            superhorizon_potential,
+            initializer,
+            potential,
+            horizon,
+            pert_coef,
         }
     }
 }
 
-impl<'a, 'c, Ctx, I, B, Mass, SubHorizon, SuperHorizon>
-    HamitonianSimulator<'a, 'c, Ctx, I, B, Mass, SubHorizon, SuperHorizon>
+impl<'a, 'c, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
+    HamitonianSimulator<'a, 'c, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
 where
     Ctx: ?Sized,
     I: Index<usize, Output = B> + ?Sized,
     B: TimeStateData + Dt,
-    Mass: BackgroundFn<Ctx, B>,
-    SubHorizon: BackgroundFn<Ctx, B>,
-    SuperHorizon: BackgroundFn<Ctx, B>,
+    Potential: BackgroundFn<Ctx, B, Output = f64>,
+    Horizon: BackgroundFn<Ctx, B, Output = f64>,
+    Initializer: BackgroundFn<Ctx, B, Output = (Complex64, Complex64)>,
+    PertCoef: BackgroundFn<Ctx, B, Output = f64>,
 {
     fn horizon_ratio(&self, index: usize, k: f64) -> f64 {
         let state = &self.background_state[index];
-        k * k
-            / (self.subhorizon_potential.apply(self.context, &state, k)
-                + self.superhorizon_potential.apply(self.context, &state, k))
-            .abs()
+        k * k / self.horizon.apply(self.context, &state, k)
     }
     fn first_horizon_ratio_index(&self, k: f64, tolerance: f64) -> usize {
         let mut index = 0usize;
@@ -658,46 +683,44 @@ where
         }
         index
     }
-    pub fn run<F>(&mut self, k: f64, da: f64, tolerance: f64, mut consumer: F)
+    pub fn run<F>(&self, k: f64, tolerance: f64, da: f64, mut consumer: F) -> Complex64
     where
-        F: FnMut(&mut Self, &B, &HamitonianState<Complex64>, f64, f64),
+        F: FnMut(&Self, &B, &HamitonianState<Complex64>, Complex64, f64, f64),
     {
         let start_index = self.first_horizon_ratio_index(k,tolerance);
         let end_index = self.first_horizon_ratio_index(k, 1.0 / tolerance);
-        println!("start i = {}, end i = {}", start_index, end_index);
-        self.time_interpolator = LinearInterpolator {
+        let mut time_interpolator = LinearInterpolator {
             cursor: start_index,
             local_time: 0.0,
         };
-        self.state = HamitonianState::init_bd_vacuum(
-            self.mass.apply(self.context, &self.background_state[0], k),
-            k,
-        );
-        while self.time_interpolator.cursor < end_index {
-            let background_state = self.time_interpolator.get(self.background_state);
-            let mass = self.mass.apply(self.context, &background_state, k);
-            let potential = k * k
-                + self
-                    .subhorizon_potential
-                    .apply(self.context, &background_state, k)
-                + self
-                    .superhorizon_potential
-                    .apply(self.context, &background_state, k);
-            let dt = fmin(background_state.dt(), da / potential.abs().sqrt());
-            let mut state = self.state;
-            state.apply_full_k_order2(dt, mass.into(), potential.into());
-            self.state = state;
-            consumer(self, &background_state, &state, potential, dt);
-            self.time_interpolator.advance(self.background_state, dt);
+        let (x0, v0) = self.initializer.apply(self.context, &self.background_state[start_index], k);
+        let mut state = HamitonianState {x: x0, mom: v0.conj()};
+        while time_interpolator.cursor < end_index {
+            let background_state = time_interpolator.get(self.background_state);
+            let potential = self.potential.apply(self.context, &background_state, k);
+            let dt = if potential > 0.0 {
+                fmin(da / potential.sqrt(), background_state.dt())
+            } else {
+                background_state.dt()
+            };
+            state.apply_full_k_order2(dt, 1.0.into(), potential.into());
+            consumer(self, &background_state, &state, state.x * self.pert_coef.apply(self.context, &background_state, k), potential, dt);
+            time_interpolator.advance(self.background_state, dt);
         }
+        let background_state = time_interpolator.get(self.background_state);
+        state.x * self.pert_coef.apply(self.context, &background_state, k)
     }
-    // pub fn spectrum(&mut self, k_range: (f64, f64), count: usize, da: f64) {
-    //     let done_count = AtomicUsize::new(0);
-    //     (0..count).into_par_iter().map(|i|{
-    //         let k = power_interp(k_range.0, k_range.1, ((i - 1) as f64) / ((count - 1) as f64));
-
-    //     })
-    // }
+    pub fn spectrum(&self, k_range: (f64, f64), count: usize, da: f64, tolerance: f64) -> Vec<(f64, f64)> where
+        Self: Send + Sync,
+    {
+        let done_count = AtomicUsize::new(0);
+        (0..count).into_par_iter().map(|i|{
+            let k = power_interp(k_range.0, k_range.1, (i as f64) / ((count - 1) as f64));
+            let state = self.run(k, tolerance, da, |_, _, _, _, _, _| {}).abs();
+            println!("[spectrum]({}/{}) k = {}", done_count.fetch_add(1, Ordering::SeqCst) + 1, count, k);
+            (k, k * k * k / 2.0 / PI * state * state)
+        }).collect::<Vec<_>>()
+    }
 }
 
 pub trait PerturbationParams {

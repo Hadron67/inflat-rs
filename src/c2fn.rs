@@ -2,6 +2,31 @@ use std::ops::{Add, Mul};
 
 use num_traits::FromPrimitive;
 
+pub trait Derivative {
+    type Output;
+    fn derivative(&self) -> Self::Output;
+}
+
+pub trait Fn1<T> {
+    type Output;
+    fn apply(&self, x: T) -> Self::Output;
+}
+
+impl<T, F> Fn1<T> for &F where
+    F: Fn1<T>,
+{
+    type Output = F::Output;
+
+    fn apply(&self, x: T) -> Self::Output {
+        (*self).apply(x)
+    }
+}
+
+pub trait Fn2<X, Y> {
+    type Output;
+    fn apply(&self, x: X, y: Y) -> Self::Output;
+}
+
 pub trait C2Fn<T> {
     fn value(&self, phi: T) -> T;
     fn value_d(&self, phi: T) -> T;
