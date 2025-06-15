@@ -2,7 +2,8 @@ use std::time::SystemTime;
 
 use inflat::{
     background::{
-        BackgroundFn, HamitonianSimulator, Kappa, TensorPerturbationInitializer, TwoFieldBackgroundInput, TwoFieldBackgroundState, BINCODE_CONFIG
+        BINCODE_CONFIG, BackgroundFn, DefaultPerturbationInitializer, HamitonianSimulator,
+        HorizonSelector, Kappa, PhiD, TwoFieldBackgroundInput, TwoFieldBackgroundState,
     },
     c2fn::{C2Fn, C2Fn2},
     models::StarobinskyPotential,
@@ -23,6 +24,7 @@ struct FuncB {
 }
 
 impl C2Fn<f64> for FuncB {
+    type Output = f64;
     fn value(&self, phi: f64) -> f64 {
         self.b1 / 2.0 * (1.0 + tanh((phi - self.phi_c) / self.gamma))
     }
@@ -45,7 +47,7 @@ struct PotentialV<F> {
 
 impl<F> C2Fn2<f64, f64> for PotentialV<F>
 where
-    F: C2Fn<f64>,
+    F: C2Fn<f64, Output = f64>,
 {
     type Ret = f64;
 
@@ -95,14 +97,21 @@ struct KineticCoef {
 
 impl<F1, F2> BackgroundFn<Params<F1, F2>, TwoFieldBackgroundState> for KineticCoef
 where
-    F1: C2Fn<f64>,
+    F1: C2Fn<f64, Output = f64>,
     F2: C2Fn2<f64, f64, Ret = f64>,
 {
     type Output = f64;
-    fn apply(&self, context: &Params<F1, F2>, state: &TwoFieldBackgroundState, k: f64) -> Self::Output {
+    fn apply(
+        &self,
+        context: &Params<F1, F2>,
+        state: &TwoFieldBackgroundState,
+        k: f64,
+    ) -> Self::Output {
         let a = state.a();
         let kappa = context.input.kappa;
-        a * a * (k * context.alpha * kappa * self.lambda * state.v_chi(&context.input) + a) / 8.0 / kappa
+        a * a * (k * context.alpha * kappa * self.lambda * state.v_chi(&context.input) + a)
+            / 8.0
+            / kappa
     }
 }
 
@@ -112,13 +121,18 @@ struct PotentialCoef {
 
 impl<F1, F2> BackgroundFn<Params<F1, F2>, TwoFieldBackgroundState> for PotentialCoef
 where
-    F1: C2Fn<f64>,
+    F1: C2Fn<f64, Output = f64>,
     F2: C2Fn2<f64, f64, Ret = f64>,
-    {
+{
     type Output = f64;
-    fn apply(&self, context: &Params<F1, F2>, state: &TwoFieldBackgroundState, k: f64) -> Self::Output {
+    fn apply(
+        &self,
+        context: &Params<F1, F2>,
+        state: &TwoFieldBackgroundState,
+        k: f64,
+    ) -> Self::Output {
         let a = state.a();
-        k * k / a / a - state.fa_potential(&context.input, k, context.alpha, self.lambda)
+        k * k / a / a - state.dcs_fa_potential(&context.input, k, context.alpha, self.lambda)
     }
 }
 
@@ -127,34 +141,17 @@ struct Horizon {
 }
 impl<F1, F2> BackgroundFn<Params<F1, F2>, TwoFieldBackgroundState> for Horizon
 where
-    F1: C2Fn<f64>,
+    F1: C2Fn<f64, Output = f64>,
     F2: C2Fn2<f64, f64, Ret = f64>,
 {
     type Output = f64;
-    fn apply(&self, context: &Params<F1, F2>, state: &TwoFieldBackgroundState, k: f64) -> Self::Output {
-        state.horizon(&context.input, k, context.alpha, self.lambda)
-    }
-}
-
-struct DtProvider {
-    pub lambda: f64,
-    pub min_dt: f64,
-}
-
-impl<F1, F2> BackgroundFn<Params<F1, F2>, TwoFieldBackgroundState> for DtProvider
-where
-    F1: C2Fn<f64>,
-    F2: C2Fn2<f64, f64, Ret = f64>,
-{
-    type Output = f64;
-    fn apply(&self, context: &Params<F1, F2>, state: &TwoFieldBackgroundState, k: f64) -> Self::Output {
-        let a = state.a();
-        let c = k * k / a / a - state.fa_potential(&context.input, k, context.alpha, self.lambda);
-        if c >= 0.0 {
-            fmin(self.min_dt, 0.5 / c.sqrt())
-        } else {
-            self.min_dt
-        }
+    fn apply(
+        &self,
+        context: &Params<F1, F2>,
+        state: &TwoFieldBackgroundState,
+        k: f64,
+    ) -> Self::Output {
+        state.dcs_horizon(&context.input, k, context.alpha, self.lambda)
     }
 }
 
@@ -162,19 +159,26 @@ struct FaCoef {
     pub lambda: f64,
 }
 
-impl<F1, F2> BackgroundFn<Params<F1, F2>, TwoFieldBackgroundState> for FaCoef where
-    F1: C2Fn<f64>,
-    F2: C2Fn2<f64, f64, Ret = f64>,{
+impl<F1, F2> BackgroundFn<Params<F1, F2>, TwoFieldBackgroundState> for FaCoef
+where
+    F1: C2Fn<f64, Output = f64>,
+    F2: C2Fn2<f64, f64, Ret = f64>,
+{
     type Output = f64;
 
-    fn apply(&self, context: &Params<F1, F2>, state: &TwoFieldBackgroundState, k: f64) -> Self::Output {
-        1.0 / state.fa(&context.input, k, context.alpha, self.lambda)
+    fn apply(
+        &self,
+        context: &Params<F1, F2>,
+        state: &TwoFieldBackgroundState,
+        k: f64,
+    ) -> Self::Output {
+        1.0 / state.dcs_fa(&context.input, k, context.alpha, self.lambda)
     }
 }
 
 impl<F1, F2> Params<F1, F2>
 where
-    F1: C2Fn<f64> + Send + Sync,
+    F1: C2Fn<f64, Output = f64> + Send + Sync,
     F2: C2Fn2<f64, f64, Ret = f64> + Send + Sync,
 {
     pub fn run(&self, out_dir: &str) -> anyhow::Result<()> {
@@ -217,7 +221,12 @@ where
                 time.push(t * sqrt(1.048e-10));
                 t += state.dt;
             }
-            println!("v_phi[0] = {}, v_a[0] = {}, t[-1] = {}", background[0].v_phi(), background[0].v_a(&self.input), t);
+            println!(
+                "v_phi[0] = {}, v_a[0] = {}, t[-1] = {}",
+                background[0].v_phi(),
+                background[0].v_a(&self.input),
+                t
+            );
             time = limit_length(time, max_length);
             let mut efoldings = vec![];
             let mut phi = vec![];
@@ -239,7 +248,7 @@ where
                 epsilon.push(state.epsilon(&self.input).abs());
                 hubble.push(state.v_a(&self.input) / state.a());
                 hubble_constraint.push(state.hubble_constraint(&self.input).abs());
-                test_plot1.push(state.fa_potential(&self.input, k, self.alpha, -1.0));
+                test_plot1.push(state.dcs_fa_potential(&self.input, k, self.alpha, -1.0));
             }
             let mut plot = Plot::new();
             plot.add_trace(Scatter::new(efoldings.clone(), phi).name("phi"));
@@ -294,18 +303,23 @@ where
                     .x_axis(Axis::new().exponent_format(ExponentFormat::Power))
                     .y_axis(Axis::new().exponent_format(ExponentFormat::Power))
                     .y_axis2(Axis::new().exponent_format(ExponentFormat::Power))
-                    .y_axis3(
-                        Axis::new()
-                            .exponent_format(ExponentFormat::Power),
-                    )
+                    .y_axis3(Axis::new().exponent_format(ExponentFormat::Power))
                     .y_axis4(
                         Axis::new()
                             .type_(AxisType::Log)
                             .exponent_format(ExponentFormat::Power),
                     )
-                    .y_axis5(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
+                    .y_axis5(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
                     .y_axis6(Axis::new().exponent_format(ExponentFormat::Power))
-                    .y_axis7(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
+                    .y_axis7(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
                     .height(1200),
             );
             plot.write_html(&format!("{}/background.plot.html", out_dir));
@@ -314,16 +328,10 @@ where
             self,
             background.len(),
             background.as_slice(),
-            TensorPerturbationInitializer,
-            PotentialCoef {
-                lambda: -1.0,
-            },
-            Horizon {
-                lambda: -1.0,
-            },
-            FaCoef {
-                lambda: -1.0
-            },
+            DefaultPerturbationInitializer,
+            PotentialCoef { lambda: -1.0 },
+            HorizonSelector::new(1e3),
+            FaCoef { lambda: -1.0 },
         );
         {
             let mut efoldings = vec![];
@@ -331,7 +339,7 @@ where
             let mut phi_im = vec![];
             let mut em = vec![];
             let mut last_log_time = SystemTime::now();
-            pert.run(1e9, 1e6, 0.5, |pert, b, s, h, potential, dt| {
+            pert.run(1e9, 0.5, |pert, b, s, h, potential, dt| {
                 efoldings.push(b.a().ln());
                 phi.push(h.abs());
                 phi_im.push(s.x.im);
@@ -371,13 +379,28 @@ where
             plot.write_html(&format!("{}/perturbation.html", out_dir));
         }
         {
-            let spectrum = lazy_file(&format!("{}/spectrum.bincode", out_dir), BINCODE_CONFIG, ||pert.spectrum((1.0, 1e11), 100, 0.5, 1e6))?;
+            let spectrum = lazy_file(
+                &format!("{}/spectrum.bincode", out_dir),
+                BINCODE_CONFIG,
+                || pert.spectrum((1.0, 1e11), 100, 0.5),
+            )?;
             let mut plot = Plot::new();
-            plot.add_trace(Scatter::new(spectrum.iter().map(|f|f.0).collect(), spectrum.iter().map(|f|f.1).collect()));
+            plot.add_trace(Scatter::new(
+                spectrum.iter().map(|f| f.0).collect(),
+                spectrum.iter().map(|f| f.1).collect(),
+            ));
             plot.set_layout(
                 Layout::new()
-                    .x_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
-                    .y_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
+                    .x_axis(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .y_axis(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    ),
             );
             plot.write_html(&format!("{}/spectrum.html", out_dir));
         }
@@ -405,7 +428,7 @@ pub fn main() {
                     m_chi: sqrt(4e6 * v0),
                     u: StarobinskyPotential {
                         v0,
-                        phi0: sqrt(3.0 / 2.0),
+                        phi0: sqrt(2.0 / 3.0),
                     },
                 }
             },

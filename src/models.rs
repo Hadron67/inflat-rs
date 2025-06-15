@@ -7,10 +7,17 @@ use crate::{c2fn::C2Fn, util::sigmoid};
 
 pub struct ZeroFn<T>(PhantomData<T>);
 
+impl<T> Default for ZeroFn<T> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
 impl<T> C2Fn<T> for ZeroFn<T>
 where
     T: Zero,
 {
+    type Output = T;
     fn value(&self, _phi: T) -> T {
         T::zero()
     }
@@ -34,6 +41,7 @@ pub struct ParametricResonanceParams {
 }
 
 impl C2Fn<f64> for ParametricResonanceParams {
+    type Output = f64;
     fn value(&self, phi: f64) -> f64 {
         let lambda2 = self.lambda * self.lambda;
         let lambda4 = lambda2 * lambda2;
@@ -80,6 +88,7 @@ pub struct StarobinskyLinearPotential {
 }
 
 impl C2Fn<f64> for StarobinskyLinearPotential {
+    type Output = f64;
     fn value(&self, phi: f64) -> f64 {
         self.v0 + (if phi > self.phi0 { self.ap } else { self.am }) * (phi - self.phi0)
     }
@@ -102,6 +111,7 @@ pub struct SmearedStarobinskyLinearPotential {
 }
 
 impl C2Fn<f64> for SmearedStarobinskyLinearPotential {
+    type Output = f64;
     fn value(&self, phi: f64) -> f64 {
         self.v0
             + (phi - self.phi0)
@@ -136,6 +146,7 @@ impl QuadraticPotential {
 }
 
 impl C2Fn<f64> for QuadraticPotential {
+    type Output = f64;
     fn value(&self, phi: f64) -> f64 {
         0.5 * self.mass * self.mass * phi * phi
     }
@@ -161,6 +172,7 @@ impl LinearSinePotential {
 }
 
 impl C2Fn<f64> for LinearSinePotential {
+    type Output = f64;
     fn value(&self, phi: f64) -> f64 {
         self.coef * phi * sin(self.omega * phi)
     }
@@ -182,18 +194,56 @@ pub struct StarobinskyPotential {
 }
 
 impl C2Fn<f64> for StarobinskyPotential {
+    type Output = f64;
     fn value(&self, phi: f64) -> f64 {
-        let e = 1.0 - exp(-phi / self.phi0);
+        let e = 1.0 - exp(-phi * self.phi0);
         self.v0 * e * e
     }
 
     fn value_d(&self, phi: f64) -> f64 {
-        self.v0 * 2.0 * (1.0 - exp(-phi / self.phi0)) * exp(-phi / self.phi0) / self.phi0
+        self.v0 * 2.0 * (1.0 - exp(-phi * self.phi0)) * exp(-phi * self.phi0) * self.phi0
     }
 
     fn value_dd(&self, phi: f64) -> f64 {
-        2.0 * self.v0 / self.phi0 / self.phi0
-            * exp(-phi / self.phi0)
-            * (2.0 * exp(-phi / self.phi0) - 1.0)
+        2.0 * self.v0
+            * self.phi0
+            * self.phi0
+            * exp(-phi * self.phi0)
+            * (2.0 * exp(-phi * self.phi0) - 1.0)
+    }
+}
+
+pub struct TruncSinePotential {
+    pub amp: f64,
+    pub omega: f64,
+    pub begin: f64,
+    pub end: f64,
+}
+
+impl C2Fn<f64> for TruncSinePotential {
+    type Output = f64;
+
+    fn value(&self, phi: f64) -> Self::Output {
+        if phi >= self.begin && phi <= self.end {
+            sin(phi * self.omega) * self.amp
+        } else {
+            0.0
+        }
+    }
+
+    fn value_d(&self, phi: f64) -> Self::Output {
+        if phi >= self.begin && phi <= self.end {
+            cos(phi * self.omega) * self.omega * self.amp
+        } else {
+            0.0
+        }
+    }
+
+    fn value_dd(&self, phi: f64) -> Self::Output {
+        if phi >= self.begin && phi <= self.end {
+            -sin(phi * self.omega) * self.omega * self.omega * self.amp
+        } else {
+            0.0
+        }
     }
 }

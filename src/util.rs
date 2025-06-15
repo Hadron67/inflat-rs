@@ -4,7 +4,10 @@ use std::{
     fs::File,
     io::{self, BufReader, BufWriter},
     marker::PhantomData,
-    ops::{Add, Div, Mul, Range, Sub},
+    mem::MaybeUninit,
+    ops::{Add, Div, Index, IndexMut, Mul, Range, Sub},
+    process::Output,
+    time::{Duration, SystemTime},
 };
 
 use bincode::{
@@ -13,11 +16,15 @@ use bincode::{
     decode_from_std_read, encode_into_std_write,
     error::{DecodeError, EncodeError},
 };
-use num_traits::{Float, FromPrimitive};
+use num_traits::{Float, FromPrimitive, Zero};
 use rayon::iter::{
     IndexedParallelIterator, ParallelIterator,
     plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge},
 };
+
+use crate::c2fn::Plus;
+
+pub const ENERGY_SPECTRUM_EVAL_FACTOR: f64 = 6.8e-7;
 
 pub fn derivative_2<T, T2>(dx1: T, dx2: T, y1: T2, y2: T2, y3: T2) -> T2
 where
@@ -253,5 +260,91 @@ where
         } else {
             None
         }
+    }
+}
+
+pub struct RateLimiter {
+    interval: Duration,
+    last_time: SystemTime,
+}
+
+impl RateLimiter {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_time: SystemTime::now(),
+        }
+    }
+    pub fn run<A>(&mut self, mut action: A)
+    where
+        A: FnMut(),
+    {
+        if self
+            .last_time
+            .elapsed()
+            .map(|t| t > self.interval)
+            .unwrap_or(false)
+        {
+            self.last_time = SystemTime::now();
+            action();
+        }
+    }
+}
+
+pub struct VecN<const N: usize, T> {
+    value: [T; N],
+}
+
+impl<const N: usize, T> VecN<N, T> {
+    pub fn new(value: [T; N]) -> Self {
+        Self { value }
+    }
+}
+
+impl<const N: usize, T> Index<usize> for VecN<N, T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.value[index]
+    }
+}
+
+impl<const N: usize, T> IndexMut<usize> for VecN<N, T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.value[index]
+    }
+}
+
+impl<const N: usize, T> Add<VecN<N, T>> for VecN<N, T>
+where
+    T: Add<T, Output = T> + Zero + Copy,
+{
+    type Output = Self;
+
+    fn add(self, rhs: VecN<N, T>) -> Self::Output {
+        let mut ret = VecN {
+            value: [T::zero(); N],
+        };
+        for i in 0..N {
+            ret.value[i] = self.value[i] + rhs.value[i];
+        }
+        ret
+    }
+}
+
+impl<const N: usize, T> Mul<T> for VecN<N, T>
+where
+    T: Mul<T, Output = T> + Zero + Copy,
+{
+    type Output = Self;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        let mut ret = VecN {
+            value: [T::zero(); N],
+        };
+        for i in 0..N {
+            ret.value[i] = self.value[i] * rhs;
+        }
+        ret
     }
 }

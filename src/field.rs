@@ -3,13 +3,12 @@ use std::{
     iter::Sum,
     marker::PhantomData,
     mem::MaybeUninit,
-    ops::{Add, AddAssign, DerefMut, Div, Index, Mul, Range, Sub},
+    ops::{Add, AddAssign, DerefMut, Div, Index, Mul, Sub},
 };
 
 use num_traits::{FromPrimitive, NumAssign, Zero};
 use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, Map,
-    ParallelIterator,
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
 #[derive(Copy, Clone)]

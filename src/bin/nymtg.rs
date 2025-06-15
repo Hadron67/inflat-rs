@@ -1,232 +1,296 @@
-use std::{fs::File, io::BufWriter, iter::zip, time::SystemTime};
+use std::{iter::zip, ops::Index, time::Duration};
 
 use inflat::{
     background::{
-        BINCODE_CONFIG, BackgroundState, PerturbationParams, SpectrumSetting, scan_spectrum,
+        BINCODE_CONFIG, BackgroundState, BackgroundStateInput, BackgroundStateInputProvider,
+        CubicScaleFactor, DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelector,
+        Kappa, NymtgTensorPerturbationPotential, PhiD, ScaleFactor, ScaleFactorD,
     },
     c2fn::C2Fn,
     models::{LinearSinePotential, QuadraticPotential, StarobinskyLinearPotential},
-    util::{lazy_file, linear_interp},
+    util::{RateLimiter, lazy_file, limit_length, linear_interp},
 };
-use ndarray::{Array2, ArrayView};
-use ndarray_npy::NpzWriter;
 use plotly::{
     Layout, Plot, Scatter,
     common::ExponentFormat,
-    layout::{Axis, AxisType},
+    layout::{Axis, AxisType, LayoutGrid},
 };
 
-#[derive(Clone, Copy)]
 struct NymtgInputParams<F> {
-    pub potential: F,
+    pub input: BackgroundStateInput<F>,
+    pub a0: f64,
     pub phi0: f64,
+    pub spectrum_range: (f64, f64),
+    pub spectrum_count: usize,
     pub alpha: f64,
-    pub spectrum_setting: SpectrumSetting,
+    pub max_dt: f64,
+    pub alpha_scan: Option<ParamRange>,
 }
 
-struct NymtgPerturbationParams<'a, F> {
-    pub input: &'a NymtgInputParams<F>,
-    pub lambda: f64,
+struct ParamRange {
+    pub range: (f64, f64),
+    pub count: usize,
 }
 
-impl<'a, F> PerturbationParams for NymtgPerturbationParams<'a, F>
+impl<F> Kappa for NymtgInputParams<F> {
+    fn kappa(&self) -> f64 {
+        self.input.kappa
+    }
+}
+
+impl<F> BackgroundStateInputProvider for NymtgInputParams<F> {
+    type F = F;
+
+    fn input(&self) -> &BackgroundStateInput<Self::F> {
+        &self.input
+    }
+}
+
+impl<F> NymtgInputParams<F>
 where
-    F: C2Fn<f64>,
+    F: C2Fn<f64, Output = f64> + Send + Sync,
 {
-    fn perturbation(
-        &self,
-        u: num_complex::Complex64,
-        background: &inflat::background::BackgroundState,
-    ) -> num_complex::Complex64 {
-        -u / background.a * 2.0
-    }
-
-    fn constant_term(&self, _background: &inflat::background::BackgroundState, k: f64) -> f64 {
-        k * k
-    }
-
-    fn intermediate_term(&self, background: &inflat::background::BackgroundState, k: f64) -> f64 {
-        k * self.lambda * self.input.alpha * background.v_phi()
-    }
-
-    fn horizon_term(&self, background: &inflat::background::BackgroundState, _k: f64) -> f64 {
-        -background.vv_a(1.0, &self.input.potential) / background.a
-    }
-}
-
-fn run_nymtg_scan<F, P>(
-    out_dir: &str,
-    param_provider: P,
-    alpha_range: (f64, f64),
-    count: usize,
-) -> anyhow::Result<()>
-where
-    F: C2Fn<f64> + Copy + Send + Sync,
-    P: Fn(f64) -> NymtgInputParams<F>,
-{
-    let kappa = 1.0;
-    let background = lazy_file(
-        &format!("{}/background.bincode", out_dir),
-        BINCODE_CONFIG,
-        || {
-            let param = param_provider(0.0);
-            let initial = BackgroundState::init_slowroll(kappa, param.phi0, 1.0, &param.potential);
-            let mut last_log_time = SystemTime::now();
-            initial.simulate(
-                kappa,
-                &param.potential,
-                0.001,
-                0.1,
-                4,
-                |s| s.epsilon(kappa) > 1.0,
-                |s| {
-                    if last_log_time
-                        .elapsed()
-                        .map(|a| a.as_millis() >= 100)
-                        .unwrap_or(false)
-                    {
-                        println!("[background] {:?}", s);
-                        last_log_time = SystemTime::now();
-                    }
-                },
-            )
-        },
-    )?;
-    let k_coef = background[0].spectrum_k_scale_hz(kappa);
-    let mut alpha_values = vec![];
-    let mut k_values = vec![];
-    let mut spectrums = vec![];
-    for i in 0..count {
-        println!("[outer]({}/{})", i + 1, count);
-        let alpha = linear_interp(
-            alpha_range.0,
-            alpha_range.1,
-            (i as f64) / ((count - 1) as f64),
-        );
-        alpha_values.push(alpha);
-        let params = param_provider(alpha);
-        let params_pos = NymtgPerturbationParams {
-            input: &params,
-            lambda: 1.0,
-        };
-        let params_neg = NymtgPerturbationParams {
-            input: &params,
-            lambda: -1.0,
-        };
-        let file_name_pos = format!("{}/spectrum.{}.+.bincode", out_dir, i);
-        let file_name_neg = format!("{}/spectrum.{}.-.bincode", out_dir, i);
-        let spectrum_pos = lazy_file(&file_name_pos, BINCODE_CONFIG, || {
-            scan_spectrum(
-                &background,
-                &params_pos,
-                &params_pos.input.spectrum_setting,
-                1.0,
-            )
-        })?;
-        let spectrum_neg = lazy_file(&file_name_neg, BINCODE_CONFIG, || {
-            scan_spectrum(
-                &background,
-                &params_neg,
-                &params_neg.input.spectrum_setting,
-                1.0,
-            )
-        })?;
-        let mut spectrum = vec![];
-        for ((k, s1), (_, s2)) in zip(&spectrum_pos, &spectrum_neg) {
-            if i == 0 {
-                k_values.push(*k * k_coef);
+    pub fn run(&self, out_dir: &str) -> anyhow::Result<()> {
+        let max_length = 500000usize;
+        let background = lazy_file(
+            &format!("{}/background.bincode", out_dir),
+            BINCODE_CONFIG,
+            || {
+                let initial = BackgroundState::init_slowroll(self.a0, self.phi0, &self.input);
+                let mut rate_limiter = RateLimiter::new(Duration::from_millis(100));
+                initial.simulate(
+                    &self.input,
+                    0.01,
+                    self.max_dt,
+                    4,
+                    |s| s.epsilon(&self.input) > 1.0,
+                    |s| {
+                        rate_limiter.run(|| {
+                            println!("[background] {:?}", s);
+                        });
+                    },
+                )
+            },
+        )?;
+        {
+            let mut efolding = vec![];
+            let mut phi = vec![];
+            let mut v_phi = vec![];
+            let mut epsilon = vec![];
+            for state in limit_length(background.clone(), max_length) {
+                efolding.push(state.scale_factor().ln());
+                phi.push(state.phi);
+                v_phi.push(state.v_phi().abs());
+                epsilon.push(state.epsilon(&self.input));
             }
-            spectrum.push(*s1 + *s2);
-        }
-        spectrums.push(spectrum);
-    }
-    {
-        let mut plot = Plot::new();
-        for (spectrum, alpha) in zip(&spectrums, &alpha_values) {
+            let mut plot = Plot::new();
+            plot.add_trace(Scatter::new(efolding.clone(), phi).name("phi"));
             plot.add_trace(
-                Scatter::new(k_values.clone(), spectrum.clone())
-                    .name(format!("a = {}", *alpha))
-                    .y_axis("y1")
-                    .x_axis("x1"),
+                Scatter::new(efolding.clone(), v_phi)
+                    .name("v_phi")
+                    .y_axis("y2"),
             );
+            plot.add_trace(
+                Scatter::new(efolding.clone(), epsilon)
+                    .name("epsilon")
+                    .y_axis("y3"),
+            );
+            plot.set_layout(
+                Layout::new()
+                    .grid(LayoutGrid::new().rows(3).columns(1))
+                    .x_axis(Axis::new().exponent_format(ExponentFormat::Power))
+                    .y_axis(Axis::new().exponent_format(ExponentFormat::Power))
+                    .y_axis2(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .y_axis3(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .height(1000),
+            );
+            plot.write_html(&format!("{}/background.html", out_dir));
         }
-        plot.set_layout(
-            Layout::new()
-                .y_axis(
-                    Axis::new()
-                        .type_(AxisType::Log)
-                        .exponent_format(ExponentFormat::Power),
-                )
-                .x_axis(
-                    Axis::new()
-                        .type_(AxisType::Log)
-                        .exponent_format(ExponentFormat::Power),
-                )
-                .height(800),
+        let k_coef = background[0].mom_unit_coef_hz(self.input.kappa, 0.05);
+        let k_range = (
+            self.spectrum_range.0 / k_coef,
+            self.spectrum_range.1 / k_coef,
         );
-        plot.write_html(format!("{}/spectrum.plot.html", out_dir));
+        {
+            let pert_pos = self.pert(background.len(), &background, 1.0, self.alpha);
+            let spectrum_pos = pert_pos.spectrum_with_cache(
+                &format!("{}/spectrum.+.bincode", out_dir),
+                k_range,
+                self.spectrum_count,
+                0.1,
+            )?;
+            let pert_neg = self.pert(background.len(), &background, -1.0, self.alpha);
+            let spectrum_neg = pert_neg.spectrum_with_cache(
+                &format!("{}/spectrum.+.bincode", out_dir),
+                k_range,
+                self.spectrum_count,
+                0.1,
+            )?;
+            let mut plot = Plot::new();
+            plot.add_trace(
+                Scatter::new(
+                    spectrum_pos.iter().map(|f| f.0 * k_coef).collect(),
+                    spectrum_pos.iter().map(|f| f.1).collect(),
+                )
+                .name("+"),
+            );
+            plot.add_trace(
+                Scatter::new(
+                    spectrum_neg.iter().map(|f| f.0 * k_coef).collect(),
+                    spectrum_neg.iter().map(|f| f.1).collect(),
+                )
+                .name("-"),
+            );
+            plot.set_layout(
+                Layout::new()
+                    .x_axis(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .y_axis(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .height(800),
+            );
+            plot.write_html(&format!("{}/spectrum.html", out_dir));
+        }
+        if let Some(scan) = &self.alpha_scan {
+            let mut plot = Plot::new();
+            for i in 0..scan.count {
+                println!("[scan]({}/{})", i + 1, scan.count);
+                let alpha = linear_interp(
+                    scan.range.0,
+                    scan.range.1,
+                    (i as f64) / ((scan.count - 1) as f64),
+                );
+                let pert_pos = self.pert(background.len(), &background, 1.0, alpha);
+                let pert_neg = self.pert(background.len(), &background, -1.0, alpha);
+                let spectrum_pos = pert_pos.spectrum_with_cache(
+                    &format!("{}/spectrum.scan1.{}.+.bincode", out_dir, i),
+                    k_range,
+                    self.spectrum_count,
+                    0.1,
+                )?;
+                let spectrum_neg = pert_neg.spectrum_with_cache(
+                    &format!("{}/spectrum.scan1.{}.-.bincode", out_dir, i),
+                    k_range,
+                    self.spectrum_count,
+                    0.1,
+                )?;
+                plot.add_trace(Scatter::new(spectrum_pos.iter().map(|f|f.0).collect(), zip(&spectrum_pos, &spectrum_neg).map(|f|f.0.1 + f.1.1).collect()).name(&format!("alpha = {}", alpha)));
+            }
+            plot.write_html(&format!("{}/spectrum.scan.html", out_dir));
+        }
+        Ok(())
     }
+    pub fn pert<'a, 'b, I>(
+        &'a self,
+        length: usize,
+        background: &'b I,
+        lambda: f64,
+        alpha: f64,
+    ) -> HamitonianSimulator<
+        'b,
+        'a,
+        Self,
+        I,
+        I::Output,
+        DefaultPerturbationInitializer,
+        NymtgTensorPerturbationPotential,
+        HorizonSelector,
+        CubicScaleFactor,
+    >
+    where
+        I: Index<usize>,
+        I::Output: Sized,
     {
-        let file = BufWriter::new(File::create(&format!("{}/spectrum-data.npz", out_dir))?);
-        let mut npz = NpzWriter::new(file);
-        let spectrum_output = Array2::from_shape_vec(
-            (spectrums.len(), spectrums[0].len()),
-            spectrums.iter().flatten().cloned().collect(),
-        )?;
-        npz.add_array("spectrum", &spectrum_output)?;
-        npz.add_array(
-            "k",
-            &ArrayView::from_shape((k_values.len(),), &k_values).unwrap(),
-        )?;
-        npz.add_array(
-            "alpha",
-            &ArrayView::from_shape((alpha_values.len(),), &alpha_values).unwrap(),
-        )?;
-        npz.finish()?;
+        HamitonianSimulator::new(
+            self,
+            length,
+            background,
+            DefaultPerturbationInitializer,
+            NymtgTensorPerturbationPotential { lambda, alpha },
+            HorizonSelector::new(1e3),
+            CubicScaleFactor,
+        )
     }
-    Ok(())
 }
 
-fn run_nymtg_scan_set1() {
-    run_nymtg_scan(
-        "out/nymtg.set1",
-        |alpha| NymtgInputParams {
+fn main() {
+    let params_2112_04794 = NymtgInputParams {
+        input: BackgroundStateInput {
+            potential: {
+                let alpha = 3.295;
+                let beta = 0.996;
+                let mass = 1e-6;
+                QuadraticPotential::new(mass)
+                    .plus(LinearSinePotential::new(beta / alpha * mass * mass, alpha))
+            },
+            kappa: 1.0,
+        },
+        phi0: 4.779,
+        a0: 1.0,
+        max_dt: 10.0,
+        spectrum_count: 100,
+        spectrum_range: (1e-6, 1.0),
+        alpha: 20.0,
+        alpha_scan: None,
+    };
+    params_2112_04794.run("out/nymtg-2112.04794.set1").unwrap();
+    let params_2308_15329 = NymtgInputParams {
+        phi0: 11.32,
+        input: BackgroundStateInput {
             potential: StarobinskyLinearPotential {
                 v0: 1e-14,
                 ap: 1e-14,
                 am: 1e-15,
                 phi0: 6.0,
             },
-            phi0: 11.32,
-            alpha,
-            spectrum_setting: SpectrumSetting {
-                k_range: (1e-1, 1e4),
-                n_range: (None, None),
-                count: 1000,
-            },
+            kappa: 1.0,
         },
-        (24.0, 30.0),
-        30,
-    )
-    .unwrap();
-}
+        a0: 1.0,
+        max_dt: 100.0,
+        spectrum_range: (1e-10, 1e-5),
+        spectrum_count: 100,
+        alpha: 30.0,
+        alpha_scan: None,
+    };
+    params_2308_15329.run("out/nymtg-2308.15329.set1").unwrap();
 
-fn main() {
-    let params = NymtgInputParams {
-        potential: {
-            let alpha = 3.295;
-            let beta = 0.996;
-            let mass = 1e-6;
-            QuadraticPotential::new(mass)
-                .plus(LinearSinePotential::new(beta / alpha * mass * mass, alpha))
+    let params_2112_04794_mod = NymtgInputParams {
+        input: BackgroundStateInput {
+            potential: {
+                let alpha = 3.285;
+                let beta = 0.9959;
+                let mass = 1e-6;
+                QuadraticPotential::new(mass)
+                    .plus(LinearSinePotential::new(beta / alpha * mass * mass, alpha))
+            },
+            kappa: 1.0,
         },
         phi0: 4.779,
+        a0: 1.0,
+        max_dt: 10.0,
+        spectrum_count: 1000,
+        spectrum_range: (1e-10, 1e-5),
         alpha: 20.0,
-        spectrum_setting: SpectrumSetting {
-            k_range: (1e2, 1e11),
-            n_range: (None, None),
-            count: 1000,
-        },
+        alpha_scan: Some(ParamRange {
+            range: (0.0, 30.0),
+            count: 40,
+        }),
     };
-    run_nymtg_scan_set1();
+    params_2112_04794_mod
+        .run("out/nymtg-2308.15329-mod.set1")
+        .unwrap();
 }
