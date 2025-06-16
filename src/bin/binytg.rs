@@ -1,4 +1,10 @@
-use std::{iter::zip, ops::Index, process::Output, time::Duration};
+use std::{
+    fs::{File, create_dir_all},
+    io::BufWriter,
+    iter::zip,
+    ops::Index,
+    time::Duration,
+};
 
 use inflat::{
     background::{
@@ -7,13 +13,13 @@ use inflat::{
         HamitonianSimulator, HorizonSelector, Kappa, NymtgTensorPerturbationPotential,
         ScaleFactorD,
     },
-    c2fn::{C2Fn, C2Fn2, Plus2},
+    c2fn::{C2Fn, C2Fn2},
     models::{LinearSinePotential, QuadraticPotential},
-    util::{RateLimiter, derivative_2, lazy_file, limit_length},
+    util::{ParamRange, RateLimiter, lazy_file, limit_length},
 };
 use libm::{cosh, exp, sqrt, tanh};
-use ndarray::{Linspace, linspace};
-use num_complex::ComplexFloat;
+use ndarray::{Array, Array2};
+use ndarray_npy::NpzWriter;
 use plotly::{
     Layout, Plot, Scatter,
     common::{DashType, ExponentFormat, Line},
@@ -217,8 +223,9 @@ struct Params<A, B, V> {
     pub chi: f64,
     pub v_chi: f64,
     pub input: BiNymtgBackgroundStateInput<A, B, V>,
-    pub k_range: (f64, f64),
-    pub spectrum_count: usize,
+    pub alpha: f64,
+    pub spectrum_range: ParamRange<f64>,
+    pub alpha_range: Option<ParamRange<f64>>,
 }
 
 impl<A, B, V> Params<A, B, V>
@@ -228,6 +235,7 @@ where
     V: C2Fn2<f64, f64, Ret = f64> + Send + Sync,
 {
     pub fn run(&self, out_dir: &str) -> anyhow::Result<()> {
+        create_dir_all(out_dir)?;
         let max_length = 500000;
         let mut rate_limiter = RateLimiter::new(Duration::from_millis(100));
         let background = lazy_file(
@@ -353,49 +361,40 @@ where
             );
             plot.write_html(&format!("{}/background.html", out_dir));
         }
+        let k_coef = background[0].mom_unit_coef_hz(self.input.kappa, 0.05);
         {
-            let pert_no_alpha = self.pert(background.len(), &background, 0.0, 0.0);
-            let pert_pos = self.pert(background.len(), &background, 1.0, 1.3);
-            let pert_neg = self.pert(background.len(), &background, -1.0, 1.3);
-            let spectrum_no_alpha = lazy_file(
-                &format!("{}/spectrum.no-alpha.bincode", out_dir),
-                BINCODE_CONFIG,
-                || pert_no_alpha.spectrum(self.k_range, self.spectrum_count, 0.01),
-            )?;
-            let spectrum_pos = lazy_file(
-                &format!("{}/spectrum.+.bincode", out_dir),
-                BINCODE_CONFIG,
-                || pert_pos.spectrum(self.k_range, self.spectrum_count, 0.01),
-            )?;
-            let spectrum_neg = lazy_file(
-                &format!("{}/spectrum.-.bincode", out_dir),
-                BINCODE_CONFIG,
-                || pert_neg.spectrum(self.k_range, self.spectrum_count, 0.01),
-            )?;
+            let spectrum_no_alpha = self
+                .pert(background.len(), &background, 0.0, 0.0)
+                .spectrum_with_cache(
+                    &format!("{}/spectrum.no-alpha.bincode", out_dir),
+                    self.spectrum_range,
+                    0.1,
+                )?;
+            let spectrum_pos = self
+                .pert(background.len(), &background, 1.0, self.alpha)
+                .spectrum_with_cache(
+                    &format!("{}/spectrum.+.bincode", out_dir),
+                    self.spectrum_range,
+                    0.1,
+                )?;
+            let spectrum_neg = self
+                .pert(background.len(), &background, -1.0, self.alpha)
+                .spectrum_with_cache(
+                    &format!("{}/spectrum.-.bincode", out_dir),
+                    self.spectrum_range,
+                    0.1,
+                )?;
             let mut plot = Plot::new();
-            let k_coef = background[0].mom_unit_coef_mpc(self.input.kappa, 0.05);
+            let k_data = (self.spectrum_range * k_coef)
+                .as_logspace()
+                .collect::<Vec<_>>();
             plot.add_trace(
-                Scatter::new(
-                    spectrum_no_alpha.iter().map(|f| f.0 * k_coef).collect(),
-                    spectrum_no_alpha.iter().map(|f| f.1).collect(),
-                )
-                .line(Line::new().dash(DashType::Dash))
-                .name("no alpha"),
+                Scatter::new(k_data.clone(), spectrum_no_alpha.clone())
+                    .line(Line::new().dash(DashType::Dash))
+                    .name("no alpha"),
             );
-            plot.add_trace(
-                Scatter::new(
-                    spectrum_pos.iter().map(|f| f.0 * k_coef).collect(),
-                    spectrum_pos.iter().map(|f| f.1).collect(),
-                )
-                .name("+"),
-            );
-            plot.add_trace(
-                Scatter::new(
-                    spectrum_neg.iter().map(|f| f.0 * k_coef).collect(),
-                    spectrum_neg.iter().map(|f| f.1).collect(),
-                )
-                .name("-"),
-            );
+            plot.add_trace(Scatter::new(k_data.clone(), spectrum_pos).name("+"));
+            plot.add_trace(Scatter::new(k_data.clone(), spectrum_neg).name("-"));
             plot.set_layout(
                 Layout::new()
                     .x_axis(
@@ -411,17 +410,75 @@ where
             );
             plot.write_html(&format!("{}/spectrum.html", out_dir));
         }
+        if let Some(alpha_range) = &self.alpha_range {
+            let mut spectrum_arr = Array2::zeros((alpha_range.count, self.spectrum_range.count));
+            let k_data = (self.spectrum_range * k_coef)
+                .as_logspace()
+                .collect::<Vec<_>>();
+            let mut plot = Plot::new();
+            for (i, alpha) in zip(0usize.., alpha_range.as_linspace()) {
+                println!("[scan]({}/{})", i + 1, alpha_range.count);
+                let spectrum_pos = self
+                    .pert(background.len(), &background, 1.0, alpha)
+                    .spectrum_with_cache(
+                        &format!("{}/spectrum.scan.{}.+.bincode", out_dir, i),
+                        self.spectrum_range,
+                        0.1,
+                    )?;
+                let spectrum_neg = self
+                    .pert(background.len(), &background, -1.0, alpha)
+                    .spectrum_with_cache(
+                        &format!("{}/spectrum.scan.{}.-.bincode", out_dir, i),
+                        self.spectrum_range,
+                        0.1,
+                    )?;
+                let mut spectrum = vec![];
+                for j in 0..self.spectrum_range.count {
+                    let val = spectrum_pos[j] + spectrum_neg[j];
+                    spectrum.push(val);
+                    spectrum_arr[[i, j]] = val;
+                }
+                plot.add_trace(
+                    Scatter::new(k_data.clone(), spectrum).name(&format!("alpha = {}", alpha)),
+                );
+            }
+            plot.set_layout(
+                Layout::new()
+                    .x_axis(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .y_axis(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .height(1000),
+            );
+            plot.write_html(&format!("{}/spectrums.scan.html", out_dir));
+            {
+                let mut npz = NpzWriter::new(BufWriter::new(File::create(&format!(
+                    "{}/spectrums.scan.npz",
+                    out_dir
+                ))?));
+                npz.add_array("spectrum", &spectrum_arr)?;
+                npz.add_array("k", &Array::from_vec(k_data))?;
+                npz.add_array("alpha", &Array::from_iter(alpha_range.as_linspace()))?;
+                npz.finish()?;
+            }
+        }
         Ok(())
     }
-    fn pert<'s, 'a, I>(
-        &'s self,
+    fn pert<'a, 'b, I>(
+        &'a self,
         length: usize,
-        background: &'a I,
+        background: &'b I,
         lambda: f64,
         alpha: f64,
     ) -> HamitonianSimulator<
         'a,
-        's,
+        'b,
         Self,
         I,
         BiNymtgBackgroundState,
@@ -558,8 +615,9 @@ pub fn main() {
                 })),
             }
         },
-        k_range: (1e-1, 1e6),
-        spectrum_count: 1000,
+        alpha: 2.0,
+        spectrum_range: ParamRange::new(1.3e-1, 1e4, 1000),
+        alpha_range: Some(ParamRange::new(0.0, 2.4, 40)),
     };
     params2.run("out/binytg.set2").unwrap();
 }

@@ -60,5 +60,3 @@ pub enum FunctionHead<'a> {
     Association,
     Other(&'a str),
 }
-
-pub fn write_array<T, W: Write>(arr: &[T], write: &mut W, packed: bool) {}

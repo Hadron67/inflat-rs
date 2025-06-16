@@ -2,8 +2,7 @@ use std::f64::consts::PI;
 
 use libm::{cos, log, sin, sqrt};
 use random::Source;
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
-use rustfft::{Direction, FftDirection, num_complex::Complex64};
+use rustfft::{FftDirection, num_complex::Complex64};
 
 use crate::{
     fft::Dft3DPlan,

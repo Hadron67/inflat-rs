@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{fs::create_dir_all, time::SystemTime};
 
 use inflat::{
     background::{
@@ -7,13 +7,13 @@ use inflat::{
     },
     c2fn::{C2Fn, C2Fn2},
     models::StarobinskyPotential,
-    util::{derivative_2, lazy_file, limit_length},
+    util::{ParamRange, lazy_file, limit_length},
 };
-use libm::{cosh, fmin, sqrt, tanh};
+use libm::{cosh, sqrt, tanh};
 use num_complex::ComplexFloat;
 use plotly::{
     Layout, Plot, Scatter,
-    common::{ExponentFormat, Pattern},
+    common::ExponentFormat,
     layout::{Axis, AxisType, GridPattern, LayoutGrid},
 };
 
@@ -182,6 +182,7 @@ where
     F2: C2Fn2<f64, f64, Ret = f64> + Send + Sync,
 {
     pub fn run(&self, out_dir: &str) -> anyhow::Result<()> {
+        create_dir_all(out_dir)?;
         let max_length = 500000usize;
         let background = lazy_file(
             &format!("{}/background.bincode", out_dir),
@@ -339,7 +340,7 @@ where
             let mut phi_im = vec![];
             let mut em = vec![];
             let mut last_log_time = SystemTime::now();
-            pert.run(1e9, 0.5, |pert, b, s, h, potential, dt| {
+            pert.run(1e9, 0.5, |_pert, b, s, h, potential, dt| {
                 efoldings.push(b.a().ln());
                 phi.push(h.abs());
                 phi_im.push(s.x.im);
@@ -379,16 +380,14 @@ where
             plot.write_html(&format!("{}/perturbation.html", out_dir));
         }
         {
+            let k_range = ParamRange::new(1.0, 1e11, 100);
             let spectrum = lazy_file(
                 &format!("{}/spectrum.bincode", out_dir),
                 BINCODE_CONFIG,
-                || pert.spectrum((1.0, 1e11), 100, 0.5),
+                || pert.spectrum(k_range, 0.5),
             )?;
             let mut plot = Plot::new();
-            plot.add_trace(Scatter::new(
-                spectrum.iter().map(|f| f.0).collect(),
-                spectrum.iter().map(|f| f.1).collect(),
-            ));
+            plot.add_trace(Scatter::new(k_range.as_logspace().collect(), spectrum));
             plot.set_layout(
                 Layout::new()
                     .x_axis(

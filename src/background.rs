@@ -1,8 +1,5 @@
 use std::{
-    f64::consts::PI,
-    marker::PhantomData,
-    ops::{AddAssign, Index, Mul},
-    sync::atomic::{AtomicUsize, Ordering},
+    cmp::{max, min}, f64::consts::PI, marker::PhantomData, ops::{AddAssign, Index, Mul}, sync::atomic::{AtomicUsize, Ordering}
 };
 
 use bincode::{
@@ -11,12 +8,11 @@ use bincode::{
 };
 use libm::{exp, fmin, log, pow, sqrt};
 use num_complex::{Complex64, ComplexFloat};
-use num_traits::Pow;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
     c2fn::{C2Fn, C2Fn2},
-    util::{self, VecN, lazy_file, linear_interp, power_interp},
+    util::{self, ParamRange, VecN, first_index_of, lazy_file, linear_interp},
 };
 
 macro_rules! interpolate_fields {
@@ -1476,8 +1472,9 @@ where
 }
 
 pub trait IndexRangeSelector<Ctx: ?Sized, B: ?Sized> {
-    fn select_begin(&self, context: &Ctx, state: &B, k: f64) -> bool;
-    fn select_end(&self, context: &Ctx, state: &B, k: f64) -> bool;
+    fn select<I>(&self, context: &Ctx, background: &I, length: usize, k: f64) -> (usize, usize)
+    where
+        I: ?Sized + Index<usize, Output = B>;
 }
 
 pub struct HorizonSelector {
@@ -1489,16 +1486,26 @@ impl HorizonSelector {
         Self { tolerance }
     }
 }
-impl<Ctx, B> BackgroundFn<Ctx, B> for HorizonSelector
-where
-    Ctx: ?Sized + Kappa,
-    B: ?Sized + ScaleFactorD,
-{
-    type Output = bool;
 
-    fn apply(&self, context: &Ctx, state: &B, k: f64) -> Self::Output {
-        let r = k / state.v_scale_factor(context.kappa());
-        r < self.tolerance && r > 1.0 / self.tolerance
+impl<Ctx, B> IndexRangeSelector<Ctx, B> for HorizonSelector
+where
+    B: ?Sized + ScaleFactorD,
+    Ctx: ?Sized + Kappa,
+{
+    fn select<I>(&self, context: &Ctx, background: &I, length: usize, k: f64) -> (usize, usize)
+    where
+        I: ?Sized + Index<usize, Output = B>,
+    {
+        let kappa = context.kappa();
+        let start = first_index_of(background, 0..length, |s| {
+            k / s.v_scale_factor(kappa) < self.tolerance
+        })
+        .unwrap_or(0);
+        let end = first_index_of(background, 0..length, |s| {
+            k / s.v_scale_factor(kappa) < 1.0 / self.tolerance
+        })
+        .unwrap_or(length - 1);
+        (start, end)
     }
 }
 
@@ -1514,18 +1521,34 @@ impl HorizonSelectorWithExlusion {
         }
     }
 }
-impl<Ctx, B> BackgroundFn<Ctx, B> for HorizonSelectorWithExlusion
-where
-    Ctx: ?Sized + Kappa,
-    B: ?Sized + ScaleFactorD + ScaleFactor,
-{
-    type Output = bool;
 
-    fn apply(&self, context: &Ctx, state: &B, k: f64) -> Self::Output {
-        let r = k / state.v_scale_factor(context.kappa());
-        let n = state.scale_factor().ln();
-        let range = self.excluded_n_range;
-        r < self.tolerance && r > 1.0 / self.tolerance
+impl<Ctx, B> IndexRangeSelector<Ctx, B> for HorizonSelectorWithExlusion
+where
+    B: ?Sized + ScaleFactorD + ScaleFactor,
+    Ctx: ?Sized + Kappa,
+{
+    fn select<I>(&self, context: &Ctx, background: &I, length: usize, k: f64) -> (usize, usize)
+    where
+        I: ?Sized + Index<usize, Output = B>,
+    {
+        let kappa = context.kappa();
+        let start = first_index_of(background, 0..length, |s| {
+            k / s.v_scale_factor(kappa) < self.tolerance
+        })
+        .unwrap_or(0);
+        let end = first_index_of(background, 0..length, |s| {
+            k / s.v_scale_factor(kappa) < 1.0 / self.tolerance
+        })
+        .unwrap_or(length - 1);
+        let range = start..end;
+        let start_n = first_index_of(background, 0..length, |s|s.scale_factor().ln() > self.excluded_n_range.0).unwrap();
+        let end_n = first_index_of(background, 0..length, |s|s.scale_factor().ln() > self.excluded_n_range.1).unwrap();
+        let range0 = start_n..end_n;
+        if range.contains(&start_n) || range.contains(&end_n) || range0.contains(&start) || range0.contains(&end) {
+            (min(start, start_n), max(end, end_n))
+        } else {
+            (start, end)
+        }
     }
 }
 
@@ -1540,26 +1563,26 @@ pub struct HamitonianSimulator<
     RangeSelector,
     PertCoef,
 > {
-    context: &'b Ctx,
+    context: &'a Ctx,
     length: usize,
-    background_state: &'a I,
-    _background_elem: PhantomData<&'a [B]>,
+    background_state: &'b I,
+    _background_elem: PhantomData<&'b [B]>,
     potential: Potential,
     range_selector: RangeSelector,
     initializer: Initializer,
     pert_coef: PertCoef,
 }
 
-impl<'a, 'c, Ctx, I, B, Initializer, Potential, RangeSelector, PertCoef>
-    HamitonianSimulator<'a, 'c, Ctx, I, B, Initializer, Potential, RangeSelector, PertCoef>
+impl<'a, 'b, Ctx, I, B, Initializer, Potential, RangeSelector, PertCoef>
+    HamitonianSimulator<'a, 'b, Ctx, I, B, Initializer, Potential, RangeSelector, PertCoef>
 where
     I: Index<usize, Output = B> + ?Sized,
     Ctx: ?Sized,
 {
     pub fn new(
-        context: &'c Ctx,
+        context: &'a Ctx,
         length: usize,
-        background_state: &'a I,
+        background_state: &'b I,
         initializer: Initializer,
         potential: Potential,
         range_selector: RangeSelector,
@@ -1578,40 +1601,43 @@ where
     }
 }
 
-impl<'a, 'c, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
-    HamitonianSimulator<'a, 'c, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
+impl<'a, 'b, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
+    HamitonianSimulator<'a, 'b, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
 where
     Ctx: ?Sized,
     I: Index<usize, Output = B> + ?Sized,
     B: TimeStateData + Dt + ScaleFactor,
     Potential: BackgroundFn<Ctx, B, Output = f64>,
-    Horizon: BackgroundFn<Ctx, B, Output = bool>,
+    Horizon: IndexRangeSelector<Ctx, B>,
     Initializer: BackgroundFn<Ctx, B, Output = (Complex64, Complex64)>,
     PertCoef: BackgroundFn<Ctx, B, Output = f64>,
 {
-    fn get_eval_index_range(&self, k: f64) -> (usize, usize) {
-        let mut begin = 0usize;
-        let mut end = self.length - 1;
-        let mut last_flag = false;
-        for i in 0..self.length {
-            let flag = self
-                .range_selector
-                .apply(self.context, &self.background_state[i], k);
-            if !last_flag && flag {
-                begin = i;
-            }
-            if last_flag && !flag {
-                end = i;
-            }
-            last_flag = flag;
-        }
-        (begin, end)
-    }
+    // fn get_eval_index_range(&self, k: f64) -> (usize, usize) {
+    //     let mut begin = 0usize;
+    //     let mut end = self.length - 1;
+    //     let mut last_flag = false;
+    //     for i in 0..self.length {
+    //         let flag = self
+    //             .range_selector
+    //             .apply(self.context, &self.background_state[i], k);
+    //         if !last_flag && flag {
+    //             begin = i;
+    //         }
+    //         if last_flag && !flag {
+    //             end = i;
+    //         }
+    //         last_flag = flag;
+    //     }
+    //     (begin, end)
+    // }
     pub fn run<F>(&self, k: f64, da: f64, mut consumer: F) -> Complex64
     where
         F: FnMut(&Self, &B, &HamitonianState<Complex64>, Complex64, f64, f64),
     {
-        let (start_index, end_index) = self.get_eval_index_range(k);
+        let (start_index, end_index) =
+            self.range_selector
+                .select(self.context, self.background_state, self.length, k);
+        println!("start n = {}, end n = {}", self.background_state[start_index].scale_factor().ln(), self.background_state[end_index].scale_factor().ln());
         let mut time_interpolator = LinearInterpolator {
             cursor: start_index,
             local_time: 0.0,
@@ -1645,37 +1671,36 @@ where
         let background_state = time_interpolator.get(self.background_state);
         state.x * self.pert_coef.apply(self.context, &background_state, k)
     }
-    pub fn spectrum(&self, k_range: (f64, f64), count: usize, da: f64) -> Vec<(f64, f64)>
+    pub fn spectrum(&self, k_range: ParamRange<f64>, da: f64) -> Vec<f64>
     where
         Self: Send + Sync,
     {
         let done_count = AtomicUsize::new(0);
-        (0..count)
+        (0..k_range.count)
             .into_par_iter()
             .map(|i| {
-                let k = power_interp(k_range.0, k_range.1, (i as f64) / ((count - 1) as f64));
+                let k = k_range.log_interp(i);
                 let state = self.run(k, da, |_, _, _, _, _, _| {}).abs();
                 println!(
                     "[spectrum]({}/{}) k = {}",
                     done_count.fetch_add(1, Ordering::SeqCst) + 1,
-                    count,
+                    k_range.count,
                     k
                 );
-                (k, k * k * k / 2.0 / PI * state * state)
+                k * k * k / 2.0 / PI * state * state
             })
             .collect::<Vec<_>>()
     }
     pub fn spectrum_with_cache(
         &self,
         fname: &str,
-        k_range: (f64, f64),
-        count: usize,
+        k_range: ParamRange<f64>,
         da: f64,
-    ) -> util::Result<Vec<(f64, f64)>>
+    ) -> util::Result<Vec<f64>>
     where
         Self: Send + Sync,
     {
-        lazy_file(fname, BINCODE_CONFIG, || self.spectrum(k_range, count, da))
+        lazy_file(fname, BINCODE_CONFIG, || self.spectrum(k_range, da))
     }
 }
 

@@ -4,9 +4,7 @@ use std::{
     fs::File,
     io::{self, BufReader, BufWriter},
     marker::PhantomData,
-    mem::MaybeUninit,
     ops::{Add, Div, Index, IndexMut, Mul, Range, Sub},
-    process::Output,
     time::{Duration, SystemTime},
 };
 
@@ -16,13 +14,12 @@ use bincode::{
     decode_from_std_read, encode_into_std_write,
     error::{DecodeError, EncodeError},
 };
+use ndarray::{Linspace, linspace};
 use num_traits::{Float, FromPrimitive, Zero};
 use rayon::iter::{
     IndexedParallelIterator, ParallelIterator,
     plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge},
 };
-
-use crate::c2fn::Plus;
 
 pub const ENERGY_SPECTRUM_EVAL_FACTOR: f64 = 6.8e-7;
 
@@ -50,7 +47,7 @@ where
     a + (b - a) * i
 }
 
-pub fn power_interp<T>(a: T, b: T, i: T) -> T
+pub fn log_interp<T>(a: T, b: T, i: T) -> T
 where
     T: Float,
 {
@@ -347,4 +344,124 @@ where
         }
         ret
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct ParamRange<T> {
+    pub start: T,
+    pub end: T,
+    pub count: usize,
+}
+
+impl<T> ParamRange<T> {
+    pub fn new(start: T, end: T, count: usize) -> Self {
+        Self { start, end, count }
+    }
+}
+
+impl<T> ParamRange<T>
+where
+    T: Float,
+{
+    pub fn as_linspace(&self) -> Linspace<T> {
+        linspace(self.start, self.end, self.count)
+    }
+    pub fn as_logspace(&self) -> LogspaceIter<T> {
+        LogspaceIter {
+            start: self.start,
+            end: self.end,
+            count: self.count,
+            index: 0,
+        }
+    }
+    pub fn linear_interp(&self, i: usize) -> T {
+        assert!(i < self.count);
+        linear_interp(
+            self.start,
+            self.end,
+            T::from(i).unwrap() / T::from(self.count - 1).unwrap(),
+        )
+    }
+    pub fn log_interp(&self, i: usize) -> T {
+        assert!(i < self.count);
+        log_interp(
+            self.start,
+            self.end,
+            T::from(i).unwrap() / T::from(self.count - 1).unwrap(),
+        )
+    }
+}
+
+impl<T> Mul<T> for ParamRange<T>
+where
+    T: Mul<T, Output = T> + Copy,
+{
+    type Output = Self;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        Self {
+            start: self.start * rhs,
+            end: self.end * rhs,
+            count: self.count,
+        }
+    }
+}
+
+impl<T> Div<T> for ParamRange<T>
+where
+    T: Div<T, Output = T> + Copy,
+{
+    type Output = Self;
+
+    fn div(self, rhs: T) -> Self::Output {
+        Self {
+            start: self.start / rhs,
+            end: self.end / rhs,
+            count: self.count,
+        }
+    }
+}
+
+pub struct LogspaceIter<T> {
+    pub start: T,
+    pub end: T,
+    pub count: usize,
+    index: usize,
+}
+
+impl<T> Iterator for LogspaceIter<T>
+where
+    T: Float,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.count {
+            let p = T::from(self.index).unwrap() / T::from(self.count - 1).unwrap();
+            self.index += 1;
+            Some(log_interp(self.start, self.end, p))
+        } else {
+            None
+        }
+    }
+}
+
+pub fn first_index_of<T, I, Idx, F>(
+    arr: &I,
+    search_range: Range<Idx>,
+    mut predicate: F,
+) -> Option<<Range<Idx> as IntoIterator>::Item>
+where
+    T: ?Sized,
+    Range<Idx>: IntoIterator,
+    <Range<Idx> as IntoIterator>::Item: Copy,
+    I: ?Sized + Index<<Range<Idx> as IntoIterator>::Item, Output = T>,
+    F: FnMut(&T) -> bool,
+{
+    for i in search_range {
+        if predicate(&arr[i]) {
+            return Some(i);
+        }
+    }
+    None
 }
