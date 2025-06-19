@@ -1,15 +1,14 @@
-use std::{
-    fs::create_dir_all,
-    time::Duration,
-};
+use std::{fs::create_dir_all, time::Duration};
 
 use inflat::{
     background::{
-        BackgroundState, BackgroundStateInput, BackgroundStateInputProvider, DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelectorWithExlusion, Kappa, ScalarPerturbationFactor, ScalarPerturbationPotential, ScaleFactor, ZPotential, BINCODE_CONFIG
+        BINCODE_CONFIG, BackgroundState, BackgroundStateInput, BackgroundStateInputProvider,
+        DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelectorWithExlusion, Kappa,
+        ScalarPerturbationFactor, ScalarPerturbationPotential, ScaleFactor, ZPotential,
     },
     c2fn::{C2Fn, Plus},
     models::{ParametricResonanceParams, StarobinskyPotential, TruncSinePotential},
-    util::{lazy_file, limit_length, ParamRange, RateLimiter},
+    util::{ParamRange, RateLimiter, lazy_file, limit_length},
 };
 use libm::sqrt;
 use num_complex::ComplexFloat;
@@ -144,10 +143,16 @@ where
             plot.write_html(&format!("{}/perturbation.html", out_dir));
         }
         {
-            let spectrum =
-                pert.spectrum_with_cache(&format!("{}/spectrum.bincode", out_dir), self.spectrum_range, 0.01)?;
+            let spectrum = pert.spectrum_with_cache(
+                &format!("{}/spectrum.bincode", out_dir),
+                self.spectrum_range,
+                0.01,
+            )?;
             let mut plot = Plot::new();
-            plot.add_trace(Scatter::new(self.spectrum_range.as_logspace().collect(), spectrum));
+            plot.add_trace(Scatter::new(
+                self.spectrum_range.as_logspace().collect(),
+                spectrum,
+            ));
             plot.set_layout(
                 Layout::new()
                     .x_axis(

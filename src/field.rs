@@ -6,12 +6,13 @@ use std::{
     ops::{Add, AddAssign, DerefMut, Div, Index, Mul, Sub},
 };
 
+use bincode::{Decode, Encode};
 use num_traits::{FromPrimitive, NumAssign, Zero};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Encode, Decode)]
 pub struct Dim {
     pub x: usize,
     pub y: usize,
@@ -60,7 +61,7 @@ where
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Encode, Decode)]
 pub struct Vec3<T> {
     pub x: T,
     pub y: T,
@@ -250,15 +251,19 @@ where
 
 pub type Vec3i = Vec3<i32>;
 
+#[derive(Encode, Decode)]
 pub struct Lattice<T> {
-    data: Box<[T]>,
+    data: Vec<T>,
     dim: Dim,
 }
 
 impl<T> Lattice<T> {
-    pub fn new(dim: Dim) -> Self {
+    pub fn new(dim: Dim) -> Self
+    where
+        T: Zero + Clone,
+    {
         Self {
-            data: unsafe { Box::new_uninit_slice(dim.total_size()).assume_init() },
+            data: vec![T::zero(); dim.total_size()],
             dim,
         }
     }

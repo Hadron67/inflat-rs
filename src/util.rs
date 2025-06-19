@@ -1,11 +1,5 @@
 use std::{
-    error::Error,
-    fmt::Display,
-    fs::File,
-    io::{self, BufReader, BufWriter},
-    marker::PhantomData,
-    ops::{Add, Div, Index, IndexMut, Mul, Range, Sub},
-    time::{Duration, SystemTime},
+    error::Error, fmt::Display, fs::File, io::{self, BufReader, BufWriter}, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub}, ptr::addr_of, slice, time::{Duration, SystemTime}
 };
 
 use bincode::{
@@ -15,7 +9,7 @@ use bincode::{
     error::{DecodeError, EncodeError},
 };
 use ndarray::{Linspace, linspace};
-use num_traits::{Float, FromPrimitive, Zero};
+use num_traits::{Float, FromPrimitive, One, Zero};
 use rayon::iter::{
     IndexedParallelIterator, ParallelIterator,
     plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge},
@@ -288,13 +282,133 @@ impl RateLimiter {
     }
 }
 
+#[derive(Clone, Copy, Encode, Decode, Debug)]
 pub struct VecN<const N: usize, T> {
-    value: [T; N],
+    pub value: [T; N],
+}
+
+impl<const N: usize, T> Display for VecN<N, T> where
+    T: Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("({}", &self.value[0]))?;
+        for i in 1..N {
+            f.write_str(", ")?;
+            self.value[i].fmt(f)?;
+        }
+        f.write_str(")")?;
+        Ok(())
+    }
 }
 
 impl<const N: usize, T> VecN<N, T> {
     pub fn new(value: [T; N]) -> Self {
         Self { value }
+    }
+    pub fn zeros() -> Self
+    where
+        T: Zero + Copy,
+    {
+        Self {
+            value: [T::zero(); N],
+        }
+    }
+    pub fn strides(&self) -> Self
+    where
+        T: One + Copy,
+    {
+        let mut ret = [T::one(); N];
+        for i in 0..N - 1 {
+            ret[N - 2 - i] = ret[N - 1 - i] * self[N - 1 - i];
+        }
+        Self::new(ret)
+    }
+    pub fn decode_coord(&self, mut index: T) -> Self
+    where
+        T: DivAssign<T> + Rem<T, Output = T> + Copy,
+    {
+        let mut ret = MaybeUninit::<Self>::uninit();
+        let ptr = unsafe { &raw mut (*ret.as_mut_ptr()).value };
+        for i in 0..N {
+            let j = N - 1 - i;
+            let p = unsafe { &raw mut (*ptr)[j] };
+            unsafe { p.write(index % self[j]) };
+            index /= self[j];
+        }
+        unsafe { ret.assume_init() }
+    }
+    pub fn encode_coord(&self, coord: &Self) -> T where
+        T: One + Copy + AddAssign<T> + Mul<T, Output = T>,
+    {
+        self.strides().inner(coord)
+    }
+    pub fn product(&self) -> T
+    where
+        T: MulAssign<T> + Clone,
+    {
+        let mut ret = self.value[0].clone();
+        for val in &self.value[1..] {
+            ret *= val.clone().into();
+        }
+        ret
+    }
+    pub fn sum(&self) -> T
+    where
+        T: AddAssign<T> + Copy,
+    {
+        let mut ret = self.value[0];
+        for val in &self.value[1..] {
+            ret += *val;
+        }
+        ret
+    }
+    pub fn inner(&self, other: &Self) -> T
+    where
+        T: AddAssign<T> + Mul<T, Output = T> + Copy,
+    {
+        let mut ret = self[0] * other[0];
+        for i in 1..N {
+            ret += self[i] * other[i];
+        }
+        ret
+    }
+    pub fn map<F, T2>(&self, mut mapper: F) -> VecN<N, T2>
+    where
+        F: FnMut(&T) -> T2,
+    {
+        let mut ret = MaybeUninit::<VecN<N, T2>>::uninit();
+        let ptr = unsafe { &raw mut (*ret.as_mut_ptr()).value };
+        for i in 0..N {
+            let p = unsafe { &raw mut (*ptr)[i] };
+            unsafe { p.write(mapper(&self.value[i])) };
+        }
+        unsafe { ret.assume_init() }
+    }
+    pub fn flip(&self, size: &Self) -> Self where
+        T: Zero + One + PartialOrd<T> + Sub<T, Output = T> + Copy,
+    {
+        let mut i = 0usize;
+        self.map(|f| {
+            let f = *f;
+            let s = size[i];
+            i += 1;
+            assert!(f >= T::zero() && f < s);
+            if f == T::zero() {
+                T::zero()
+            } else {
+                s - f
+            }
+        })
+    }
+}
+
+impl<'a, const N: usize, T: 'a> IntoIterator for &'a VecN<N, T> {
+    type Item = &'a T;
+
+    type IntoIter = slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.value.iter()
     }
 }
 
@@ -464,4 +578,27 @@ where
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::util::VecN;
+
+    #[test]
+    fn coords() {
+        let dim = VecN::new([10, 11, 12]);
+        let index = 456;
+        let coord = dim.decode_coord(index);
+        assert_eq!(index, dim.encode_coord(&coord));
+    }
+
+    #[test]
+    fn flip() {
+        let dim = VecN::new([4; 3]);
+        let coord = VecN::new([0, 1, 2]);
+        let flipped = coord.flip(&dim);
+        assert_eq!(flipped[0], 0);
+        assert_eq!(flipped[1], 3);
+        assert_eq!(flipped[2], 2);
+    }
 }

@@ -1,5 +1,9 @@
 use std::{
-    cmp::{max, min}, f64::consts::PI, marker::PhantomData, ops::{AddAssign, Index, Mul}, sync::atomic::{AtomicUsize, Ordering}
+    cmp::{max, min},
+    f64::consts::PI,
+    marker::PhantomData,
+    ops::{AddAssign, Index, Mul},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use bincode::{
@@ -1541,10 +1545,20 @@ where
         })
         .unwrap_or(length - 1);
         let range = start..end;
-        let start_n = first_index_of(background, 0..length, |s|s.scale_factor().ln() > self.excluded_n_range.0).unwrap();
-        let end_n = first_index_of(background, 0..length, |s|s.scale_factor().ln() > self.excluded_n_range.1).unwrap();
+        let start_n = first_index_of(background, 0..length, |s| {
+            s.scale_factor().ln() > self.excluded_n_range.0
+        })
+        .unwrap();
+        let end_n = first_index_of(background, 0..length, |s| {
+            s.scale_factor().ln() > self.excluded_n_range.1
+        })
+        .unwrap();
         let range0 = start_n..end_n;
-        if range.contains(&start_n) || range.contains(&end_n) || range0.contains(&start) || range0.contains(&end) {
+        if range.contains(&start_n)
+            || range.contains(&end_n)
+            || range0.contains(&start)
+            || range0.contains(&end)
+        {
             (min(start, start_n), max(end, end_n))
         } else {
             (start, end)
@@ -1637,7 +1651,11 @@ where
         let (start_index, end_index) =
             self.range_selector
                 .select(self.context, self.background_state, self.length, k);
-        println!("start n = {}, end n = {}", self.background_state[start_index].scale_factor().ln(), self.background_state[end_index].scale_factor().ln());
+        println!(
+            "start n = {}, end n = {}",
+            self.background_state[start_index].scale_factor().ln(),
+            self.background_state[end_index].scale_factor().ln()
+        );
         let mut time_interpolator = LinearInterpolator {
             cursor: start_index,
             local_time: 0.0,
