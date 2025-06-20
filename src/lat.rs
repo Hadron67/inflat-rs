@@ -1,24 +1,47 @@
 use std::{
-    cmp::min, fmt::Display, io::{self, Write}, iter::Sum, marker::PhantomData, ops::{Add, AddAssign, Div, Index, IndexMut, Mul, MulAssign, Range}, ptr::NonNull
+    cmp::min,
+    fmt::Display,
+    io::{self, Write},
+    iter::Sum,
+    marker::PhantomData,
+    ops::{Add, AddAssign, Div, Index, IndexMut, Mul, MulAssign, Range, Sub},
+    ptr::NonNull,
 };
 
 use bincode::{Decode, Encode};
 use num_traits::{FromPrimitive, Zero};
 use rayon::iter::{
-    plumbing::{bridge, Producer}, IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
+    plumbing::{Producer, bridge},
 };
 
 use crate::util::VecN;
 
-pub struct LatticePos<const D: usize> {
-    pub index: usize,
-    pub coord: VecN<D, usize>,
+pub struct LatticeParam<const D: usize> {
+    pub size: VecN<D, usize>,
+    pub spacing: VecN<D, f64>,
+}
+
+pub fn wrapping_shift(coord: usize, size: usize) -> (usize, usize) {
+    (if coord + 1 == size { 0 } else { coord + 1 }, if coord == 0 { size - 1 } else { coord - 1 })
+}
+pub fn shift_coord<const D: usize>(coord: &VecN<D, usize>, size: &VecN<D, usize>, dir: usize) -> (VecN<D, usize>, VecN<D, usize>) {
+    let (p1, m1) = wrapping_shift(coord[dir], size[dir]);
+    let mut coord_p1 = *coord;
+    let mut coord_m1 = *coord;
+    coord_p1[dir] = p1;
+    coord_m1[dir] = m1;
+    (coord_p1, coord_m1)
 }
 
 pub trait Lattice<const D: usize, T> {
     fn dim(&self) -> &VecN<D, usize>;
     fn get(&self, index: usize, coord: &VecN<D, usize>) -> T;
-    fn dump<R, W>(&self, tag: &R, write: &mut W) -> io::Result<()> where
+    fn get_by_coord(&self, coord: &VecN<D, usize>) -> T {
+        self.get(self.dim().encode_coord(coord), coord)
+    }
+    fn dump<R, W>(&self, tag: &R, write: &mut W) -> io::Result<()>
+    where
         W: ?Sized + Write,
         R: ?Sized + Display,
         T: Display,
@@ -53,32 +76,64 @@ pub trait Lattice<const D: usize, T> {
             _src: PhantomData,
         }
     }
-    fn flip(self) -> LatticeFlip<D, Self> where  Self: Sized {
-        LatticeFlip { field: self }
-    }
-    fn mul_scalar(self, factor: T) -> LatticeScalarMul<D, T, Self> where
+    fn flip(self) -> LatticeFlip<D, Self>
+    where
         Self: Sized,
     {
-        LatticeScalarMul { factor, field: self }
+        LatticeFlip { field: self }
     }
-    fn sum(&self) -> T where
+    fn mul_scalar(self, factor: T) -> LatticeScalarMul<D, T, Self>
+    where
+        Self: Sized,
+    {
+        LatticeScalarMul {
+            factor,
+            field: self,
+        }
+    }
+    fn sum(&self) -> T
+    where
         T: FromPrimitive + MulAssign<T> + Send + Sum,
         Self: Sync,
     {
         let dim = self.dim();
-        (0..dim.product()).into_par_iter().map(|index|self.get(index, &dim.decode_coord(index))).sum::<T>()
+        (0..dim.product())
+            .into_par_iter()
+            .map(|index| self.get(index, &dim.decode_coord(index)))
+            .sum::<T>()
     }
-    fn average(&self) -> T where
+    fn average(&self) -> T
+    where
         T: FromPrimitive + MulAssign<T> + Div<T, Output = T> + Send + Sum,
         Self: Sync,
     {
         self.sum() / T::from_usize(self.dim().product()).unwrap()
     }
+    fn derivative_dir_at<T2>(&self, coord: &VecN<D, usize>, dir: usize) -> T where
+        T: Sub<T, Output = T> + Div<T, Output = T> + FromPrimitive,
+    {
+        let (p1, m1) = shift_coord(coord, self.dim(), dir);
+        (self.get_by_coord(&p1) - self.get_by_coord(&m1)) / T::from_i32(2).unwrap()
+    }
+    fn laplacian_at<T2>(&self, coord: &VecN<D, usize>, dx: &VecN<D, T2>) -> T where
+        T: Zero + FromPrimitive + Mul<T, Output = T> + Sub<T, Output = T> + Div<T, Output = T> + AddAssign<T> + Clone,
+        T2: Into<T> + Clone,
+    {
+        let mut ret = T::zero();
+        let two = T::from_i32(2).unwrap();
+        for dir in 0..D {
+            let (p1, m1) = shift_coord(coord, self.dim(), dir);
+            let d = self.get_by_coord(&p1) + self.get_by_coord(&m1) - two.clone() * self.get_by_coord(coord);
+            ret += d / dx[dir].clone().into();
+        }
+        ret
+    }
 }
 
 pub trait LatticeMut<const D: usize, T> {
     fn get_mut(&mut self, index: usize, coord: &VecN<D, usize>) -> &mut T;
-    fn for_each<F>(&mut self, mut op: F) where
+    fn for_each<F>(&mut self, mut op: F)
+    where
         F: FnMut(&mut T, usize, &VecN<D, usize>),
         Self: Lattice<D, T>,
     {
@@ -160,7 +215,10 @@ pub struct LatticeSupplier<const D: usize, F> {
 }
 
 impl<const D: usize, F> LatticeSupplier<D, F> {
-    pub fn new<T>(dim: VecN<D, usize>, supplier: F) -> Self where F: Fn(usize, &VecN<D, usize>) -> T, {
+    pub fn new<T>(dim: VecN<D, usize>, supplier: F) -> Self
+    where
+        F: Fn(usize, &VecN<D, usize>) -> T,
+    {
         Self { dim, supplier }
     }
 }
@@ -183,7 +241,8 @@ pub struct LatticeFlip<const D: usize, F> {
     field: F,
 }
 
-impl<const D: usize, T, F> Lattice<D, T> for LatticeFlip<D, F> where
+impl<const D: usize, T, F> Lattice<D, T> for LatticeFlip<D, F>
+where
     F: Lattice<D, T>,
 {
     fn dim(&self) -> &VecN<D, usize> {
@@ -204,7 +263,8 @@ pub struct LatticeScalarMul<const D: usize, T, F> {
     field: F,
 }
 
-impl<const D: usize, T, F> Lattice<D, T> for LatticeScalarMul<D, T, F> where
+impl<const D: usize, T, F> Lattice<D, T> for LatticeScalarMul<D, T, F>
+where
     F: Lattice<D, T>,
     T: Mul<T, Output = T> + Clone,
 {
@@ -224,8 +284,14 @@ pub struct BoxLattice<const D: usize, T> {
 }
 
 impl<const D: usize, T> BoxLattice<D, T> {
-    pub fn zeros(dim: VecN<D, usize>) -> Self where T: Zero + Copy {
-        Self { data: vec![T::zero(); dim.product()], dim }
+    pub fn zeros(dim: VecN<D, usize>) -> Self
+    where
+        T: Zero + Copy,
+    {
+        Self {
+            data: vec![T::zero(); dim.product()],
+            dim,
+        }
     }
     pub fn view(&self) -> LatticeView<'_, D, [T], T, DirectStride> {
         LatticeView {
@@ -482,7 +548,9 @@ impl<'a, const D: usize, T: Send + Sync> ParallelIterator for CoAxisParallelIter
     }
 }
 
-impl<'a, const D: usize, T: Send + Sync> IndexedParallelIterator for CoAxisParallelIteratorMut<'a, D, T> {
+impl<'a, const D: usize, T: Send + Sync> IndexedParallelIterator
+    for CoAxisParallelIteratorMut<'a, D, T>
+{
     fn len(&self) -> usize {
         self.0.cursor.len()
     }
@@ -549,7 +617,10 @@ impl<T> IndexMut<usize> for ArrayMut<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{lat::{BoxLattice, Lattice, LatticeMut}, util::VecN};
+    use crate::{
+        lat::{BoxLattice, Lattice, LatticeMut},
+        util::VecN,
+    };
 
     #[test]
     fn co_axis_iter() {
@@ -566,7 +637,7 @@ mod tests {
                 assert_eq!(lat[[x, 1, z]], z as i32);
             }
         }
-        lat.for_each(|p, _, _|*p = 0);
+        lat.for_each(|p, _, _| *p = 0);
         lat.par_axis_co_iter_mut(0).for_each(|(coord, mut arr)| {
             println!("coord = {}", &coord);
             arr[0] = coord[1] as i32;
@@ -584,14 +655,17 @@ mod tests {
     fn flip() {
         let dim = VecN::new([4; 3]);
         let mut lat = BoxLattice::zeros(dim);
-        lat.for_each(|ptr, index, _|*ptr = index);
+        lat.for_each(|ptr, index, _| *ptr = index);
         let flipped = lat.view().flip();
         for index in 0..dim.product() {
             let coord = dim.decode_coord(index);
             let flipped_coord = coord.flip(&dim);
             let flipped_index = dim.encode_coord(&flipped_coord);
             println!("testing coord = {}, flipped = {}", &coord, &flipped_coord);
-            assert_eq!(lat.get(index, &coord), flipped.get(flipped_index, &flipped_coord));
+            assert_eq!(
+                lat.get(index, &coord),
+                flipped.get(flipped_index, &flipped_coord)
+            );
         }
     }
 }

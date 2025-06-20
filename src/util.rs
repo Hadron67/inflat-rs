@@ -1,5 +1,13 @@
 use std::{
-    error::Error, fmt::Display, fs::File, io::{self, BufReader, BufWriter}, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub}, ptr::addr_of, slice, time::{Duration, SystemTime}
+    error::Error,
+    fmt::Display,
+    fs::File,
+    io::{self, BufReader, BufWriter},
+    marker::PhantomData,
+    mem::MaybeUninit,
+    ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub},
+    slice,
+    time::{Duration, SystemTime},
 };
 
 use bincode::{
@@ -287,7 +295,8 @@ pub struct VecN<const N: usize, T> {
     pub value: [T; N],
 }
 
-impl<const N: usize, T> Display for VecN<N, T> where
+impl<const N: usize, T> Display for VecN<N, T>
+where
     T: Display,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -337,7 +346,8 @@ impl<const N: usize, T> VecN<N, T> {
         }
         unsafe { ret.assume_init() }
     }
-    pub fn encode_coord(&self, coord: &Self) -> T where
+    pub fn encode_coord(&self, coord: &Self) -> T
+    where
         T: One + Copy + AddAssign<T> + Mul<T, Output = T>,
     {
         self.strides().inner(coord)
@@ -384,7 +394,16 @@ impl<const N: usize, T> VecN<N, T> {
         }
         unsafe { ret.assume_init() }
     }
-    pub fn flip(&self, size: &Self) -> Self where
+    pub fn map_at<F>(&self, index: usize, mut mapper: F) -> Self where
+        F: FnMut(T) -> T,
+        T: Clone,
+    {
+        let mut ret = self.clone();
+        ret[index] = mapper(ret[index].clone());
+        ret
+    }
+    pub fn flip(&self, size: &Self) -> Self
+    where
         T: Zero + One + PartialOrd<T> + Sub<T, Output = T> + Copy,
     {
         let mut i = 0usize;
@@ -393,11 +412,7 @@ impl<const N: usize, T> VecN<N, T> {
             let s = size[i];
             i += 1;
             assert!(f >= T::zero() && f < s);
-            if f == T::zero() {
-                T::zero()
-            } else {
-                s - f
-            }
+            if f == T::zero() { T::zero() } else { s - f }
         })
     }
 }
