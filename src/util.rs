@@ -394,7 +394,8 @@ impl<const N: usize, T> VecN<N, T> {
         }
         unsafe { ret.assume_init() }
     }
-    pub fn map_at<F>(&self, index: usize, mut mapper: F) -> Self where
+    pub fn map_at<F>(&self, index: usize, mut mapper: F) -> Self
+    where
         F: FnMut(T) -> T,
         T: Clone,
     {

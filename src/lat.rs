@@ -23,9 +23,16 @@ pub struct LatticeParam<const D: usize> {
 }
 
 pub fn wrapping_shift(coord: usize, size: usize) -> (usize, usize) {
-    (if coord + 1 == size { 0 } else { coord + 1 }, if coord == 0 { size - 1 } else { coord - 1 })
+    (
+        if coord + 1 == size { 0 } else { coord + 1 },
+        if coord == 0 { size - 1 } else { coord - 1 },
+    )
 }
-pub fn shift_coord<const D: usize>(coord: &VecN<D, usize>, size: &VecN<D, usize>, dir: usize) -> (VecN<D, usize>, VecN<D, usize>) {
+pub fn shift_coord<const D: usize>(
+    coord: &VecN<D, usize>,
+    size: &VecN<D, usize>,
+    dir: usize,
+) -> (VecN<D, usize>, VecN<D, usize>) {
     let (p1, m1) = wrapping_shift(coord[dir], size[dir]);
     let mut coord_p1 = *coord;
     let mut coord_m1 = *coord;
@@ -109,29 +116,85 @@ pub trait Lattice<const D: usize, T> {
     {
         self.sum() / T::from_usize(self.dim().product()).unwrap()
     }
-    fn derivative_dir_at<T2>(&self, coord: &VecN<D, usize>, dir: usize) -> T where
+    fn derivative_dir_at(&self, coord: &VecN<D, usize>, dx: T, dir: usize) -> T
+    where
         T: Sub<T, Output = T> + Div<T, Output = T> + FromPrimitive,
     {
         let (p1, m1) = shift_coord(coord, self.dim(), dir);
-        (self.get_by_coord(&p1) - self.get_by_coord(&m1)) / T::from_i32(2).unwrap()
+        (self.get_by_coord(&p1) - self.get_by_coord(&m1)) / T::from_i32(2).unwrap() / dx
     }
-    fn laplacian_at<T2>(&self, coord: &VecN<D, usize>, dx: &VecN<D, T2>) -> T where
-        T: Zero + FromPrimitive + Mul<T, Output = T> + Sub<T, Output = T> + Div<T, Output = T> + AddAssign<T> + Clone,
+    fn derivative_square_at<T2>(&self, coord: &VecN<D, usize>, dx: &VecN<D, T2>) -> T
+    where
+        T: Sub<T, Output = T>
+            + Div<T, Output = T>
+            + FromPrimitive
+            + AddAssign<T>
+            + Mul<T, Output = T>
+            + Clone,
+        T2: Into<T> + Clone,
+    {
+        let mut ret = {
+            let a = self.derivative_dir_at(coord, dx[0].clone().into(), 0);
+            a.clone() * a
+        };
+        for dir in 1..D {
+            let a = self.derivative_dir_at(coord, dx[dir].clone().into(), dir);
+            ret += a.clone() * a;
+        }
+        ret
+    }
+    fn laplacian_at<T2>(&self, coord: &VecN<D, usize>, dx: &VecN<D, T2>) -> T
+    where
+        T: Zero
+            + FromPrimitive
+            + Mul<T, Output = T>
+            + Sub<T, Output = T>
+            + Div<T, Output = T>
+            + AddAssign<T>
+            + Clone,
         T2: Into<T> + Clone,
     {
         let mut ret = T::zero();
         let two = T::from_i32(2).unwrap();
         for dir in 0..D {
             let (p1, m1) = shift_coord(coord, self.dim(), dir);
-            let d = self.get_by_coord(&p1) + self.get_by_coord(&m1) - two.clone() * self.get_by_coord(coord);
-            ret += d / dx[dir].clone().into();
+            let d = self.get_by_coord(&p1) + self.get_by_coord(&m1)
+                - two.clone() * self.get_by_coord(coord);
+            let dx2: T = dx[dir].clone().into();
+            ret += d / dx2.clone() / dx2;
         }
         ret
+    }
+    fn derivative_square<T2>(self, dx: &VecN<D, T2>) -> LatticeDerivativeSquare<D, T, Self>
+    where
+        T2: Into<T> + Clone,
+        Self: Sized,
+    {
+        LatticeDerivativeSquare {
+            field: self,
+            dx: dx.map(|f| f.clone().into()),
+        }
+    }
+    fn laplacian<T2>(self, dx: &VecN<D, T2>) -> LatticeLaplacian<D, T, Self>
+    where
+        T2: Into<T> + Clone,
+        Self: Sized,
+    {
+        LatticeLaplacian {
+            field: self,
+            dx: dx.map(|f| f.clone().into()),
+        }
     }
 }
 
 pub trait LatticeMut<const D: usize, T> {
     fn get_mut(&mut self, index: usize, coord: &VecN<D, usize>) -> &mut T;
+    fn get_mut_by_coord(&mut self, coord: &VecN<D, usize>) -> &mut T
+    where
+        Self: Lattice<D, T>,
+    {
+        self.get_mut(self.dim().encode_coord(coord), coord)
+    }
     fn for_each<F>(&mut self, mut op: F)
     where
         F: FnMut(&mut T, usize, &VecN<D, usize>),
@@ -274,6 +337,55 @@ where
 
     fn get(&self, index: usize, coord: &VecN<D, usize>) -> T {
         self.factor.clone() * self.field.get(index, coord)
+    }
+}
+
+#[must_use = "Lattice operations do nothing unless used"]
+pub struct LatticeDerivativeSquare<const D: usize, T, F> {
+    field: F,
+    dx: VecN<D, T>,
+}
+
+impl<const D: usize, T, F> Lattice<D, T> for LatticeDerivativeSquare<D, T, F>
+where
+    T: Sub<T, Output = T>
+        + Div<T, Output = T>
+        + FromPrimitive
+        + AddAssign<T>
+        + Mul<T, Output = T>
+        + Clone,
+    F: Lattice<D, T>,
+{
+    fn dim(&self) -> &VecN<D, usize> {
+        self.field.dim()
+    }
+
+    fn get(&self, _index: usize, coord: &VecN<D, usize>) -> T {
+        self.field.derivative_square_at(coord, &self.dx)
+    }
+}
+
+pub struct LatticeLaplacian<const D: usize, T, F> {
+    field: F,
+    dx: VecN<D, T>,
+}
+
+impl<const D: usize, T, F> Lattice<D, T> for LatticeLaplacian<D, T, F>
+where
+    F: Lattice<D, T>,
+    T: Sub<T, Output = T>
+        + Div<T, Output = T>
+        + FromPrimitive
+        + AddAssign<T>
+        + Mul<T, Output = T>
+        + Clone,
+{
+    fn dim(&self) -> &VecN<D, usize> {
+        self.field.dim()
+    }
+
+    fn get(&self, _index: usize, coord: &VecN<D, usize>) -> T {
+        self.field.derivative_square_at(coord, &self.dx)
     }
 }
 
