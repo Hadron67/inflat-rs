@@ -290,7 +290,7 @@ impl RateLimiter {
     }
 }
 
-#[derive(Clone, Copy, Encode, Decode, Debug)]
+#[derive(Clone, Copy, Encode, Decode, Debug, Hash, PartialEq, Eq)]
 pub struct VecN<const N: usize, T> {
     pub value: [T; N],
 }
@@ -594,6 +594,10 @@ where
         }
     }
     None
+}
+
+pub struct TimeEstimator {
+    
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use std::{
-    cmp::min,
+    cmp::{Ordering, min},
     fmt::Display,
     io::{self, Write},
     iter::Sum,
@@ -46,6 +46,30 @@ pub trait Lattice<const D: usize, T> {
     fn get(&self, index: usize, coord: &VecN<D, usize>) -> T;
     fn get_by_coord(&self, coord: &VecN<D, usize>) -> T {
         self.get(self.dim().encode_coord(coord), coord)
+    }
+    fn max_by<F>(&self, cmp: F) -> (VecN<D, usize>, T)
+    where
+        T: Send + Clone + Sync,
+        Self: Sync,
+        F: Sync + Fn(&T, &T) -> Ordering,
+    {
+        let dim = *self.dim();
+        let n = self.get(0, &VecN::new([0; D]));
+        let max_index = (0..dim.product())
+            .into_par_iter()
+            .map(|index| (index, self.get(index, &dim.decode_coord(index))))
+            .reduce(
+                || (0, n.clone()),
+                |a, b| if cmp(&a.1, &b.1).is_ge() { a } else { b },
+            );
+        (dim.decode_coord(max_index.0), max_index.1.clone())
+    }
+    fn max(&self) -> (VecN<D, usize>, T)
+    where
+        T: Ord + Send + Clone + Sync,
+        Self: Sync,
+    {
+        self.max_by(|a, b| a.cmp(b))
     }
     fn dump<R, W>(&self, tag: &R, write: &mut W) -> io::Result<()>
     where

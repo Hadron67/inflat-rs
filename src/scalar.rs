@@ -1,7 +1,8 @@
-use std::f64::consts::PI;
+use std::{collections::HashMap, f64::consts::PI, iter::zip};
 
 use bincode::{Decode, Encode};
 use libm::{pow, sin, sqrt};
+use num_complex::ComplexFloat;
 use random::Source;
 use rustfft::{FftDirection, num_complex::Complex64};
 
@@ -78,7 +79,7 @@ impl<const D: usize, F> ScalarFieldParams<D, F> {
             * self.kappa
             / d
             / (d - 1.0);
-        v_a2.sqrt()
+        -v_a2.sqrt()
     }
     pub fn init_slowroll(&self, field: &mut ScalarFieldState<D>, a0: f64, phi0: f64)
     where
@@ -106,32 +107,38 @@ impl<const D: usize, F> ScalarFieldParams<D, F> {
         F: C2Fn<f64, Output = f64> + Send + Sync,
     {
         let dim = *field.phi.dim();
+        let a = Self::b_to_a(field.b, self.kappa);
         let volumn = self.lattice.spacing.product() * (self.lattice.size.product() as f64);
         let mut noise_phi = BoxLattice::<D, Complex64>::zeros(self.lattice.size);
         let mut noise_v_phi = BoxLattice::<D, Complex64>::zeros(self.lattice.size);
-        for index in 0..dim.product() {
+        for index in 1..dim.product() {
             let coord = dim.decode_coord(index);
             let rev_coord = coord.flip(&dim);
             let phase = 2.0 * PI * source.read_f64();
             let m = sqrt(-source.read_f64().ln() / 2.0);
             let al = m * Complex64::new(phase.cos(), phase.sin());
             let k_eff = effective_mom(&coord, &self.lattice.spacing, &self.lattice.size);
-            let u = volumn.sqrt() * Complex64::new(1.0 / sqrt(2.0 * k_eff), 0.0);
-            let u_d = volumn.sqrt() * Complex64::new(0.0, -sqrt(k_eff / 2.0));
-            *noise_phi.get_mut(index, &coord) += u * al;
-            *noise_v_phi.get_mut(index, &coord) += u_d * al;
+            let u = 1.0 / volumn.sqrt() * Complex64::new(1.0 / sqrt(2.0 * k_eff), 0.0);
+            let u_d = 1.0 / volumn.sqrt() / a * Complex64::new(0.0, -sqrt(k_eff / 2.0));
+            *noise_phi.get_mut(index, &coord) += al * u;
+            *noise_v_phi.get_mut(index, &coord) += al * u_d;
             *noise_phi.get_mut_by_coord(&rev_coord) += al.conj() * u.conj();
             *noise_v_phi.get_mut_by_coord(&rev_coord) += al.conj() * u_d.conj();
         }
         let fft = DftNDPlan::new(self.lattice.size.value, FftDirection::Forward);
         fft.transform_inplace(&mut noise_phi);
         fft.transform_inplace(&mut noise_v_phi);
+
         let a_dimx = Self::b_to_a(field.b, self.kappa).powi(D as i32);
         field.phi.par_add_assign(&noise_phi.view().map(|f| f.re));
         field
             .mom_phi
             .par_add_assign(&noise_v_phi.view().map(|f| f.re * a_dimx));
-        field.mom_b = -self.v_a_from_hubble_constraint(field);
+        field.mom_b = Self::v_a_to_mom_b(
+            self.v_a_from_hubble_constraint(field),
+            Self::b_to_a(field.b, self.kappa),
+            self.kappa,
+        );
     }
     pub fn apply_k1(&self, field: &mut ScalarFieldState<D>, dt: f64) {
         field.b -= dt * field.mom_b;
@@ -155,12 +162,22 @@ impl<const D: usize, F> ScalarFieldParams<D, F> {
         let d = D as f64;
         let a = pow(2.0, 4.0 / d - 2.0)
             * pow((d - 1.0) / d, 2.0 / d - 1.0)
-            * field.b.powf(2.0 - 4.0 / d)
             * self.kappa.powf(1.0 - 2.0 / d);
-        field.mom_b -= d * field.b * self.kappa / 2.0 / (d - 1.0)
-            * field.phi.view().map(|f| self.potential.value(f)).average();
+        field.mom_b -= 0.5
+            * a
+            * (2.0 - 4.0 / d)
+            * field.b.powf(1.0 - 4.0 / d)
+            * field
+                .phi
+                .view()
+                .derivative_square(&self.lattice.spacing)
+                .average()
+            + d * field.b * self.kappa / 2.0 / (d - 1.0)
+                * field.phi.view().map(|f| self.potential.value(f)).average();
         field.mom_phi.par_for_each_mut(|ptr, index, coord| {
-            let dd = a * field.phi.laplacian_at(coord, &self.lattice.spacing)
+            let dd = a
+                * field.b.powf(2.0 - 4.0 / d)
+                * field.phi.laplacian_at(coord, &self.lattice.spacing)
                 - d / 4.0 / (d - 1.0)
                     * field.b
                     * field.b
@@ -197,6 +214,53 @@ impl<const D: usize, F> ScalarFieldParams<D, F> {
             .view()
             .map(|mom_phi| 4.0 * (d - 1.0) / d / self.kappa / field.b / field.b * mom_phi)
             .average()
+    }
+    pub fn spectrum_with_scratch(
+        &self,
+        field: &ScalarFieldState<D>,
+        scratch: &mut BoxLattice<D, Complex64>,
+    ) -> Vec<(f64, f64)> {
+        let dft = DftNDPlan::new(self.lattice.size.value, FftDirection::Forward);
+        scratch.par_assign(&{
+            let phi = field.phi.average();
+            field.phi.view().map(move |f| (f - phi).into())
+        });
+        dft.transform_inplace(scratch);
+        let mut spectrum_by_modes = HashMap::new();
+        let dim = self.lattice.size;
+        for index in 0..dim.product() {
+            let coord = dim.decode_coord(index);
+            let rev_coord = coord.flip(&dim);
+            let mode = VecN::new({
+                let mut c = coord.value;
+                for (cc, size) in zip(&mut c, &self.lattice.size) {
+                    if *cc > size / 2 {
+                        *cc = size - *cc;
+                    }
+                }
+                c.sort();
+                c
+            });
+            let value = scratch.get_by_coord(&coord) * scratch.get_by_coord(&rev_coord);
+            if !spectrum_by_modes.contains_key(&mode) {
+                spectrum_by_modes.insert(mode, (0usize, 0.0));
+            }
+            let ptr = spectrum_by_modes.get_mut(&mode).unwrap();
+            ptr.0 += 1;
+            ptr.1 += value.re;
+        }
+        let mut ret = spectrum_by_modes
+            .iter()
+            .map(|(mode, (count, value))| {
+                let k_eff = effective_mom(mode, &self.lattice.spacing, &self.lattice.size);
+                (k_eff, k_eff.powi(D as i32) * *value / (*count as f64))
+            })
+            .collect::<Vec<_>>();
+        ret.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        ret
+    }
+    pub fn spectrum(&self, field: &ScalarFieldState<D>) -> Vec<(f64, f64)> {
+        self.spectrum_with_scratch(field, &mut BoxLattice::zeros(self.lattice.size))
     }
 }
 
