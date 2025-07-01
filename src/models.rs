@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use libm::{cos, exp, sin, sqrt};
+use libm::{cos, cosh, exp, sin, sqrt, tanh};
 use num_traits::Zero;
 
 use crate::{c2fn::C2Fn, util::sigmoid};
@@ -245,5 +245,30 @@ impl C2Fn<f64> for TruncSinePotential {
         } else {
             0.0
         }
+    }
+}
+
+pub struct TanhPotential {
+    pub coef: f64,
+    pub omega: f64,
+    pub shift: f64,
+}
+
+impl C2Fn<f64> for TanhPotential {
+    type Output = f64;
+
+    fn value(&self, phi: f64) -> Self::Output {
+        self.coef * tanh(self.omega * phi + self.shift)
+    }
+
+    fn value_d(&self, phi: f64) -> Self::Output {
+        let s = cosh(self.omega * phi + self.shift);
+        self.coef * self.omega / s / s
+    }
+
+    fn value_dd(&self, phi: f64) -> Self::Output {
+        let t = tanh(self.omega * phi + self.shift);
+        let s = cosh(self.omega * phi + self.shift);
+        -2.0 * self.coef * self.omega * self.omega * t / s / s
     }
 }

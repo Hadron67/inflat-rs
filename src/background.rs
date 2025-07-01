@@ -16,13 +16,14 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
     c2fn::{C2Fn, C2Fn2},
-    util::{self, ParamRange, VecN, first_index_of, lazy_file, linear_interp},
+    util::{self, ParamRange, VecN, first_index_of, lazy_file},
 };
 
+#[macro_export]
 macro_rules! interpolate_fields {
     ($ty:ident, $str1:expr, $str2:expr, $l: expr, $($field:ident),*) => {
         $ty {
-            $($field: linear_interp($str1.$field, $str2.$field, $l)),*,
+            $($field: $crate::util::linear_interp($str1.$field, $str2.$field, $l)),*,
             dt: $str1.dt * (1.0 - $l),
         }
     };
@@ -63,10 +64,20 @@ pub struct BackgroundInput<F1, F2, F3> {
     pub potential_dd: F3,
 }
 
-pub trait TimeStateData {
+pub trait Interpolate {
     fn interpolate(&self, other: &Self, l: f64) -> Self
     where
         Self: Sized;
+}
+
+pub trait Dimension {
+    fn dimension(&self) -> usize;
+}
+
+impl Dimension for usize {
+    fn dimension(&self) -> usize {
+        *self
+    }
 }
 
 pub trait Dt {
@@ -251,7 +262,7 @@ impl BackgroundState {
     }
 }
 
-impl TimeStateData for BackgroundState {
+impl Interpolate for BackgroundState {
     fn interpolate(&self, other: &Self, l: f64) -> Self {
         interpolate_fields!(Self, self, other, l, b, mom_b, phi, mom_phi)
     }
@@ -1254,7 +1265,7 @@ impl TwoFieldBackgroundState {
     }
 }
 
-impl TimeStateData for TwoFieldBackgroundState {
+impl Interpolate for TwoFieldBackgroundState {
     fn interpolate(&self, other: &Self, l: f64) -> Self {
         interpolate_fields!(Self, self, other, l, b, mom_b, phi, mom_phi, chi, mom_chi)
     }
@@ -1362,7 +1373,7 @@ impl LinearInterpolator {
     pub fn get<I>(&self, states: &I) -> I::Output
     where
         I: Index<usize> + ?Sized,
-        I::Output: TimeStateData + Dt + Sized,
+        I::Output: Interpolate + Dt + Sized,
     {
         let s = &states[self.cursor];
         s.interpolate(s, self.local_time / s.dt())
@@ -1620,7 +1631,7 @@ impl<'a, 'b, Ctx, I, B, Initializer, Potential, Horizon, PertCoef>
 where
     Ctx: ?Sized,
     I: Index<usize, Output = B> + ?Sized,
-    B: TimeStateData + Dt + ScaleFactor,
+    B: Interpolate + Dt + ScaleFactor,
     Potential: BackgroundFn<Ctx, B, Output = f64>,
     Horizon: IndexRangeSelector<Ctx, B>,
     Initializer: BackgroundFn<Ctx, B, Output = (Complex64, Complex64)>,
@@ -1651,11 +1662,6 @@ where
         let (start_index, end_index) =
             self.range_selector
                 .select(self.context, self.background_state, self.length, k);
-        println!(
-            "start n = {}, end n = {}",
-            self.background_state[start_index].scale_factor().ln(),
-            self.background_state[end_index].scale_factor().ln()
-        );
         let mut time_interpolator = LinearInterpolator {
             cursor: start_index,
             local_time: 0.0,
@@ -2039,7 +2045,7 @@ impl PhiD for BiNymtgBackgroundState {
     }
 }
 
-impl TimeStateData for BiNymtgBackgroundState {
+impl Interpolate for BiNymtgBackgroundState {
     fn interpolate(&self, other: &Self, l: f64) -> Self
     where
         Self: Sized,

@@ -278,3 +278,91 @@ fn effective_mom<const D: usize>(
     }
     2.0 * ret.sqrt()
 }
+
+pub fn populate_noise<const D: usize, S>(
+    lattice: &LatticeParam<D>,
+    a: f64,
+    v_a: f64,
+    source: &mut S,
+    noise_phi: &mut BoxLattice<D, Complex64>,
+    noise_v_phi: &mut BoxLattice<D, Complex64>,
+) where
+    S: Source,
+{
+    let dim = &lattice.size;
+    let volumn = lattice.spacing.product() * (lattice.size.product() as f64);
+    for index in 1..dim.product() {
+        let coord = dim.decode_coord(index);
+        let rev_coord = coord.flip(&dim);
+        let phase = 2.0 * PI * source.read_f64();
+        let m = sqrt(-source.read_f64().ln() / 2.0);
+        let al = m * Complex64::new(phase.cos(), phase.sin());
+        let k_eff = effective_mom(&coord, &lattice.spacing, &lattice.size);
+        let u = 1.0 / volumn.sqrt() * Complex64::new(1.0 / sqrt(2.0 * k_eff), 0.0);
+        let u_d = 1.0 / volumn.sqrt() * Complex64::new(0.0, -sqrt(k_eff / 2.0));
+        *noise_phi.get_mut(index, &coord) += al * u;
+        *noise_v_phi.get_mut(index, &coord) += al * u_d;
+        *noise_phi.get_mut_by_coord(&rev_coord) += al.conj() * u.conj();
+        *noise_v_phi.get_mut_by_coord(&rev_coord) += al.conj() * u_d.conj();
+    }
+    let fft = DftNDPlan::new(lattice.size.value, FftDirection::Forward);
+    fft.transform_inplace(noise_phi);
+    fft.transform_inplace(noise_v_phi);
+    noise_v_phi.par_for_each_mut(|ptr, index, coord| {
+        *ptr = *ptr / a / a - noise_phi.get(index, coord) * (v_a / a / a);
+    });
+    noise_phi.par_for_each_mut(|ptr, _, _| *ptr /= a);
+}
+
+pub fn spectrum_with_scratch<const D: usize>(
+    phi: &BoxLattice<D, f64>,
+    lattice: &LatticeParam<D>,
+    scratch_field: &mut BoxLattice<D, Complex64>,
+) -> Vec<(f64, f64)> {
+    let dft = DftNDPlan::new(lattice.size.value, FftDirection::Forward);
+    scratch_field.par_assign(&{
+        let avg_phi = phi.average();
+        phi.view().map(move |f| (f - avg_phi).into())
+    });
+    dft.transform_inplace(scratch_field);
+    let mut spectrum_by_modes = HashMap::new();
+    let dim = lattice.size;
+    for index in 0..dim.product() {
+        let coord = dim.decode_coord(index);
+        let rev_coord = coord.flip(&dim);
+        let mode = VecN::new({
+            let mut c = coord.value;
+            for (cc, size) in zip(&mut c, &lattice.size) {
+                if *cc > size / 2 {
+                    *cc = size - *cc;
+                }
+            }
+            c.sort();
+            c
+        });
+        let value = scratch_field.get_by_coord(&coord) * scratch_field.get_by_coord(&rev_coord);
+        if !spectrum_by_modes.contains_key(&mode) {
+            spectrum_by_modes.insert(mode, (0usize, 0.0));
+        }
+        let ptr = spectrum_by_modes.get_mut(&mode).unwrap();
+        ptr.0 += 1;
+        ptr.1 += value.re;
+    }
+    let mut ret = spectrum_by_modes
+        .iter()
+        .map(|(mode, (count, value))| {
+            let k_eff = effective_mom(mode, &lattice.spacing, &lattice.size);
+            (k_eff, k_eff.powi(D as i32) * *value / (*count as f64))
+        })
+        .collect::<Vec<_>>();
+    ret.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    ret
+}
+
+pub fn spectrum<const D: usize>(
+    phi: &BoxLattice<D, f64>,
+    lattice: &LatticeParam<D>,
+) -> Vec<(f64, f64)> {
+    let mut scratch_field = BoxLattice::zeros(lattice.size);
+    spectrum_with_scratch(phi, lattice, &mut scratch_field)
+}

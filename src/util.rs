@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     error::Error,
     fmt::Display,
     fs::File,
@@ -16,7 +17,9 @@ use bincode::{
     decode_from_std_read, encode_into_std_write,
     error::{DecodeError, EncodeError},
 };
+use libm::sqrt;
 use ndarray::{Linspace, linspace};
+use num_complex::Complex64;
 use num_traits::{Float, FromPrimitive, One, Zero};
 use rayon::iter::{
     IndexedParallelIterator, ParallelIterator,
@@ -264,14 +267,14 @@ where
 
 pub struct RateLimiter {
     interval: Duration,
-    last_time: SystemTime,
+    last_time: Option<SystemTime>,
 }
 
 impl RateLimiter {
     pub fn new(interval: Duration) -> Self {
         Self {
             interval,
-            last_time: SystemTime::now(),
+            last_time: None,
         }
     }
     pub fn run<A>(&mut self, mut action: A)
@@ -280,11 +283,15 @@ impl RateLimiter {
     {
         if self
             .last_time
-            .elapsed()
-            .map(|t| t > self.interval)
-            .unwrap_or(false)
+            .map(|last_time| {
+                last_time
+                    .elapsed()
+                    .map(|i| i > self.interval)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true)
         {
-            self.last_time = SystemTime::now();
+            self.last_time = Some(SystemTime::now());
             action();
         }
     }
@@ -576,6 +583,42 @@ where
     }
 }
 
+pub struct TimeEstimator {
+    pub range: Range<f64>,
+    current: f64,
+    last_time: SystemTime,
+    speeds: VecDeque<f64>,
+}
+
+impl TimeEstimator {
+    pub fn new(range: Range<f64>, speeds: usize) -> Self {
+        Self {
+            current: range.start,
+            range,
+            last_time: SystemTime::now(),
+            speeds: VecDeque::with_capacity(speeds),
+        }
+    }
+    pub fn update(&mut self, value: f64) {
+        if let Ok(time) = self.last_time.elapsed() {
+            self.last_time = SystemTime::now();
+            let speed = (value - self.current) / time.as_secs_f64();
+            while self.speeds.len() >= self.speeds.capacity() {
+                self.speeds.pop_front();
+            }
+            self.speeds.push_back(speed);
+        }
+        self.current = value;
+    }
+    pub fn get_speed(&self) -> f64 {
+        self.speeds.iter().sum::<f64>() / (self.speeds.len() as f64)
+    }
+    pub fn remaining_secs(&self) -> u64 {
+        let secs = (self.range.end - self.current) / self.get_speed();
+        if secs < 0.0 { 0 } else { secs as u64 }
+    }
+}
+
 pub fn first_index_of<T, I, Idx, F>(
     arr: &I,
     search_range: Range<Idx>,
@@ -596,8 +639,58 @@ where
     None
 }
 
-pub struct TimeEstimator {
-    
+pub struct Hms {
+    pub hour: u64,
+    pub min: u8,
+    pub sec: u8,
+}
+
+impl Hms {
+    pub fn from_secs(mut d: u64) -> Self {
+        let sec = (d % 60) as u8;
+        d /= 60;
+        let min = (d % 60) as u8;
+        d /= 60;
+        Self { hour: d, min, sec }
+    }
+}
+
+impl Display for Hms {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "{:0>2}:{:0>2}:{:0>2}",
+            self.hour, self.min, self.sec
+        ))
+    }
+}
+
+pub fn cubic_discriminal(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    b * b * c * c
+        + -4.0 * a * c * c * c
+        + -4.0 * b * b * b * d
+        + 18.0 * a * b * c * d
+        + -27.0 * a * a * d * d
+}
+
+pub fn solve_cubic(a: Complex64, b: Complex64, c: Complex64, d: Complex64) -> [Complex64; 3] {
+    let delta0 = b * b - a * c * 3.0;
+    let delta1 = 2.0 * b * b * b - 9.0 * a * b * c + 27.0 * a * a * d;
+    let c1 = ((delta1 + (delta1 * delta1 - delta0 * delta0 * delta0 * 4.0).sqrt()) / 2.0).cbrt();
+    let c2 = Complex64::new(-0.5, sqrt(3.0) / 2.0) * c1;
+    let c3 = Complex64::new(-0.5, -sqrt(3.0) / 2.0) * c1;
+
+    let s1 = b + c1 + delta0 / c1;
+    let s2 = b + c2 + delta0 / c2;
+    let s3 = b + c3 + delta0 / c3;
+    [s1 / (-3.0 * a), s2 / (-3.0 * a), s3 / (-3.0 * a)]
+}
+
+pub fn solve_cubic_one_real(a: Complex64, b: Complex64, c: Complex64, d: Complex64) -> Option<f64> {
+    let sols = solve_cubic(a, b, c, d);
+    sols.iter()
+        .cloned()
+        .find(|a| (a.im / a.re).abs() <= 1e-20)
+        .map(|f| f.re)
 }
 
 #[cfg(test)]

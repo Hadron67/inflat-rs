@@ -125,7 +125,7 @@ where
         {
             let mut efolding = vec![];
             let mut phi = vec![];
-            let _ = pert.run(1e2, 0.01, |_, b, _s, phi0, _, _| {
+            let _ = pert.run(1e6, 0.01, |_, b, _s, phi0, _, _| {
                 phi.push(phi0.abs());
                 efolding.push(b.scale_factor().ln());
             });

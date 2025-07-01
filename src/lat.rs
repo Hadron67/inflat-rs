@@ -17,6 +17,26 @@ use rayon::iter::{
 
 use crate::util::VecN;
 
+pub struct LatticePosition<const D: usize> {
+    pub index: usize,
+    pub coord: VecN<D, usize>,
+}
+
+impl<const D: usize> LatticePosition<D> {
+    pub fn from_index(index: usize, dim: &VecN<D, usize>) -> Self {
+        Self {
+            index,
+            coord: dim.decode_coord(index),
+        }
+    }
+    pub fn from_coord(coord: &VecN<D, usize>, dim: &VecN<D, usize>) -> Self {
+        Self {
+            index: dim.encode_coord(coord),
+            coord: *coord,
+        }
+    }
+}
+
 pub struct LatticeParam<const D: usize> {
     pub size: VecN<D, usize>,
     pub spacing: VecN<D, f64>,
@@ -251,6 +271,12 @@ pub trait LatticeMut<const D: usize, T> {
         self.par_for_each_mut(move |ptr, index, coord| {
             *ptr = other.get(index, coord);
         });
+    }
+    fn par_fill(&mut self, value: T)
+    where
+        T: Sync + Send + Clone,
+    {
+        self.par_for_each_mut(move |ptr, _, _| *ptr = value.clone());
     }
 }
 

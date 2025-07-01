@@ -28,12 +28,17 @@ impl C2Fn<f64> for PhiPotential2 {
     type Output = f64;
 
     fn value(&self, phi: f64) -> Self::Output {
-        0.5 * self.mass * self.mass * phi * phi * (1.0 + self.s * tanh((phi - self.phi_step) / self.d))
+        0.5 * self.mass
+            * self.mass
+            * phi
+            * phi
+            * (1.0 + self.s * tanh((phi - self.phi_step) / self.d))
     }
 
     fn value_d(&self, phi: f64) -> Self::Output {
         let sech = 1.0 / cosh((phi - self.phi_step) / self.d);
-        self.mass * self.mass / 2.0 / self.d * phi
+        self.mass * self.mass / 2.0 / self.d
+            * phi
             * (self.s * phi * sech * sech
                 + 2.0 * self.d * (1.0 + self.s * tanh((phi - self.phi_step) / self.d)))
     }
@@ -182,8 +187,11 @@ where
             let mut plot = Plot::new();
             for (n, data) in &int_data.spectrum_data {
                 plot.add_trace(
-                    Scatter::new(int_data.spectrum_mom.clone(), data.clone())
-                        .name(&format!("N = {}", n)),
+                    Scatter::new(
+                        limit_length(int_data.spectrum_mom.clone(), max_length),
+                        limit_length(data.clone(), max_length),
+                    )
+                    .name(&format!("N = {}", n)),
                 );
             }
             plot.set_layout(
