@@ -7,7 +7,7 @@ use inflat::{
     c2fn::C2Fn,
     lat::{BoxLattice, Lattice, LatticeParam},
     models::QuadraticPotential,
-    scalar::{ScalarFieldParams, ScalarFieldState},
+    scalar::{ScalarFieldParams, ScalarFieldState, spectrum, spectrum_with_scratch},
     util::{RateLimiter, VecN, lazy_file, limit_length},
 };
 use libm::{cosh, tanh};
@@ -107,9 +107,11 @@ where
                 let mut spectrum_n_cursor = self.a.ln();
                 let spectrum_n_step = (self.end_n - self.a.ln()) / (self.spectrum_count as f64);
                 let mut spectrum_scratch = BoxLattice::zeros(self.scalar_params.lattice.size);
-                let initial_spectrum = self
-                    .scalar_params
-                    .spectrum_with_scratch(&field, &mut spectrum_scratch);
+                let initial_spectrum = spectrum_with_scratch(
+                    &field.phi,
+                    &self.scalar_params.lattice,
+                    &mut spectrum_scratch,
+                );
                 let mut spectrum_data =
                     vec![(self.a.ln(), initial_spectrum.iter().map(|f| f.1).collect())];
                 let spectrum_mom = initial_spectrum.iter().map(|f| f.0).collect();
@@ -133,9 +135,11 @@ where
                     });
                     if m.a.ln() > spectrum_n_cursor {
                         spectrum_n_cursor += spectrum_n_step;
-                        let spectrum = self
-                            .scalar_params
-                            .spectrum_with_scratch(&mut field, &mut spectrum_scratch);
+                        let spectrum = spectrum_with_scratch(
+                            &field.phi,
+                            &self.scalar_params.lattice,
+                            &mut spectrum_scratch,
+                        );
                         spectrum_data.push((m.a.ln(), spectrum.iter().map(|f| f.1).collect()));
                     }
                     measurables.push(m);
@@ -185,6 +189,7 @@ where
         }
         {
             let mut plot = Plot::new();
+            let final_spectrum = spectrum(&int_data.final_state.phi, &self.scalar_params.lattice);
             for (n, data) in &int_data.spectrum_data {
                 plot.add_trace(
                     Scatter::new(
@@ -194,8 +199,16 @@ where
                     .name(&format!("N = {}", n)),
                 );
             }
+            plot.add_trace(
+                Scatter::new(
+                    int_data.spectrum_mom.clone(),
+                    final_spectrum.iter().map(|f| f.1).collect(),
+                )
+                .y_axis("y2"),
+            );
             plot.set_layout(
                 Layout::new()
+                    .grid(LayoutGrid::new().rows(2).columns(1))
                     .x_axis(
                         Axis::new()
                             .type_(AxisType::Log)
@@ -206,7 +219,12 @@ where
                             .type_(AxisType::Log)
                             .exponent_format(ExponentFormat::Power),
                     )
-                    .height(800),
+                    .y_axis2(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .height(1000),
             );
             plot.write_html(&format!("{}/spectrum.html", out_dir));
         }
@@ -267,4 +285,33 @@ pub fn main() {
         }
     };
     params_set2.run("out/scalar_lat.set2").unwrap();
+
+    let params_set3 = {
+        let size = 64usize;
+        let l = 0.6 / mass;
+        let dx = l / (size as f64);
+        Params {
+            scalar_params: ScalarFieldParams {
+                kappa: 1.0,
+                potential: PhiPotential2 {
+                    mass,
+                    s: 0.01,
+                    d: 0.005,
+                    phi_step: 14.35,
+                },
+                lattice: LatticeParam {
+                    size: VecN::new([size; 3]),
+                    spacing: VecN::new([dx; 3]),
+                },
+            },
+            a: 1.0,
+            phi: 14.5,
+            v_phi: -0.8152 * mass,
+            dt: 1.0,
+            end_n: 7.0,
+            mass,
+            spectrum_count: 10,
+        }
+    };
+    params_set3.run("out/scalar_lat.set3").unwrap();
 }

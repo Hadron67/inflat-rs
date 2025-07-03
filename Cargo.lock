@@ -412,7 +412,6 @@ dependencies = [
  "random",
  "rayon",
  "rustfft",
- "serde",
 ]
 
 [[package]]

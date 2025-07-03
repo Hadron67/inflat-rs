@@ -1,10 +1,10 @@
-use std::{f64::consts::PI, fs::create_dir_all, time::Duration};
+use std::{f64::consts::PI, fs::create_dir_all, sync::Mutex, time::Duration};
 
 use anyhow::Ok;
 use bincode::{Decode, Encode};
 use inflat::{
     background::{
-        BINCODE_CONFIG, DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelector,
+        DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelector, BINCODE_CONFIG
     },
     c2fn::C2Fn,
     gauss_bonnet::{
@@ -13,8 +13,8 @@ use inflat::{
     },
     lat::{BoxLattice, Lattice, LatticeParam},
     models::TanhPotential,
-    scalar::spectrum_with_scratch,
-    util::{Hms, ParamRange, RateLimiter, TimeEstimator, VecN, lazy_file, limit_length},
+    scalar::{construct_zeta, spectrum, spectrum_with_scratch},
+    util::{lazy_file, limit_length, Hms, ParamRange, RateLimiter, TimeEstimator, VecN},
 };
 use libm::{cos, sin, sqrt};
 use num_complex::ComplexFloat;
@@ -66,6 +66,7 @@ struct LatticeMeasurables {
 #[derive(Encode, Decode)]
 struct LatticeOutputData {
     pub measurables: Vec<LatticeMeasurables>,
+    pub final_state: GaussBonnetField<3>,
     pub spectrum_k: Vec<f64>,
     pub spectrums: Vec<(f64, Vec<f64>)>,
 }
@@ -81,18 +82,18 @@ impl LatticeSetting {
         V: C2Fn<f64, Output = f64> + Sync + Send,
         Xi: C2Fn<f64, Output = f64> + Sync + Send,
     {
+        let starting_horizon = self.starting_k / self.horizon_tolerance;
+        let end_k = self.starting_k * sqrt(3.0) / PI * (self.lattice_size as f64);
+        let end_horizon = end_k * self.horizon_tolerance;
+        let dx = 2.0 * PI / self.starting_k / (self.lattice_size as f64);
+        let lattice = LatticeParam {
+            size: VecN::new([self.lattice_size; 3]),
+            spacing: VecN::new([dx; 3]),
+        };
         let data = lazy_file(
-            &format!("{}/lattice.{}.mearables.bincode", out_dir, &self.name),
+            &format!("{}/lattice.{}.bincode", out_dir, &self.name),
             BINCODE_CONFIG,
             || {
-                let starting_horizon = self.starting_k / self.horizon_tolerance;
-                let end_k = self.starting_k * sqrt(3.0) / PI * (self.lattice_size as f64);
-                let end_horizon = end_k * self.horizon_tolerance;
-                let dx = 2.0 * PI / self.starting_k;
-                let lattice = LatticeParam {
-                    size: VecN::new([self.lattice_size; 3]),
-                    spacing: VecN::new([dx; 3]),
-                };
                 println!("[lattice] dx = {}", dx);
                 let start_state = background
                     .iter()
@@ -157,9 +158,17 @@ impl LatticeSetting {
                     measurables,
                     spectrum_k,
                     spectrums,
+                    final_state: simulator.field,
                 }
             },
         )?;
+        let zeta = {
+            let state = &data.final_state;
+            let rate_limiter = Mutex::new(RateLimiter::new(Duration::from_millis(100)));
+            lazy_file(&format!("{}/lattice.{}.zeta.bincode", out_dir, &self.name), BINCODE_CONFIG, || {
+                construct_zeta(state.a, state.v_a, &state.phi, &state.v_phi, state.phi.max().1, 1000, input, |count, total| {let _ = rate_limiter.lock().map(|mut r|r.run(||println!("[zeta]({}/{})", count, total)));})
+            })?
+        };
         {
             let mut efolding = vec![];
             let mut phi = vec![];
@@ -222,14 +231,24 @@ impl LatticeSetting {
             ));
         }
         {
+            let zeta_spectrum = spectrum(&zeta, &lattice);
             let mut plot = Plot::new();
             for (n, spec) in &data.spectrums {
                 plot.add_trace(
                     Scatter::new(data.spectrum_k.clone(), spec.clone()).name(&format!("N = {}", n)),
                 );
             }
+            plot.add_trace(
+                Scatter::new(
+                    zeta_spectrum.iter().map(|f|f.0).collect(),
+                    zeta_spectrum.iter().map(|f|f.1).collect(),
+                )
+                .y_axis("y2")
+                .name("zeta"),
+            );
             plot.set_layout(
                 Layout::new()
+                    .grid(LayoutGrid::new().rows(2).columns(1))
                     .x_axis(
                         Axis::new()
                             .type_(AxisType::Log)
@@ -239,7 +258,13 @@ impl LatticeSetting {
                         Axis::new()
                             .type_(AxisType::Log)
                             .exponent_format(ExponentFormat::Power),
-                    ),
+                    )
+                    .y_axis2(
+                        Axis::new()
+                            .type_(AxisType::Log)
+                            .exponent_format(ExponentFormat::Power),
+                    )
+                    .height(1600),
             );
             plot.write_html(&format!(
                 "{}/lattice.{}.spectrums.html",
@@ -252,8 +277,9 @@ impl LatticeSetting {
 
 struct ScalarPerturbationSetting {
     pub name: String,
-    pub k: f64,
+    pub k: Vec<f64>,
     pub da: f64,
+    pub horizon_tolerance: f64,
 }
 
 impl ScalarPerturbationSetting {
@@ -269,17 +295,26 @@ impl ScalarPerturbationSetting {
             background,
             DefaultPerturbationInitializer,
             GaussBonnetScalarPerturbationPotential,
-            HorizonSelector::new(1e3),
+            HorizonSelector::new(self.horizon_tolerance),
             GaussBonnetScalarPerturbationCoef,
         );
-        let mut efolding = vec![];
-        let mut zeta = vec![];
-        pert.run(self.k, self.da, |_, background, _, field, _, _| {
-            efolding.push(background.a.ln());
-            zeta.push(field.abs());
-        });
         let mut plot = Plot::new();
-        plot.add_trace(Scatter::new(efolding, zeta));
+        let max_length = 500000usize;
+        for k in &self.k {
+            let mut efolding = vec![];
+            let mut zeta = vec![];
+            pert.run(*k, self.da, |_, background, _, field, _, _| {
+                efolding.push(background.a.ln());
+                zeta.push(field.abs());
+            });
+            plot.add_trace(
+                Scatter::new(
+                    limit_length(efolding, max_length),
+                    limit_length(zeta, max_length),
+                )
+                .name(&format!("k = {}", k)),
+            );
+        }
         plot.set_layout(
             Layout::new()
                 .x_axis(Axis::new().exponent_format(ExponentFormat::Power))
@@ -298,6 +333,7 @@ struct SpectrumSetting {
     pub name: String,
     pub k_range: ParamRange<f64>,
     pub da: f64,
+    pub horizon_tolerance: f64,
 }
 
 impl SpectrumSetting {
@@ -317,7 +353,7 @@ impl SpectrumSetting {
             background,
             DefaultPerturbationInitializer,
             GaussBonnetScalarPerturbationPotential,
-            HorizonSelector::new(1e3),
+            HorizonSelector::new(self.horizon_tolerance),
             GaussBonnetScalarPerturbationCoef,
         );
         let spectrum = pert.spectrum_with_cache(
@@ -510,24 +546,44 @@ pub fn main() {
             phi0: 7.0,
             a0: 1.0,
             dt: 1.0,
-            lattice: vec![LatticeSetting {
-                name: "0".to_string(),
-                starting_k: 3e17,
-                dt: 1.0,
-                lattice_size: 16,
-                horizon_tolerance: 4.0,
-                spectrum_count: 10,
-            }],
+            lattice: vec![
+                LatticeSetting {
+                    name: "0".to_string(),
+                    starting_k: 1e17,
+                    dt: 1.0,
+                    lattice_size: 256,
+                    horizon_tolerance: 10.0,
+                    spectrum_count: 10,
+                },
+                LatticeSetting {
+                    name: "1.size2".to_string(),
+                    starting_k: 1e6,
+                    dt: 1.0,
+                    lattice_size: 16,
+                    horizon_tolerance: 10.0,
+                    spectrum_count: 10,
+                },
+            ],
             perts: vec![ScalarPerturbationSetting {
                 name: "0".to_string(),
-                k: 1e18,
+                k: vec![1e15, 1e16, 1e17, 1e18],
                 da: 0.1,
+                horizon_tolerance: 1e3,
             }],
-            spectrums: vec![SpectrumSetting {
-                name: "0".to_string(),
-                k_range: ParamRange::new(1.0, 1e25, 1000),
-                da: 0.01,
-            }],
+            spectrums: vec![
+                SpectrumSetting {
+                    name: "0".to_string(),
+                    k_range: ParamRange::new(1.0, 1e25, 1000),
+                    da: 0.01,
+                    horizon_tolerance: 1e3,
+                },
+                SpectrumSetting {
+                    name: "high_tolerance".to_string(),
+                    k_range: ParamRange::new(1.0, 1e25, 1000),
+                    da: 0.01,
+                    horizon_tolerance: 1e6,
+                },
+            ],
         }
     };
     params1.run("out/gb.set1").unwrap();

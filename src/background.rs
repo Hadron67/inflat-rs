@@ -1,9 +1,5 @@
 use std::{
-    cmp::{max, min},
-    f64::consts::PI,
-    marker::PhantomData,
-    ops::{AddAssign, Index, Mul},
-    sync::atomic::{AtomicUsize, Ordering},
+    cmp::{max, min}, f64::consts::PI, fmt::Debug, marker::PhantomData, ops::{AddAssign, Index, Mul}, sync::atomic::{AtomicUsize, Ordering}
 };
 
 use bincode::{
@@ -54,14 +50,18 @@ impl OutputSelector {
     }
 }
 
-pub struct BackgroundInput<F1, F2, F3> {
-    pub kappa: f64,
-    pub scale_factor: f64,
-    pub phi: f64,
-    pub phi_d: f64,
-    pub potential: F1,
-    pub potential_d: F2,
-    pub potential_dd: F3,
+pub trait BackgroundSolver {
+    type State;
+    fn create_state(&self, a: f64, v_a: f64, phi: f64, v_phi: f64) -> Self::State;
+    fn update(&self, state: &mut Self::State, dt: f64);
+    fn evaluate_to_phi(&self, state: &mut Self::State, dt: f64, phi_goal: f64) where
+        Self::State: Clone + Phi + PhiD + Debug,
+        Self: Kappa,
+    {
+        while (phi_goal - state.phi()) * state.v_phi().signum() > 0.0 {
+            self.update(state, dt);
+        }
+    }
 }
 
 pub trait Interpolate {
@@ -1291,6 +1291,10 @@ pub trait TwoFieldBackgroundInputProvider {
 
 pub trait PhiD {
     fn v_phi(&self) -> f64;
+}
+
+pub trait Phi {
+    fn phi(&self) -> f64;
 }
 
 impl<F1, F2> TwoFieldBackgroundInputProvider for TwoFieldBackgroundInput<F1, F2> {

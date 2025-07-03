@@ -4,22 +4,19 @@ use random::Source;
 
 use crate::{
     background::{
-        BackgroundFn, Dimension, Dt, Interpolate, Kappa, PhiD, ScaleFactor, ScaleFactorD,
+        BackgroundFn, BackgroundSolver, BackgroundState, BackgroundStateInput, Dimension, Dt, Interpolate, Kappa, Phi, PhiD, ScaleFactor, ScaleFactorD
     },
     c2fn::C2Fn,
     interpolate_fields,
     lat::{BoxLattice, Lattice, LatticeMut, LatticeParam, LatticeSupplier},
     scalar::populate_noise,
-    util::{VecN, derivative_2},
+    util::{derivative_2, VecN},
 };
 
 pub mod data {
     use num_complex::Complex64;
 
-    use crate::{
-        c2fn::C2Fn,
-        util::solve_cubic,
-    };
+    use crate::{c2fn::C2Fn, util::solve_cubic};
 
     #[rustfmt::skip]
     pub fn vv_phi<V, Xi>(dim: usize, kappa: f64, a: f64, v_a: f64, phi: f64, v_phi: f64, laplacian_phi: f64, derivative2_phi: f64, v: &V, xi: &Xi) -> f64 where
@@ -466,6 +463,12 @@ impl ScaleFactorD for GaussBonnetBackgroundState {
     }
 }
 
+impl Phi for GaussBonnetBackgroundState {
+    fn phi(&self) -> f64 {
+        self.phi
+    }
+}
+
 impl PhiD for GaussBonnetBackgroundState {
     fn v_phi(&self) -> f64 {
         self.v_phi
@@ -486,6 +489,31 @@ impl Interpolate for GaussBonnetBackgroundState {
         interpolate_fields!(
             Self, self, other, l, a, v_a, phi, v_phi, potential, pert_c, horizon, pert_a
         )
+    }
+}
+
+impl<V, Xi> BackgroundSolver for GaussBonnetBInput<V, Xi> where
+    V: C2Fn<f64, Output = f64>,
+    Xi: C2Fn<f64, Output = f64>,
+{
+    type State = GaussBonnetBackgroundState;
+
+    fn create_state(&self, a: f64, v_a: f64, phi: f64, v_phi: f64) -> Self::State {
+        GaussBonnetBackgroundState {
+            a,
+            v_a,
+            phi,
+            v_phi,
+            dt: 0.0,
+            pert_c: 0.0,
+            potential: 0.0,
+            horizon: 0.0,
+            pert_a: 0.0,
+        }
+    }
+
+    fn update(&self, state: &mut Self::State, dt: f64) {
+        *state = state.update(self, dt);
     }
 }
 

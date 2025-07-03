@@ -86,10 +86,10 @@ pub trait Lattice<const D: usize, T> {
     }
     fn max(&self) -> (VecN<D, usize>, T)
     where
-        T: Ord + Send + Clone + Sync,
+        T: PartialOrd + Send + Clone + Sync,
         Self: Sync,
     {
-        self.max_by(|a, b| a.cmp(b))
+        self.max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Less))
     }
     fn dump<R, W>(&self, tag: &R, write: &mut W) -> io::Result<()>
     where
@@ -229,6 +229,12 @@ pub trait Lattice<const D: usize, T> {
             dx: dx.map(|f| f.clone().into()),
         }
     }
+    fn zip<F2>(self, other: F2) -> LatticeZip2<Self, F2> where Self: Sized {
+        LatticeZip2 { lhs: self, rhs: other }
+    }
+    fn as_ref(&self) -> LatticeRef<'_, Self> {
+        LatticeRef { field: self }
+    }
 }
 
 pub trait LatticeMut<const D: usize, T> {
@@ -277,6 +283,22 @@ pub trait LatticeMut<const D: usize, T> {
         T: Sync + Send + Clone,
     {
         self.par_for_each_mut(move |ptr, _, _| *ptr = value.clone());
+    }
+}
+
+pub struct LatticeRef<'a, F: ?Sized> {
+    field: &'a F,
+}
+
+impl<const D: usize, T, F> Lattice<D, T> for LatticeRef<'_, F> where
+    F: ?Sized + Lattice<D, T>,
+{
+    fn dim(&self) -> &VecN<D, usize> {
+        self.field.dim()
+    }
+
+    fn get(&self, index: usize, coord: &VecN<D, usize>) -> T {
+        self.field.get(index, coord)
     }
 }
 
@@ -415,6 +437,7 @@ where
     }
 }
 
+#[must_use = "Lattice operations do nothing unless used"]
 pub struct LatticeLaplacian<const D: usize, T, F> {
     field: F,
     dx: VecN<D, T>,
@@ -436,6 +459,25 @@ where
 
     fn get(&self, _index: usize, coord: &VecN<D, usize>) -> T {
         self.field.derivative_square_at(coord, &self.dx)
+    }
+}
+
+#[must_use = "Lattice operations do nothing unless used"]
+pub struct LatticeZip2<F1, F2> {
+    lhs: F1,
+    rhs: F2,
+}
+
+impl<const D: usize, T1, T2, F1, F2> Lattice<D, (T1, T2)> for LatticeZip2<F1, F2> where
+    F1: Lattice<D, T1>,
+    F2: Lattice<D, T2>,
+{
+    fn dim(&self) -> &VecN<D, usize> {
+        self.lhs.dim()
+    }
+
+    fn get(&self, index: usize, coord: &VecN<D, usize>) -> (T1, T2) {
+        (self.lhs.get(index, coord), self.rhs.get(index, coord))
     }
 }
 
