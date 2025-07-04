@@ -550,8 +550,7 @@ where
 pub struct GaussBonnetField<const D: usize> {
     pub a: f64,
     pub v_a: f64,
-    pub phi: BoxLattice<D, f64>,
-    pub v_phi: BoxLattice<D, f64>,
+    pub phi: BoxLattice<D, [f64; 2]>,
 }
 
 impl<const D: usize> GaussBonnetField<D> {
@@ -559,8 +558,7 @@ impl<const D: usize> GaussBonnetField<D> {
         Self {
             a: 0.0,
             v_a: 0.0,
-            phi: BoxLattice::zeros(size),
-            v_phi: BoxLattice::zeros(size),
+            phi: BoxLattice::constant(size, [0.0, 0.0]),
         }
     }
     pub fn init<V, Xi>(&mut self, a: f64, phi: f64, v_phi: f64, input: &GaussBonnetBInput<V, Xi>)
@@ -571,22 +569,21 @@ impl<const D: usize> GaussBonnetField<D> {
         self.a = a;
         self.v_a =
             a * data::solve_hubble(D, input.kappa, a, phi, v_phi, 0.0, 0.0, &input.v, &input.xi);
-        self.phi.par_fill(phi);
-        self.v_phi.par_fill(v_phi);
+        self.phi.par_fill([phi, v_phi]);
     }
     pub fn assign(&mut self, other: &Self) {
         self.a = other.a;
         self.v_a = other.v_a;
         self.phi.par_assign(&other.phi);
-        self.v_phi.par_assign(&other.v_phi);
     }
     pub fn add(&mut self, other: &Self, factor: f64) {
         self.a += other.a * factor;
         self.v_a += other.v_a * factor;
-        self.phi
-            .par_add_assign(&other.phi.view().mul_scalar(factor));
-        self.v_phi
-            .par_add_assign(&other.v_phi.view().mul_scalar(factor));
+        self.phi.par_for_each_mut(|ptr, index, coord| {
+            let phi0 = other.phi.get(index, coord);
+            ptr[0] += phi0[0] * factor;
+            ptr[1] += phi0[1] * factor;
+        });
     }
     pub fn delta<V, Xi>(
         &mut self,
@@ -597,6 +594,8 @@ impl<const D: usize> GaussBonnetField<D> {
         V: C2Fn<f64, Output = f64> + Send + Sync,
         Xi: C2Fn<f64, Output = f64> + Send + Sync,
     {
+        let phi = field.phi.view().map(|f|f[0]);
+        let v_phi = field.phi.view().map(|f|f[1]);
         self.a = field.v_a;
         self.v_a = field.a
             * data::hubble2(
@@ -604,28 +603,27 @@ impl<const D: usize> GaussBonnetField<D> {
                 input.kappa,
                 field.a,
                 field.v_a,
-                field.phi.average(),
-                field.v_phi.average(),
-                field.phi.view().laplacian(&lattice.spacing).average(),
-                field
-                    .phi
-                    .view()
+                phi.average(),
+                v_phi.average(),
+                phi.as_ref().laplacian(&lattice.spacing).average(),
+                    phi
+                    .as_ref()
                     .derivative_square(&lattice.spacing)
                     .average(),
                 &input.v,
                 &input.xi,
             );
-        self.phi.par_assign(&field.v_phi);
-        self.v_phi.par_for_each_mut(|ptr, index, coord| {
-            *ptr = data::vv_phi(
+        self.phi.par_for_each_mut(|ptr, index, coord| {
+            ptr[0] = v_phi.get(index, coord);
+            ptr[1] = data::vv_phi(
                 input.dim,
                 input.kappa,
                 field.a,
                 field.v_a,
-                field.phi.get(index, coord),
-                field.v_phi.get(index, coord),
-                field.phi.laplacian_at(coord, &lattice.spacing),
-                field.phi.derivative_square_at(coord, &lattice.spacing),
+                phi.get(index, coord),
+                v_phi.get(index, coord),
+                phi.laplacian_at(coord, &lattice.spacing),
+                phi.derivative_square_at(coord, &lattice.spacing),
                 &input.v,
                 &input.xi,
             );
@@ -640,16 +638,18 @@ impl<const D: usize> GaussBonnetField<D> {
         V: C2Fn<f64, Output = f64> + Send + Sync,
         Xi: C2Fn<f64, Output = f64> + Send + Sync,
     {
-        let avg_phi = self.phi.average();
-        let avg_v_phi = self.v_phi.average();
+        let phi = self.phi.view().map(|f|f[0]);
+        let v_phi = self.phi.view().map(|f|f[1]);
+        let avg_phi = phi.average();
+        let avg_v_phi = v_phi.average();
         let pert_a = LatticeSupplier::new(*self.phi.dim(), |index, coord| {
             data::metric_perturbation_a(
                 input.dim,
                 input.kappa,
                 self.a,
                 self.v_a,
-                self.phi.get(index, coord),
-                self.v_phi.get(index, coord),
+                phi.get(index, coord),
+                v_phi.get(index, coord),
                 avg_phi,
                 avg_v_phi,
                 &input.xi,
@@ -662,11 +662,11 @@ impl<const D: usize> GaussBonnetField<D> {
                 input.kappa,
                 self.a,
                 self.v_a,
-                self.phi.get(index, coord),
-                self.v_phi.get(index, coord),
+                phi.get(index, coord),
+                v_phi.get(index, coord),
                 avg_phi,
                 avg_v_phi,
-                self.phi.laplacian_at(coord, &lattice.spacing),
+                phi.laplacian_at(coord, &lattice.spacing),
                 &input.v,
                 &input.xi,
             )
@@ -687,20 +687,24 @@ impl<const D: usize> GaussBonnetField<D> {
         let mut phi = BoxLattice::zeros(lattice.size);
         let mut v_phi = BoxLattice::zeros(lattice.size);
         populate_noise(&lattice, self.a, self.v_a, source, &mut phi, &mut v_phi);
-        self.phi.par_add_assign(&phi.view().map(|f| f.re));
-        self.v_phi.par_add_assign(&v_phi.view().map(|f| f.re));
+        self.phi.par_for_each_mut(|ptr, index, coord|{
+            ptr[0] += phi.get(index, coord).re;
+            ptr[1] += v_phi.get(index, coord).re;
+        });
+        let phi = self.phi.view().map(|f|f[0]);
+        let v_phi = self.phi.view().map(|f|f[1]);
         self.v_a = self.a
             * data::solve_hubble(
                 input.dim,
                 input.kappa,
                 self.a,
-                self.phi.average(),
-                self.v_phi.average(),
-                self.phi
-                    .view()
+                phi.average(),
+                v_phi.average(),
+                phi
+                    .as_ref()
                     .derivative_square(&lattice.spacing)
                     .average(),
-                self.phi.view().laplacian(&lattice.spacing).average(),
+                phi.as_ref().laplacian(&lattice.spacing).average(),
                 &input.v,
                 &input.xi,
             );

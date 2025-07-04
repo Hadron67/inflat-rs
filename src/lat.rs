@@ -272,7 +272,7 @@ pub trait LatticeMut<const D: usize, T> {
     fn par_assign<F>(&mut self, other: &F)
     where
         F: Lattice<D, T> + Send + Sync,
-        T: AddAssign<T> + Send + Sync,
+        T: Send + Sync,
     {
         self.par_for_each_mut(move |ptr, index, coord| {
             *ptr = other.get(index, coord);
@@ -596,7 +596,7 @@ pub struct LatticeView<'a, const D: usize, I: ?Sized, T, S> {
 impl<'a, const D: usize, I, T, S> Lattice<D, T> for LatticeView<'a, D, I, T, S>
 where
     I: ?Sized + Index<usize, Output = T>,
-    T: Clone + Zero + Copy,
+    T: Clone + Copy,
     S: LatticeStride<D>,
 {
     fn dim(&self) -> &VecN<D, usize> {

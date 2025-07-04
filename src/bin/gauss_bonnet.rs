@@ -113,7 +113,7 @@ impl LatticeSetting {
                 });
                 let mut spectrum_scratch = BoxLattice::zeros(lattice.size);
                 let initial_spectrum =
-                    spectrum_with_scratch(&simulator.field.phi, &lattice, &mut spectrum_scratch);
+                    spectrum_with_scratch(&simulator.field.phi.view().map(|f|f[0]), &lattice, &mut spectrum_scratch);
                 let spectrum_k = initial_spectrum.iter().map(|f| f.0).collect();
                 let mut spectrums = vec![(
                     start_state.a.ln(),
@@ -130,8 +130,8 @@ impl LatticeSetting {
                     let state = LatticeMeasurables {
                         a: simulator.field.a,
                         v_a: simulator.field.v_a,
-                        phi: simulator.field.phi.average(),
-                        v_phi: simulator.field.v_phi.average(),
+                        phi: simulator.field.phi.view().map(|f|f[0]).average(),
+                        v_phi: simulator.field.phi.view().map(|f|f[1]).average(),
                         metric_perts: simulator.field.metric_perturbations(input, &lattice),
                     };
                     rate_limiter.run(|| {
@@ -146,7 +146,7 @@ impl LatticeSetting {
                     if simulator.field.a.ln() >= next_spectrum_n {
                         next_spectrum_n += spectrum_delta_n;
                         let spec = spectrum_with_scratch(
-                            &simulator.field.phi,
+                            &simulator.field.phi.view().map(|f|f[0]),
                             &lattice,
                             &mut spectrum_scratch,
                         );
@@ -166,7 +166,7 @@ impl LatticeSetting {
             let state = &data.final_state;
             let rate_limiter = Mutex::new(RateLimiter::new(Duration::from_millis(100)));
             lazy_file(&format!("{}/lattice.{}.zeta.bincode", out_dir, &self.name), BINCODE_CONFIG, || {
-                construct_zeta(state.a, state.v_a, &state.phi, &state.v_phi, state.phi.max().1, 1000, input, |count, total| {let _ = rate_limiter.lock().map(|mut r|r.run(||println!("[zeta]({}/{})", count, total)));})
+                construct_zeta(state.a, state.v_a, &state.phi.view().map(|f|f[0]), &state.phi.view().map(|f|f[1]), state.phi.view().map(|f|f[0]).max().1, 1000, input, |count, total| {let _ = rate_limiter.lock().map(|mut r|r.run(||println!("[zeta]({}/{})", count, total)));})
             })?
         };
         {
@@ -551,7 +551,7 @@ pub fn main() {
                     name: "0".to_string(),
                     starting_k: 1e17,
                     dt: 1.0,
-                    lattice_size: 256,
+                    lattice_size: 128,
                     horizon_tolerance: 10.0,
                     spectrum_count: 10,
                 },
