@@ -1,7 +1,6 @@
 pub mod background;
 pub mod c2fn;
 pub mod fft;
-pub mod field;
 pub mod gauss_bonnet;
 pub mod lat;
 pub mod models;

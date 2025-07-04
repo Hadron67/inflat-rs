@@ -488,14 +488,19 @@ pub struct BoxLattice<const D: usize, T> {
 }
 
 impl<const D: usize, T> BoxLattice<D, T> {
+    pub fn constant(dim: VecN<D, usize>, value: T) -> Self where
+        T: Copy,
+    {
+        Self {
+            data: vec![value; dim.product()],
+            dim,
+        }
+    }
     pub fn zeros(dim: VecN<D, usize>) -> Self
     where
         T: Zero + Copy,
     {
-        Self {
-            data: vec![T::zero(); dim.product()],
-            dim,
-        }
+        Self::constant(dim, T::zero())
     }
     pub fn view(&self) -> LatticeView<'_, D, [T], T, DirectStride> {
         LatticeView {

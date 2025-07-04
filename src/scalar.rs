@@ -7,7 +7,7 @@ use random::Source;
 use rustfft::{FftDirection, num_complex::Complex64};
 
 use crate::{
-    background::{BackgroundSolver, Kappa, Phi, PhiD, ScaleFactor}, c2fn::C2Fn, fft::DftNDPlan, lat::{BoxLattice, Lattice, LatticeMut, LatticeParam}, util::VecN
+    background::{BackgroundSolver, Kappa, Phi, PhiD, ScaleFactor}, c2fn::C2Fn, fft::DftNDPlan, lat::{BoxLattice, Lattice, LatticeMut, LatticeParam}, util::{half_int_gamma, VecN}
 };
 
 #[derive(Encode, Decode)]
@@ -265,18 +265,23 @@ pub fn populate_noise<const D: usize, S>(
     noise_phi.par_for_each_mut(|ptr, _, _| *ptr /= a);
 }
 
-pub fn spectrum_with_scratch<const D: usize>(
-    phi: &BoxLattice<D, f64>,
+pub fn spectrum_with_scratch<const D: usize, Phi>(
+    phi: &Phi,
     lattice: &LatticeParam<D>,
     scratch_field: &mut BoxLattice<D, Complex64>,
-) -> Vec<(f64, f64)> {
+) -> Vec<(f64, f64)> where
+    Phi: Lattice<D, f64> + Sync,
+{
     let dft = DftNDPlan::new(lattice.size.value, FftDirection::Inverse);
     scratch_field.par_assign(&{
-        let avg_phi = phi.average();
-        phi.view().map(move |f| (f - avg_phi).into())
+        let phi2 = phi.as_ref();
+        let avg_phi = phi2.average();
+        phi2.map(move |f| (f - avg_phi).into())
     });
     dft.transform_inplace(scratch_field);
-    let factor = lattice.spacing.product() / (lattice.size.product() as f64);
+    let d = D as f64;
+    let angular_factor = 2.0.powi(1 - (D as i32)) * PI.powf(-d / 2.0) / half_int_gamma(D as u32);
+    let factor = angular_factor * lattice.spacing.product() / (lattice.size.product() as f64);
     let mut spectrum_by_modes = HashMap::new();
     let dim = lattice.size;
     for index in 0..dim.product() {
@@ -296,7 +301,7 @@ pub fn spectrum_with_scratch<const D: usize>(
         if !spectrum_by_modes.contains_key(&mode) {
             spectrum_by_modes.insert(mode, (0usize, 0.0));
         }
-        let ptr = spectrum_by_modes.get_mut(&mode).unwrap();
+        let ptr: &mut (usize, f64) = spectrum_by_modes.get_mut(&mode).unwrap();
         ptr.0 += 1;
         ptr.1 += value.re;
     }
@@ -314,10 +319,12 @@ pub fn spectrum_with_scratch<const D: usize>(
     ret
 }
 
-pub fn spectrum<const D: usize>(
-    phi: &BoxLattice<D, f64>,
+pub fn spectrum<const D: usize, Phi>(
+    phi: &Phi,
     lattice: &LatticeParam<D>,
-) -> Vec<(f64, f64)> {
+) -> Vec<(f64, f64)> where
+    Phi: Lattice<D, f64> + Sync,
+{
     let mut scratch_field = BoxLattice::zeros(lattice.size);
     spectrum_with_scratch(phi, lattice, &mut scratch_field)
 }

@@ -1,14 +1,5 @@
 use std::{
-    collections::VecDeque,
-    error::Error,
-    fmt::Display,
-    fs::File,
-    io::{self, BufReader, BufWriter},
-    marker::PhantomData,
-    mem::MaybeUninit,
-    ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub},
-    slice,
-    time::{Duration, SystemTime},
+    collections::VecDeque, error::Error, f64::consts::PI, fmt::Display, fs::File, io::{self, BufReader, BufWriter}, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub}, slice, time::{Duration, SystemTime}
 };
 
 use bincode::{
@@ -73,6 +64,19 @@ pub fn limit_length<T: Clone>(arr: Vec<T>, max_length: usize) -> Vec<T> {
     } else {
         arr
     }
+}
+
+/// Computes Gamma(n2 / 2)
+pub fn half_int_gamma(mut n2: u32) -> f64 {
+    let mut ret = 1.0;
+    while n2 >= 2 {
+        ret *= ((n2 - 2) as f64) / 2.0;
+        n2 -= 2;
+    }
+    if n2 == 1 {
+        ret *= PI.sqrt();
+    }
+    ret
 }
 
 #[derive(Debug)]
@@ -695,7 +699,9 @@ pub fn solve_cubic_one_real(a: Complex64, b: Complex64, c: Complex64, d: Complex
 
 #[cfg(test)]
 mod tests {
-    use crate::util::VecN;
+    use std::f64::consts::PI;
+
+    use crate::util::{half_int_gamma, VecN};
 
     #[test]
     fn coords() {
@@ -713,5 +719,10 @@ mod tests {
         assert_eq!(flipped[0], 0);
         assert_eq!(flipped[1], 3);
         assert_eq!(flipped[2], 2);
+    }
+
+    #[test]
+    fn mom_factor() {
+        assert!((half_int_gamma(3) - PI.sqrt() / 2.0).abs() <= 1e-20);
     }
 }

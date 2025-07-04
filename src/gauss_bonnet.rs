@@ -4,7 +4,7 @@ use random::Source;
 
 use crate::{
     background::{
-        BackgroundFn, BackgroundSolver, BackgroundState, BackgroundStateInput, Dimension, Dt, Interpolate, Kappa, Phi, PhiD, ScaleFactor, ScaleFactorD
+        BackgroundFn, BackgroundSolver, Dimension, Dt, Interpolate, Kappa, Phi, PhiD, ScaleFactor, ScaleFactorD
     },
     c2fn::C2Fn,
     interpolate_fields,
