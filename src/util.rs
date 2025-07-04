@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque, error::Error, f64::consts::PI, fmt::Display, fs::File, io::{self, BufReader, BufWriter}, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub}, slice, time::{Duration, SystemTime}
+    collections::VecDeque, error::Error, f64::consts::PI, fmt::Display, fs::File, io::{self, BufReader, BufWriter}, iter::zip, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub}, slice, time::{Duration, SystemTime}
 };
 
 use bincode::{
@@ -689,6 +689,21 @@ pub fn solve_cubic(a: Complex64, b: Complex64, c: Complex64, d: Complex64) -> [C
     [s1 / (-3.0 * a), s2 / (-3.0 * a), s3 / (-3.0 * a)]
 }
 
+pub fn solve_cubic2(a: Complex64, b: Complex64, c: Complex64, d: Complex64) -> [Complex64; 3] {
+    let q = (3.0 * a * c - b * b) / 9.0 / a / a;
+    let r = (9.0 * a * b * c - 27.0 * a * a * d - 2.0 * b * b * b) / 54.0 / a / a / a;
+    let q3 = q * q * q;
+    let r2 = r * r;
+    let s = (r + (q3 + r2).sqrt()).cbrt();
+    let t = (r - (q3 + r2).sqrt()).cbrt();
+    let omega1 = Complex64::new(-0.5, sqrt(0.75));
+    [
+        s + t - b / 3.0 / a,
+        s * omega1 + t * omega1.conj() - b / 3.0 / a,
+        s * omega1.conj() + t * omega1 - b / 3.0 / a,
+    ]
+}
+
 pub fn solve_cubic_one_real(a: Complex64, b: Complex64, c: Complex64, d: Complex64) -> Option<f64> {
     let sols = solve_cubic(a, b, c, d);
     sols.iter()
@@ -697,11 +712,48 @@ pub fn solve_cubic_one_real(a: Complex64, b: Complex64, c: Complex64, d: Complex
         .map(|f| f.re)
 }
 
+pub fn evaluate_polynomial<T>(x: T, coefs: &[T]) -> T where
+    T: Clone + Mul<T, Output = T> + AddAssign<T> + MulAssign<T>,
+{
+    let mut ret = coefs[0].clone();
+    let mut x_acc = x.clone();
+    for c in &coefs[1..] {
+        ret += x_acc.clone() * c.clone();
+        x_acc *= x.clone();
+    }
+    ret
+}
+
+pub fn evaluate_polynomial_derivative<T>(x: T, coefs: &[T]) -> T where
+    T: Clone + Mul<T, Output = T> + AddAssign<T> + MulAssign<T> + FromPrimitive,
+{
+    let mut ret = coefs[1].clone();
+    let mut x_acc = x.clone();
+    for (c, i) in zip(&coefs[2..], 2..) {
+        ret += x_acc.clone() * c.clone() * T::from_i32(i).unwrap();
+        x_acc *= x.clone();
+    }
+    ret
+}
+
+pub fn newton_solve_polynomial<T>(mut initial: T, coefs: &[T], tolerance: T) -> T where
+    T: Clone + Mul<T, Output = T> + AddAssign<T> + MulAssign<T> + FromPrimitive + Div<T, Output = T> + Sub<T, Output = T> + Float,
+{
+    let mut f = evaluate_polynomial(initial.clone(), coefs);
+    while f.abs() > tolerance {
+        initial = initial.clone() - f / evaluate_polynomial_derivative(initial.clone(), coefs);
+        f = evaluate_polynomial(initial.clone(), coefs);
+    }
+    initial
+}
+
 #[cfg(test)]
 mod tests {
     use std::f64::consts::PI;
 
-    use crate::util::{half_int_gamma, VecN};
+    use num_complex::ComplexFloat;
+
+    use crate::util::{evaluate_polynomial, evaluate_polynomial_derivative, half_int_gamma, newton_solve_polynomial, VecN};
 
     #[test]
     fn coords() {
@@ -724,5 +776,21 @@ mod tests {
     #[test]
     fn mom_factor() {
         assert!((half_int_gamma(3) - PI.sqrt() / 2.0).abs() <= 1e-20);
+    }
+
+    #[test]
+    fn cubic_eqn() {
+        let coefs = [0.0000000014625333905062336, 0.0, -3.0, 0.000015611414900550057];
+        let sol = newton_solve_polynomial(0.1, &coefs, 1e-20);
+        println!("sol = {}", sol);
+        assert!((sol / 0.0000220797 - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn polynomial() {
+        let coefs = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let x = 3.0;
+        assert_eq!(evaluate_polynomial(x, &coefs), coefs[0] + coefs[1] * x + coefs[2] * x * x + coefs[3] * x * x * x + coefs[4] * x * x * x * x);
+        assert_eq!(evaluate_polynomial_derivative(x, &coefs), coefs[1] + coefs[2] * x * 2.0 + coefs[3] * x * x * 3.0 + coefs[4] * x * x * x * 4.0);
     }
 }

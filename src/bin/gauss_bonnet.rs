@@ -94,7 +94,7 @@ impl LatticeSetting {
             &format!("{}/lattice.{}.bincode", out_dir, &self.name),
             BINCODE_CONFIG,
             || {
-                println!("[lattice] dx = {}", dx);
+                println!("[lattice] dx = {}, k_range = [{}, {}]", dx, self.starting_k, end_k);
                 let start_state = background
                     .iter()
                     .find(|state| state.v_a >= starting_horizon)
@@ -111,6 +111,7 @@ impl LatticeSetting {
                     lattice_state.populate_noise(&mut random::default(1), input, &lattice);
                     lattice_state
                 });
+                println!("initial H = {}", simulator.field.v_a / simulator.field.a);
                 let mut spectrum_scratch = BoxLattice::zeros(lattice.size);
                 let initial_spectrum =
                     spectrum_with_scratch(&simulator.field.phi.view().map(|f|f[0]), &lattice, &mut spectrum_scratch);
@@ -549,9 +550,9 @@ pub fn main() {
             lattice: vec![
                 LatticeSetting {
                     name: "0".to_string(),
-                    starting_k: 1e17,
+                    starting_k: 4e16,
                     dt: 1.0,
-                    lattice_size: 128,
+                    lattice_size: 16,
                     horizon_tolerance: 10.0,
                     spectrum_count: 10,
                 },

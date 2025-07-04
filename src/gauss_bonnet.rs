@@ -14,9 +14,7 @@ use crate::{
 };
 
 pub mod data {
-    use num_complex::Complex64;
-
-    use crate::{c2fn::C2Fn, util::solve_cubic};
+    use crate::{c2fn::C2Fn, util::newton_solve_polynomial};
 
     #[rustfmt::skip]
     pub fn vv_phi<V, Xi>(dim: usize, kappa: f64, a: f64, v_a: f64, phi: f64, v_phi: f64, laplacian_phi: f64, derivative2_phi: f64, v: &V, xi: &Xi) -> f64 where
@@ -64,6 +62,20 @@ pub mod data {
         let xi_d_phi = xi.value_d(phi);
         let pv_phi = v.value(phi);
         1.0 / 2.0 * v_phi * v_phi + pv_phi + 1.0 / 16.0 * (-1.0 + d) * d * hubble * hubble * 1.0 / (kappa) * (-8.0 + (6.0 + -5.0 * d + d * d) * hubble * hubble * kappa * xi_phi) + 1.0 / 4.0 * d * (2.0 + -3.0 * d + d * d) * hubble * hubble * hubble * v_phi * xi_d_phi
+    }
+
+    pub fn hubble_constraint_coefs<V, Xi>(dim: usize, kappa: f64, a: f64, phi: f64, v_phi: f64, laplacian_phi: f64, derivative2_phi: f64, v: &V, xi: &Xi) -> [f64; 5] where
+        V: C2Fn<f64, Output = f64>,
+        Xi: C2Fn<f64, Output = f64>,
+    {
+        let d = dim as f64;
+        let laplacian_div_a2 = laplacian_phi / a / a;
+        let derivative2_div_a2 = derivative2_phi / a / a;
+        let xi_phi = xi.value(phi);
+        let xi_d_phi = xi.value_d(phi);
+        let xi_dd_phi = xi.value_dd(phi);
+        let pv_phi = v.value(phi);
+        [1.0 / 2.0 * (derivative2_div_a2 + v_phi * v_phi) + pv_phi,0.0,-1.0 / 4.0 * (-1.0 + d) * 1.0 / (kappa) * (2.0 * d + (-2.0 + d) * kappa * (laplacian_div_a2 * xi_d_phi + derivative2_div_a2 * xi_dd_phi)),1.0 / 4.0 * (-2.0 + d) * (-1.0 + d) * d * v_phi * xi_d_phi,1.0 / 16.0 * (-3.0 + d) * (-2.0 + d) * (-1.0 + d) * d * xi_phi]
     }
 
     #[rustfmt::skip]
@@ -181,54 +193,12 @@ pub mod data {
         V: C2Fn<f64, Output = f64>,
         Xi: C2Fn<f64, Output = f64>,
     {
-        let laplacian_div_a2 = laplacian_phi / a / a;
+        let d = dim as f64;
+        let coefs = hubble_constraint_coefs(dim, kappa, a, phi, v_phi, laplacian_phi, derivative2_phi, v, xi);
         let derivative2_div_a2 = derivative2_phi / a / a;
-        let xi_d_phi = xi.value_d(phi);
-        let xi_dd_phi = xi.value_dd(phi);
         let pv_phi = v.value(phi);
-
-        if dim == 3 {
-            let a0 = 3.0 / 2.0 * v_phi * xi_d_phi;
-            let b0 = -3.0 * 1.0 / (kappa)
-                + -1.0 / 2.0 * laplacian_div_a2 * xi_d_phi
-                + -1.0 / 2.0 * derivative2_div_a2 * xi_dd_phi;
-            let d0 = 1.0 / 2.0 * derivative2_div_a2 + 1.0 / 2.0 * v_phi * v_phi + pv_phi;
-
-            if (a0 / b0).abs() <= 1e-10 {
-                let aa = -d0 / b0;
-                assert!(aa >= 0.0);
-                aa.sqrt()
-            } else {
-                let sols = solve_cubic(a0.into(), b0.into(), Complex64::ZERO, d0.into());
-                let mut ret: Option<f64> = None;
-                for f in &sols {
-                    if (f.im / f.re).abs() <= 1e-8 && f.re >= 0.0 {
-                        if ret.map(|f2| f2 > f.re).unwrap_or(true) {
-                            ret = Some(f.re);
-                        }
-                    }
-                }
-                ret.unwrap()
-            }
-        } else {
-            todo!("handle dimension d = {}", dim)
-        }
-
-        // let mut min_v_a = 0.0;
-        // let mut max_v_a = 1000.0 * a; // TODO: determine this dynamically
-
-        // while (max_v_a - min_v_a) / a > 1e-20 {
-        //     let centre = (min_v_a + max_v_a) / 2.0;
-        //     let min_val = hubble_constraint(dim, kappa, a, min_v_a, phi, v_phi, v, xi);
-        //     let max_val = hubble_constraint(dim, kappa, a, max_v_a, phi, v_phi, v, xi);
-        //     let centre_val = hubble_constraint(dim, kappa, a, centre, phi, v_phi, v, xi);
-        //     if min_val.signum() * centre_val.signum() <= 0.0 {
-        //         max_v_a = centre;
-        //     } else if max_val.signum() * centre_val.signum() <= 0.0 {
-        //         min_v_a = centre;
-        //     }
-        // }
-        // (min_v_a + max_v_a) / 2.0
+        let initial_h = (kappa / d / (d - 1.0) * (derivative2_div_a2 + v_phi * v_phi + 2.0 * pv_phi)).sqrt();
+        newton_solve_polynomial(initial_h, &coefs, 1e-10)
     }
 }
 
