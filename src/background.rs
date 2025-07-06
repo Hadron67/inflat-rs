@@ -1,5 +1,10 @@
 use std::{
-    cmp::{max, min}, f64::consts::PI, fmt::Debug, marker::PhantomData, ops::{AddAssign, Index, Mul}, sync::atomic::{AtomicUsize, Ordering}
+    cmp::{max, min},
+    f64::consts::PI,
+    fmt::Debug,
+    marker::PhantomData,
+    ops::{AddAssign, Index, Mul},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use bincode::{
@@ -12,7 +17,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
     c2fn::{C2Fn, C2Fn2},
-    util::{self, ParamRange, VecN, first_index_of, lazy_file},
+    util::{self, ParamRange, VecN, first_index_of, half_int_gamma, lazy_file},
 };
 
 #[macro_export]
@@ -54,7 +59,8 @@ pub trait BackgroundSolver {
     type State;
     fn create_state(&self, a: f64, v_a: f64, phi: f64, v_phi: f64) -> Self::State;
     fn update(&self, state: &mut Self::State, dt: f64);
-    fn evaluate_to_phi(&self, state: &mut Self::State, dt: f64, phi_goal: f64) where
+    fn evaluate_to_phi(&self, state: &mut Self::State, dt: f64, phi_goal: f64)
+    where
         Self::State: Clone + Phi + PhiD + Debug,
         Self: Kappa,
     {
@@ -1641,24 +1647,6 @@ where
     Initializer: BackgroundFn<Ctx, B, Output = (Complex64, Complex64)>,
     PertCoef: BackgroundFn<Ctx, B, Output = f64>,
 {
-    // fn get_eval_index_range(&self, k: f64) -> (usize, usize) {
-    //     let mut begin = 0usize;
-    //     let mut end = self.length - 1;
-    //     let mut last_flag = false;
-    //     for i in 0..self.length {
-    //         let flag = self
-    //             .range_selector
-    //             .apply(self.context, &self.background_state[i], k);
-    //         if !last_flag && flag {
-    //             begin = i;
-    //         }
-    //         if last_flag && !flag {
-    //             end = i;
-    //         }
-    //         last_flag = flag;
-    //     }
-    //     (begin, end)
-    // }
     pub fn run<F>(&self, k: f64, da: f64, mut consumer: F) -> Complex64
     where
         F: FnMut(&Self, &B, &HamitonianState<Complex64>, Complex64, f64, f64),
@@ -1683,7 +1671,7 @@ where
             let dt = if potential > 0.0 {
                 fmin(da / potential.sqrt(), background_state.dt())
             } else {
-                background_state.dt()
+                fmin(da / potential.sqrt(), background_state.dt())
             };
             state.apply_full_k_order2(dt, 1.0.into(), potential.into());
             consumer(
@@ -1715,7 +1703,7 @@ where
                     k_range.count,
                     k
                 );
-                k * k * k / 2.0 / PI * state * state
+                k * k * k / 2.0 / PI / PI * state * state
             })
             .collect::<Vec<_>>()
     }
@@ -2056,4 +2044,10 @@ impl Interpolate for BiNymtgBackgroundState {
     {
         interpolate_fields!(Self, self, other, l, a, v_a, phi, v_phi, chi, v_chi)
     }
+}
+
+/// Computes the coefficient of spectrum, given by $2^{1 - d}\pi^{-d/2} / \Gamma(d/2)$
+pub fn spectrum_factor(dim: usize) -> f64 {
+    let d = dim as f64;
+    2.0.powi(1 - (dim as i32)) * PI.powf(-d / 2.0) / half_int_gamma(dim as u32)
 }

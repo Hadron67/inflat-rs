@@ -229,8 +229,14 @@ pub trait Lattice<const D: usize, T> {
             dx: dx.map(|f| f.clone().into()),
         }
     }
-    fn zip<F2>(self, other: F2) -> LatticeZip2<Self, F2> where Self: Sized {
-        LatticeZip2 { lhs: self, rhs: other }
+    fn zip<F2>(self, other: F2) -> LatticeZip2<Self, F2>
+    where
+        Self: Sized,
+    {
+        LatticeZip2 {
+            lhs: self,
+            rhs: other,
+        }
     }
     fn as_ref(&self) -> LatticeRef<'_, Self> {
         LatticeRef { field: self }
@@ -290,7 +296,8 @@ pub struct LatticeRef<'a, F: ?Sized> {
     field: &'a F,
 }
 
-impl<const D: usize, T, F> Lattice<D, T> for LatticeRef<'_, F> where
+impl<const D: usize, T, F> Lattice<D, T> for LatticeRef<'_, F>
+where
     F: ?Sized + Lattice<D, T>,
 {
     fn dim(&self) -> &VecN<D, usize> {
@@ -468,7 +475,8 @@ pub struct LatticeZip2<F1, F2> {
     rhs: F2,
 }
 
-impl<const D: usize, T1, T2, F1, F2> Lattice<D, (T1, T2)> for LatticeZip2<F1, F2> where
+impl<const D: usize, T1, T2, F1, F2> Lattice<D, (T1, T2)> for LatticeZip2<F1, F2>
+where
     F1: Lattice<D, T1>,
     F2: Lattice<D, T2>,
 {
@@ -488,7 +496,8 @@ pub struct BoxLattice<const D: usize, T> {
 }
 
 impl<const D: usize, T> BoxLattice<D, T> {
-    pub fn constant(dim: VecN<D, usize>, value: T) -> Self where
+    pub fn constant(dim: VecN<D, usize>, value: T) -> Self
+    where
         T: Copy,
     {
         Self {

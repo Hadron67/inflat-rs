@@ -80,7 +80,7 @@ where
             let mut phi = vec![];
             let mut v_phi = vec![];
             let mut epsilon = vec![];
-            for state in limit_length(background.clone(), max_length) {
+            for state in limit_length(&background, max_length) {
                 efolding.push(state.scale_factor().ln());
                 phi.push(state.phi);
                 v_phi.push(state.v_phi().abs());

@@ -7,8 +7,8 @@ use inflat::{
     c2fn::C2Fn,
     lat::{BoxLattice, Lattice, LatticeParam},
     models::QuadraticPotential,
-    scalar::{spectrum, spectrum_with_scratch, ScalarFieldParams, ScalarFieldState},
-    util::{lazy_file, limit_length, RateLimiter, VecN},
+    scalar::{ScalarFieldParams, ScalarFieldState, spectrum, spectrum_with_scratch},
+    util::{RateLimiter, VecN, lazy_file, limit_length},
 };
 use libm::{cosh, tanh};
 use plotly::{
@@ -107,7 +107,11 @@ where
                 let mut spectrum_n_cursor = self.a.ln();
                 let spectrum_n_step = (self.end_n - self.a.ln()) / (self.spectrum_count as f64);
                 let mut spectrum_scratch = BoxLattice::zeros(self.scalar_params.lattice.size);
-                let initial_spectrum = spectrum_with_scratch(&field.phi, &self.scalar_params.lattice, &mut spectrum_scratch);
+                let initial_spectrum = spectrum_with_scratch(
+                    &field.phi,
+                    &self.scalar_params.lattice,
+                    &mut spectrum_scratch,
+                );
                 let mut spectrum_data =
                     vec![(self.a.ln(), initial_spectrum.iter().map(|f| f.1).collect())];
                 let spectrum_mom = initial_spectrum.iter().map(|f| f.0).collect();
@@ -131,7 +135,11 @@ where
                     });
                     if m.a.ln() > spectrum_n_cursor {
                         spectrum_n_cursor += spectrum_n_step;
-                        let spectrum = spectrum_with_scratch(&field.phi, &self.scalar_params.lattice, &mut spectrum_scratch);
+                        let spectrum = spectrum_with_scratch(
+                            &field.phi,
+                            &self.scalar_params.lattice,
+                            &mut spectrum_scratch,
+                        );
                         spectrum_data.push((m.a.ln(), spectrum.iter().map(|f| f.1).collect()));
                     }
                     measurables.push(m);
@@ -151,7 +159,7 @@ where
             let mut phi = vec![];
             let mut v_phi = vec![];
             let mut hubble = vec![];
-            for state in limit_length(int_data.evaluation_measurables, max_length) {
+            for state in limit_length(&int_data.evaluation_measurables, max_length) {
                 efoldings.push(state.a.ln());
                 phi.push(state.phi);
                 v_phi.push(state.v_phi / self.mass);
@@ -185,8 +193,10 @@ where
             for (n, data) in &int_data.spectrum_data {
                 plot.add_trace(
                     Scatter::new(
-                        limit_length(int_data.spectrum_mom.clone(), max_length),
-                        limit_length(data.clone(), max_length),
+                        limit_length(&int_data.spectrum_mom, max_length)
+                            .cloned()
+                            .collect(),
+                        limit_length(&data, max_length).cloned().collect(),
                     )
                     .name(&format!("N = {}", n)),
                 );

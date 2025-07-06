@@ -1,5 +1,16 @@
 use std::{
-    collections::VecDeque, error::Error, f64::consts::PI, fmt::Display, fs::File, io::{self, BufReader, BufWriter}, iter::zip, marker::PhantomData, mem::MaybeUninit, ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub}, slice, time::{Duration, SystemTime}
+    collections::VecDeque,
+    error::Error,
+    f64::consts::PI,
+    fmt::Display,
+    fs::File,
+    io::{self, BufReader, BufWriter},
+    iter::zip,
+    marker::PhantomData,
+    mem::MaybeUninit,
+    ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub},
+    slice,
+    time::{Duration, SystemTime},
 };
 
 use bincode::{
@@ -50,19 +61,42 @@ where
     a * (b / a).powf(i)
 }
 
-pub fn limit_length<T: Clone>(arr: Vec<T>, max_length: usize) -> Vec<T> {
-    if arr.len() > max_length {
-        let mut arr2 = vec![];
-        arr2.reserve(max_length);
-        for i in 0..max_length {
-            arr2.push(
-                arr[((i as f64) / ((max_length - 1) as f64) * ((arr.len() - 1) as f64)) as usize]
-                    .clone(),
-            );
+pub struct LimitLengthArray<'a, T> {
+    arr: &'a [T],
+    max_length: usize,
+    cursor: usize,
+}
+
+impl<'a, T> Iterator for LimitLengthArray<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.arr.len() > self.max_length {
+            if self.cursor < self.max_length {
+                let i = ((self.cursor as f64) / ((self.max_length - 1) as f64)
+                    * ((self.arr.len() - 1) as f64)) as usize;
+                self.cursor += 1;
+                Some(&self.arr[i])
+            } else {
+                None
+            }
+        } else {
+            if self.cursor < self.arr.len() {
+                let i = self.cursor;
+                self.cursor += 1;
+                Some(&self.arr[i])
+            } else {
+                None
+            }
         }
-        arr2
-    } else {
-        arr
+    }
+}
+
+pub fn limit_length<T>(arr: &[T], max_length: usize) -> LimitLengthArray<'_, T> {
+    LimitLengthArray {
+        arr,
+        max_length,
+        cursor: 0,
     }
 }
 
@@ -712,7 +746,8 @@ pub fn solve_cubic_one_real(a: Complex64, b: Complex64, c: Complex64, d: Complex
         .map(|f| f.re)
 }
 
-pub fn evaluate_polynomial<T>(x: T, coefs: &[T]) -> T where
+pub fn evaluate_polynomial<T>(x: T, coefs: &[T]) -> T
+where
     T: Clone + Mul<T, Output = T> + AddAssign<T> + MulAssign<T>,
 {
     let mut ret = coefs[0].clone();
@@ -724,7 +759,8 @@ pub fn evaluate_polynomial<T>(x: T, coefs: &[T]) -> T where
     ret
 }
 
-pub fn evaluate_polynomial_derivative<T>(x: T, coefs: &[T]) -> T where
+pub fn evaluate_polynomial_derivative<T>(x: T, coefs: &[T]) -> T
+where
     T: Clone + Mul<T, Output = T> + AddAssign<T> + MulAssign<T> + FromPrimitive,
 {
     let mut ret = coefs[1].clone();
@@ -736,8 +772,16 @@ pub fn evaluate_polynomial_derivative<T>(x: T, coefs: &[T]) -> T where
     ret
 }
 
-pub fn newton_solve_polynomial<T>(mut initial: T, coefs: &[T], tolerance: T) -> T where
-    T: Clone + Mul<T, Output = T> + AddAssign<T> + MulAssign<T> + FromPrimitive + Div<T, Output = T> + Sub<T, Output = T> + Float,
+pub fn newton_solve_polynomial<T>(mut initial: T, coefs: &[T], tolerance: T) -> T
+where
+    T: Clone
+        + Mul<T, Output = T>
+        + AddAssign<T>
+        + MulAssign<T>
+        + FromPrimitive
+        + Div<T, Output = T>
+        + Sub<T, Output = T>
+        + Float,
 {
     let mut f = evaluate_polynomial(initial.clone(), coefs);
     while f.abs() > tolerance {
@@ -753,7 +797,10 @@ mod tests {
 
     use num_complex::ComplexFloat;
 
-    use crate::util::{evaluate_polynomial, evaluate_polynomial_derivative, half_int_gamma, newton_solve_polynomial, VecN};
+    use crate::util::{
+        VecN, evaluate_polynomial, evaluate_polynomial_derivative, half_int_gamma,
+        newton_solve_polynomial,
+    };
 
     #[test]
     fn coords() {
@@ -780,7 +827,12 @@ mod tests {
 
     #[test]
     fn cubic_eqn() {
-        let coefs = [0.0000000014625333905062336, 0.0, -3.0, 0.000015611414900550057];
+        let coefs = [
+            0.0000000014625333905062336,
+            0.0,
+            -3.0,
+            0.000015611414900550057,
+        ];
         let sol = newton_solve_polynomial(0.1, &coefs, 1e-20);
         println!("sol = {}", sol);
         assert!((sol / 0.0000220797 - 1.0).abs() < 1e-5);
@@ -790,7 +842,17 @@ mod tests {
     fn polynomial() {
         let coefs = [1.0, 2.0, 3.0, 4.0, 5.0];
         let x = 3.0;
-        assert_eq!(evaluate_polynomial(x, &coefs), coefs[0] + coefs[1] * x + coefs[2] * x * x + coefs[3] * x * x * x + coefs[4] * x * x * x * x);
-        assert_eq!(evaluate_polynomial_derivative(x, &coefs), coefs[1] + coefs[2] * x * 2.0 + coefs[3] * x * x * 3.0 + coefs[4] * x * x * x * 4.0);
+        assert_eq!(
+            evaluate_polynomial(x, &coefs),
+            coefs[0]
+                + coefs[1] * x
+                + coefs[2] * x * x
+                + coefs[3] * x * x * x
+                + coefs[4] * x * x * x * x
+        );
+        assert_eq!(
+            evaluate_polynomial_derivative(x, &coefs),
+            coefs[1] + coefs[2] * x * 2.0 + coefs[3] * x * x * 3.0 + coefs[4] * x * x * x * 4.0
+        );
     }
 }

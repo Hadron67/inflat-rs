@@ -228,7 +228,7 @@ where
                 background[0].v_a(&self.input),
                 t
             );
-            time = limit_length(time, max_length);
+            time = limit_length(&time, max_length).cloned().collect();
             let mut efoldings = vec![];
             let mut phi = vec![];
             let mut chi = vec![];
@@ -239,7 +239,7 @@ where
             let mut hubble_constraint = vec![];
             let mut hubble = vec![];
             let mut test_plot1 = vec![];
-            for state in limit_length(background.clone(), max_length) {
+            for state in limit_length(&background, max_length) {
                 efoldings.push(state.a().ln());
                 phi.push(state.phi);
                 chi.push(state.chi);
@@ -354,9 +354,9 @@ where
                     println!("[pert]N = {}, dt = {}, {:?}", b.a().ln(), dt, s);
                 }
             });
-            efoldings = limit_length(efoldings, max_length);
-            phi = limit_length(phi, max_length);
-            em = limit_length(em, max_length);
+            efoldings = limit_length(&efoldings, max_length).cloned().collect();
+            phi = limit_length(&phi, max_length).cloned().collect();
+            em = limit_length(&em, max_length).cloned().collect();
             let mut plot = Plot::new();
             plot.add_trace(Scatter::new(efoldings.clone(), phi).name("re(phi)"));
             // plot.add_trace(Scatter::new(efoldings.clone(), phi_im).name("im(phi)"));

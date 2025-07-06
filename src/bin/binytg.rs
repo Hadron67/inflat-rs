@@ -269,7 +269,9 @@ where
                 time += state.dt;
             }
         }
-        times = limit_length(times, max_length);
+        times = limit_length(&times, max_length)
+            .cloned()
+            .collect::<Vec<_>>();
         {
             let mut phi = vec![];
             let mut scale_factor = vec![];
@@ -280,7 +282,7 @@ where
             let mut dphi_deta = vec![];
             let mut hubble_constraint = vec![];
             let mut v_chi = vec![];
-            for state in &limit_length(background.clone(), max_length) {
+            for state in limit_length(&background, max_length) {
                 phi.push(state.phi);
                 scale_factor.push(state.a);
                 hubble.push(state.v_a / state.a);

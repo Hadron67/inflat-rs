@@ -76,7 +76,7 @@ impl<V, U> Params<V, U> {
             let mut v_phi = vec![];
             let mut chi = vec![];
             let mut epsilon = vec![];
-            for state in limit_length(background.clone(), max_length) {
+            for state in limit_length(&background, max_length) {
                 efolding.push(state.a().ln());
                 phi.push(state.phi);
                 v_phi.push(state.v_phi().abs() / self.v0.sqrt());

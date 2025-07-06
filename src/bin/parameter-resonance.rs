@@ -74,7 +74,7 @@ where
             let mut zdd_z = vec![];
             let mut epsilon = vec![];
             let mut hubble = vec![];
-            for state in limit_length(background.clone(), max_length) {
+            for state in limit_length(&background, max_length) {
                 efoldings.push(state.scale_factor().ln());
                 phi.push(state.phi);
                 epsilon.push(state.epsilon(&self.input));

@@ -1,13 +1,9 @@
-use std::
-    sync::{Arc, Mutex}
-;
+use std::sync::{Arc, Mutex};
 
 use num_traits::{Float, FloatConst};
 use rustfft::{Fft, FftDirection, FftNum, FftPlanner, num_complex::Complex};
 
-use crate::{
-    lat::{BoxLattice, Lattice},
-};
+use crate::lat::{BoxLattice, Lattice};
 
 pub struct DftNDPlan<const D: usize, T> {
     plans: [Arc<dyn Fft<T>>; D],

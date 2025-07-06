@@ -1,13 +1,23 @@
-use std::{collections::HashMap, f64::consts::PI, fmt::Debug, iter::zip, sync::atomic::{AtomicUsize, Ordering}};
+use std::{
+    collections::HashMap,
+    f64::consts::PI,
+    fmt::Debug,
+    iter::zip,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use bincode::{Decode, Encode};
-use libm::{pow, sin, sqrt};
+use libm::{fmin, pow, sin, sqrt};
 use num_complex::ComplexFloat;
 use random::Source;
 use rustfft::{FftDirection, num_complex::Complex64};
 
 use crate::{
-    background::{BackgroundSolver, Kappa, Phi, PhiD, ScaleFactor}, c2fn::C2Fn, fft::DftNDPlan, lat::{BoxLattice, Lattice, LatticeMut, LatticeParam}, util::{half_int_gamma, VecN}
+    background::{BackgroundSolver, Kappa, Phi, PhiD, ScaleFactor, spectrum_factor},
+    c2fn::C2Fn,
+    fft::DftNDPlan,
+    lat::{BoxLattice, Lattice, LatticeMut, LatticeParam},
+    util::VecN,
 };
 
 #[derive(Encode, Decode)]
@@ -265,11 +275,54 @@ pub fn populate_noise<const D: usize, S>(
     noise_phi.par_for_each_mut(|ptr, _, _| *ptr /= a);
 }
 
+struct MomBin {
+    pub total_k_eff: f64,
+    pub total_amp: f64,
+    pub count: usize,
+}
+
+impl MomBin {
+    pub fn zero() -> Self {
+        Self {
+            total_k_eff: 0.0,
+            total_amp: 0.0,
+            count: 0,
+        }
+    }
+    pub fn add(&mut self, k_eff: f64, amp: f64) {
+        self.total_amp += amp;
+        self.total_k_eff += k_eff;
+        self.count += 1;
+    }
+    pub fn average(&self, dim: usize) -> (f64, f64) {
+        let k_eff = self.total_k_eff / (self.count as f64);
+        let amp = self.total_amp / (self.count as f64);
+        (k_eff, k_eff.powi(dim as i32) * spectrum_factor(dim) * amp)
+    }
+}
+
+fn normalize_mom_mode<const D: usize>(
+    mom: VecN<D, usize>,
+    size: &VecN<D, usize>,
+) -> VecN<D, usize> {
+    VecN::new({
+        let mut c = mom.value;
+        for (cc, size) in zip(&mut c, size) {
+            if *cc > size / 2 {
+                *cc = size - *cc;
+            }
+        }
+        c.sort();
+        c
+    })
+}
+
 pub fn spectrum_with_scratch<const D: usize, Phi>(
     phi: &Phi,
     lattice: &LatticeParam<D>,
     scratch_field: &mut BoxLattice<D, Complex64>,
-) -> Vec<(f64, f64)> where
+) -> Vec<(f64, f64)>
+where
     Phi: Lattice<D, f64> + Sync,
 {
     let dft = DftNDPlan::new(lattice.size.value, FftDirection::Inverse);
@@ -279,57 +332,63 @@ pub fn spectrum_with_scratch<const D: usize, Phi>(
         phi2.map(move |f| (f - avg_phi).into())
     });
     dft.transform_inplace(scratch_field);
-    let d = D as f64;
-    let angular_factor = 2.0.powi(1 - (D as i32)) * PI.powf(-d / 2.0) / half_int_gamma(D as u32);
-    let factor = angular_factor * lattice.spacing.product() / (lattice.size.product() as f64);
-    let mut spectrum_by_modes = HashMap::new();
+    let factor = lattice.spacing.product() / (lattice.size.product() as f64);
+    let mut spectrum_bins = HashMap::new();
     let dim = lattice.size;
     for index in 0..dim.product() {
         let coord = dim.decode_coord(index);
         let rev_coord = coord.flip(&dim);
-        let mode = VecN::new({
-            let mut c = coord.value;
-            for (cc, size) in zip(&mut c, &lattice.size) {
-                if *cc > size / 2 {
-                    *cc = size - *cc;
-                }
-            }
-            c.sort();
-            c
-        });
+        // let mode = VecN::new({
+        //     let mut c = coord.value;
+        //     for (cc, size) in zip(&mut c, &lattice.size) {
+        //         if *cc > size / 2 {
+        //             *cc = size - *cc;
+        //         }
+        //     }
+        //     c.sort();
+        //     c
+        // });
+        let mode = normalize_mom_mode(coord, &lattice.size);
+        let l = (mode.value.iter().map(|f| f * f).sum::<usize>() as f64)
+            .sqrt()
+            .round() as usize;
         let value = scratch_field.get_by_coord(&coord) * scratch_field.get_by_coord(&rev_coord);
-        if !spectrum_by_modes.contains_key(&mode) {
-            spectrum_by_modes.insert(mode, (0usize, 0.0));
+        if !spectrum_bins.contains_key(&l) {
+            spectrum_bins.insert(l, MomBin::zero());
         }
-        let ptr: &mut (usize, f64) = spectrum_by_modes.get_mut(&mode).unwrap();
-        ptr.0 += 1;
-        ptr.1 += value.re;
+        spectrum_bins.get_mut(&l).unwrap().add(
+            effective_mom(&mode, &lattice.spacing, &lattice.size),
+            factor * value.re,
+        );
     }
-    let mut ret = spectrum_by_modes
+    let mut ret = spectrum_bins
         .iter()
-        .map(|(mode, (count, value))| {
-            let k_eff = effective_mom(mode, &lattice.spacing, &lattice.size);
-            (
-                k_eff,
-                k_eff.powi(D as i32) * factor * *value / (*count as f64),
-            )
-        })
+        .map(|(_, bin)| bin.average(D))
         .collect::<Vec<_>>();
     ret.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     ret
 }
 
-pub fn spectrum<const D: usize, Phi>(
-    phi: &Phi,
-    lattice: &LatticeParam<D>,
-) -> Vec<(f64, f64)> where
+pub fn spectrum<const D: usize, Phi>(phi: &Phi, lattice: &LatticeParam<D>) -> Vec<(f64, f64)>
+where
     Phi: Lattice<D, f64> + Sync,
 {
     let mut scratch_field = BoxLattice::zeros(lattice.size);
     spectrum_with_scratch(phi, lattice, &mut scratch_field)
 }
 
-pub fn construct_zeta_inplace<const D: usize, Zeta, Phi1, Phi2, Solver, M>(zeta: &mut Zeta, a: f64, v_a: f64, phi: &Phi1, v_phi: &Phi2, reference_phi: f64, dt_segs: usize, solver: &Solver, step_monitor: M) where
+pub fn construct_zeta_inplace<const D: usize, Zeta, Phi1, Phi2, Solver, M>(
+    zeta: &mut Zeta,
+    a: f64,
+    v_a: f64,
+    phi: &Phi1,
+    v_phi: &Phi2,
+    reference_phi: f64,
+    dt_segs: usize,
+    max_dt: f64,
+    solver: &Solver,
+    step_monitor: M,
+) where
     Phi1: Lattice<D, f64> + Sync,
     Phi2: Lattice<D, f64> + Sync,
     Zeta: LatticeMut<D, f64>,
@@ -341,15 +400,33 @@ pub fn construct_zeta_inplace<const D: usize, Zeta, Phi1, Phi2, Solver, M>(zeta:
     let done_count = AtomicUsize::new(0);
     let sm = &step_monitor;
     zeta.par_assign(&phi.as_ref().zip(v_phi.as_ref()).map(move |(phi, v_phi)| {
-        let dt = (reference_phi - phi) / v_phi / (dt_segs as f64);
+        let dt = fmin(max_dt, (reference_phi - phi) / v_phi / (dt_segs as f64));
         let mut state = solver.create_state(a, v_a, phi, v_phi);
         solver.evaluate_to_phi(&mut state, dt, reference_phi);
         sm(done_count.fetch_add(1, Ordering::SeqCst) + 1, total_count);
-        (state.scale_factor() / a).ln()
+        let ret = (state.scale_factor() / a).ln();
+        if ret.is_infinite() || ret.is_nan() {
+            println!(
+                "found nan, a = {}, v_a = {}, phi = {}, v_phi = {}, final_state = {:?}",
+                a, v_a, phi, v_phi, &state
+            );
+        }
+        ret
     }));
 }
 
-pub fn construct_zeta<const D: usize, Phi1, Phi2, Solver, M>(a: f64, v_a: f64, phi: &Phi1, v_phi: &Phi2, reference_phi: f64, dt_segs: usize, solver: &Solver, step_monitor: M) -> BoxLattice<D, f64> where
+pub fn construct_zeta<const D: usize, Phi1, Phi2, Solver, M>(
+    a: f64,
+    v_a: f64,
+    phi: &Phi1,
+    v_phi: &Phi2,
+    reference_phi: f64,
+    dt_segs: usize,
+    max_dt: f64,
+    solver: &Solver,
+    step_monitor: M,
+) -> BoxLattice<D, f64>
+where
     Phi1: Lattice<D, f64> + Sync,
     Phi2: Lattice<D, f64> + Sync,
     Solver: BackgroundSolver + Kappa + Sync,
@@ -357,6 +434,17 @@ pub fn construct_zeta<const D: usize, Phi1, Phi2, Solver, M>(a: f64, v_a: f64, p
     M: Fn(usize, usize) + Sync,
 {
     let mut zeta = BoxLattice::zeros(*phi.dim());
-    construct_zeta_inplace(&mut zeta, a, v_a, phi, v_phi, reference_phi, dt_segs, solver, step_monitor);
+    construct_zeta_inplace(
+        &mut zeta,
+        a,
+        v_a,
+        phi,
+        v_phi,
+        reference_phi,
+        dt_segs,
+        max_dt,
+        solver,
+        step_monitor,
+    );
     zeta
 }
