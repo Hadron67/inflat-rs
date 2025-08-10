@@ -94,13 +94,15 @@ pub trait ScaleFactor {
     fn scale_factor(&self) -> f64;
 }
 
+pub const MPC_HZ: f64 = 1.547e-15;
+
 pub trait ScaleFactorD {
     fn v_scale_factor(&self, kappa: f64) -> f64;
     fn mom_unit_coef_mpc(&self, kappa: f64, scale: f64) -> f64 {
         scale / self.v_scale_factor(kappa)
     }
     fn mom_unit_coef_hz(&self, kappa: f64, scale: f64) -> f64 {
-        1.547e-15 * self.mom_unit_coef_mpc(kappa, scale)
+        MPC_HZ * self.mom_unit_coef_mpc(kappa, scale)
     }
 }
 
@@ -116,6 +118,21 @@ pub struct BackgroundStateInput<F> {
 impl<F> Kappa for BackgroundStateInput<F> {
     fn kappa(&self) -> f64 {
         self.kappa
+    }
+}
+
+impl<F> BackgroundSolver for BackgroundStateInput<F>
+where
+    F: C2Fn<f64, Output = f64>,
+{
+    type State = BackgroundState;
+
+    fn create_state(&self, a: f64, _v_a: f64, phi: f64, v_phi: f64) -> Self::State {
+        BackgroundState::init_normal(phi, v_phi, a, self)
+    }
+
+    fn update(&self, state: &mut Self::State, dt: f64) {
+        state.update(dt, 4, self);
     }
 }
 
@@ -148,7 +165,7 @@ pub struct BackgroundState {
 }
 
 impl BackgroundState {
-    pub fn init<P: C2Fn<f64, Output = f64>>(
+    pub fn init_normal<P: C2Fn<f64, Output = f64>>(
         phi: f64,
         v_phi: f64,
         a: f64,
@@ -174,7 +191,7 @@ impl BackgroundState {
         let phi_d = -input.potential.value_d(phi)
             / sqrt(3.0 * input.kappa * input.potential.value(phi))
             * a;
-        Self::init(phi, phi_d, a, input)
+        Self::init_normal(phi, phi_d, a, input)
     }
     pub fn v_a<F>(&self, input: &BackgroundStateInput<F>) -> f64 {
         self.v_scale_factor(input.kappa)
@@ -277,6 +294,12 @@ impl Interpolate for BackgroundState {
 impl Dt for BackgroundState {
     fn dt(&self) -> f64 {
         self.dt
+    }
+}
+
+impl Phi for BackgroundState {
+    fn phi(&self) -> f64 {
+        self.phi
     }
 }
 
@@ -1687,7 +1710,7 @@ where
         let background_state = time_interpolator.get(self.background_state);
         state.x * self.pert_coef.apply(self.context, &background_state, k)
     }
-    pub fn spectrum(&self, k_range: ParamRange<f64>, da: f64) -> Vec<f64>
+    pub fn spectrum(&self, k_range: ParamRange<f64>, da: f64, quite: bool) -> Vec<f64>
     where
         Self: Send + Sync,
     {
@@ -1697,12 +1720,14 @@ where
             .map(|i| {
                 let k = k_range.log_interp(i);
                 let state = self.run(k, da, |_, _, _, _, _, _| {}).abs();
-                println!(
-                    "[spectrum]({}/{}) k = {}",
-                    done_count.fetch_add(1, Ordering::SeqCst) + 1,
-                    k_range.count,
-                    k
-                );
+                if !quite {
+                    println!(
+                        "[spectrum]({}/{}) k = {}",
+                        done_count.fetch_add(1, Ordering::SeqCst) + 1,
+                        k_range.count,
+                        k
+                    );
+                }
                 k * k * k / 2.0 / PI / PI * state * state
             })
             .collect::<Vec<_>>()
@@ -1712,11 +1737,12 @@ where
         fname: &str,
         k_range: ParamRange<f64>,
         da: f64,
+        quite: bool,
     ) -> util::Result<Vec<f64>>
     where
         Self: Send + Sync,
     {
-        lazy_file(fname, BINCODE_CONFIG, || self.spectrum(k_range, da))
+        lazy_file(fname, BINCODE_CONFIG, || self.spectrum(k_range, da, quite))
     }
 }
 
@@ -2050,4 +2076,16 @@ impl Interpolate for BiNymtgBackgroundState {
 pub fn spectrum_factor(dim: usize) -> f64 {
     let d = dim as f64;
     2.0.powi(1 - (dim as i32)) * PI.powf(-d / 2.0) / half_int_gamma(dim as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::f64::consts::PI;
+
+    use crate::background::spectrum_factor;
+
+    #[test]
+    fn spec_factor() {
+        assert_approx_eq::assert_approx_eq!(spectrum_factor(3), 1.0 / 2.0 / PI / PI);
+    }
 }

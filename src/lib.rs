@@ -2,6 +2,7 @@ pub mod background;
 pub mod c2fn;
 pub mod fft;
 pub mod gauss_bonnet;
+pub mod igw;
 pub mod lat;
 pub mod models;
 pub mod ndarray;

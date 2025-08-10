@@ -1,8 +1,9 @@
 use std::{
+    f64::consts::PI,
     fs::{File, create_dir_all},
     io::BufWriter,
     iter::zip,
-    ops::Index,
+    ops::{Index, Range},
     time::Duration,
 };
 
@@ -14,11 +15,12 @@ use inflat::{
         ScaleFactorD,
     },
     c2fn::{C2Fn, C2Fn2},
+    igw::tigw_2_spectrum,
     models::{LinearSinePotential, QuadraticPotential},
-    util::{ParamRange, RateLimiter, lazy_file, limit_length},
+    util::{ParamRange, RateLimiter, lazy_file, limit_length, select_range_1d},
 };
 use libm::{cosh, exp, sqrt, tanh};
-use ndarray::{Array, Array2};
+use ndarray::{Array, Array2, AssignElem};
 use ndarray_npy::NpzWriter;
 use plotly::{
     Layout, Plot, Scatter,
@@ -226,6 +228,7 @@ struct Params<A, B, V> {
     pub alpha: f64,
     pub spectrum_range: ParamRange<f64>,
     pub alpha_range: Option<ParamRange<f64>>,
+    pub tigw2: Option<Range<f64>>,
 }
 
 impl<A, B, V> Params<A, B, V>
@@ -371,6 +374,7 @@ where
                     &format!("{}/spectrum.no-alpha.bincode", out_dir),
                     self.spectrum_range,
                     0.1,
+                    false,
                 )?;
             let spectrum_pos = self
                 .pert(background.len(), &background, 1.0, self.alpha)
@@ -378,6 +382,7 @@ where
                     &format!("{}/spectrum.+.bincode", out_dir),
                     self.spectrum_range,
                     0.1,
+                    false,
                 )?;
             let spectrum_neg = self
                 .pert(background.len(), &background, -1.0, self.alpha)
@@ -385,6 +390,7 @@ where
                     &format!("{}/spectrum.-.bincode", out_dir),
                     self.spectrum_range,
                     0.1,
+                    false,
                 )?;
             let mut plot = Plot::new();
             let k_data = (self.spectrum_range * k_coef)
@@ -417,7 +423,7 @@ where
             let k_data = (self.spectrum_range * k_coef)
                 .as_logspace()
                 .collect::<Vec<_>>();
-            let mut plot = Plot::new();
+            let mut spectrum_plot = Plot::new();
             for (i, alpha) in zip(0usize.., alpha_range.as_linspace()) {
                 println!("[scan]({}/{})", i + 1, alpha_range.count);
                 let spectrum_pos = self
@@ -426,6 +432,7 @@ where
                         &format!("{}/spectrum.scan.{}.+.bincode", out_dir, i),
                         self.spectrum_range,
                         0.1,
+                        false,
                     )?;
                 let spectrum_neg = self
                     .pert(background.len(), &background, -1.0, alpha)
@@ -433,6 +440,7 @@ where
                         &format!("{}/spectrum.scan.{}.-.bincode", out_dir, i),
                         self.spectrum_range,
                         0.1,
+                        false,
                     )?;
                 let mut spectrum = vec![];
                 for j in 0..self.spectrum_range.count {
@@ -440,11 +448,11 @@ where
                     spectrum.push(val);
                     spectrum_arr[[i, j]] = val;
                 }
-                plot.add_trace(
+                spectrum_plot.add_trace(
                     Scatter::new(k_data.clone(), spectrum).name(&format!("alpha = {}", alpha)),
                 );
             }
-            plot.set_layout(
+            spectrum_plot.set_layout(
                 Layout::new()
                     .x_axis(
                         Axis::new()
@@ -458,7 +466,54 @@ where
                     )
                     .height(1000),
             );
-            plot.write_html(&format!("{}/spectrums.scan.html", out_dir));
+            spectrum_plot.write_html(&format!("{}/spectrums.scan.html", out_dir));
+            if let Some(k_range) = &self.tigw2 {
+                let mut tigw_plot = Plot::new();
+                let mut spectrum_data = vec![];
+                for (index, spectrum) in zip(0usize.., spectrum_arr.axis_iter(ndarray::Axis(0))) {
+                    let (k_data, spectrum_data2) = select_range_1d(
+                        &k_data,
+                        spectrum.as_slice().unwrap(),
+                        k_range.start,
+                        k_range.end,
+                    );
+                    spectrum_data.clear();
+                    spectrum_data.extend_from_slice(spectrum_data2);
+                    spectrum_data.iter_mut().for_each(|f| *f /= PI); // XXX: fix previously saved data, which lost a factor of pi
+                    let tigw2_data = lazy_file(
+                        &format!("{}/spectrum.scan.{}.tigw2.bincode", out_dir, index),
+                        BINCODE_CONFIG,
+                        || tigw_2_spectrum(k_data, &spectrum_data, 100.0, 0.05, 0.05, |_, _| {}),
+                    )?;
+                    println!("[TIGW2] {}/{}", index + 1, alpha_range.count);
+                    tigw_plot.add_trace(
+                        Scatter::new(
+                            k_data.to_vec(),
+                            spectrum_data.iter().map(|f| f / 12.0).collect(),
+                        )
+                        .name(&format!("alpha = {}", alpha_range.linear_interp(index))),
+                    );
+                    tigw_plot.add_trace(Scatter::new(k_data.to_vec(), tigw2_data).name(&format!(
+                        "tiwg alpha = {}",
+                        alpha_range.linear_interp(index)
+                    )));
+                }
+                tigw_plot.set_layout(
+                    Layout::new()
+                        .x_axis(
+                            Axis::new()
+                                .type_(AxisType::Log)
+                                .exponent_format(ExponentFormat::Power),
+                        )
+                        .y_axis(
+                            Axis::new()
+                                .type_(AxisType::Log)
+                                .exponent_format(ExponentFormat::Power),
+                        )
+                        .height(1000),
+                );
+                tigw_plot.write_html(&format!("{}/spectrums.scan.tigw2.html", out_dir));
+            }
             {
                 let mut npz = NpzWriter::new(BufWriter::new(File::create(&format!(
                     "{}/spectrums.scan.npz",
@@ -620,6 +675,7 @@ pub fn main() {
         alpha: 2.0,
         spectrum_range: ParamRange::new(1.3e-1, 1e4, 1000),
         alpha_range: Some(ParamRange::new(0.0, 2.4, 40)),
+        tigw2: Some(1e-10..1e-7),
     };
     params2.run("out/binytg.set2").unwrap();
 }

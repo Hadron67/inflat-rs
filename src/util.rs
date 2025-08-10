@@ -5,9 +5,9 @@ use std::{
     fmt::Display,
     fs::File,
     io::{self, BufReader, BufWriter},
-    iter::zip,
+    iter::{Sum, zip},
     marker::PhantomData,
-    mem::MaybeUninit,
+    mem::{ManuallyDrop, MaybeUninit},
     ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Range, Rem, Sub},
     slice,
     time::{Duration, SystemTime},
@@ -49,9 +49,9 @@ where
 
 pub fn linear_interp<T>(a: T, b: T, i: T) -> T
 where
-    T: Mul<T, Output = T> + Add<T, Output = T> + Sub<T, Output = T> + Copy,
+    T: Mul<T, Output = T> + Add<T, Output = T> + Sub<T, Output = T> + Clone,
 {
-    a + (b - a) * i
+    a.clone() + (b - a) * i
 }
 
 pub fn log_interp<T>(a: T, b: T, i: T) -> T
@@ -118,6 +118,7 @@ pub enum EncodeOrIoError {
     Encode(EncodeError),
     Decode(DecodeError),
     Io(io::Error),
+    NoFile,
 }
 
 impl From<EncodeError> for EncodeOrIoError {
@@ -144,6 +145,7 @@ impl Display for EncodeOrIoError {
             Self::Encode(err) => err.fmt(f),
             Self::Decode(err) => err.fmt(f),
             Self::Io(err) => err.fmt(f),
+            Self::NoFile => write!(f, "no file"),
         }
     }
 }
@@ -152,7 +154,16 @@ impl Error for EncodeOrIoError {}
 
 pub type Result<T> = std::result::Result<T, EncodeOrIoError>;
 
-pub fn lazy_file<T, F, C>(name: &str, config: C, mut creator: F) -> Result<T>
+pub fn lazy_file<T, F, C>(name: &str, config: C, creator: F) -> Result<T>
+where
+    T: Encode + Decode<()>,
+    F: FnMut() -> T,
+    C: Config,
+{
+    lazy_file_opt(name, config, true, creator)
+}
+
+pub fn lazy_file_opt<T, F, C>(name: &str, config: C, create: bool, mut creator: F) -> Result<T>
 where
     T: Encode + Decode<()>,
     F: FnMut() -> T,
@@ -160,11 +171,13 @@ where
 {
     if let Ok(file) = File::open(name) {
         Ok(decode_from_std_read(&mut BufReader::new(file), config)?)
-    } else {
+    } else if create {
         let value = creator();
         let file = File::create(name).unwrap();
         encode_into_std_write(&value, &mut BufWriter::new(file), config)?;
         Ok(value)
+    } else {
+        Err(EncodeOrIoError::NoFile)
     }
 }
 
@@ -335,6 +348,53 @@ impl RateLimiter {
     }
 }
 
+pub struct UnboxedVec<const D: usize, T> {
+    value: MaybeUninit<[T; D]>,
+    length: usize,
+}
+
+impl<const D: usize, T> UnboxedVec<D, T> {
+    pub fn new() -> Self {
+        Self {
+            value: MaybeUninit::uninit(),
+            length: 0,
+        }
+    }
+    pub fn push(&mut self, value: T) {
+        assert!(self.length < D);
+        let ptr = unsafe { &raw mut (*self.value.as_mut_ptr())[self.length] };
+        unsafe {
+            ptr.write(value);
+        }
+        self.length += 1;
+    }
+    pub fn into_array(self) -> [T; D] {
+        assert!(self.length == D);
+        let me = ManuallyDrop::new(self);
+        unsafe { (&raw const me.value).read().assume_init() }
+    }
+}
+
+impl<const D: usize, T> Drop for UnboxedVec<D, T> {
+    fn drop(&mut self) {
+        for i in 0..self.length {
+            let ptr = unsafe { &raw mut (*self.value.as_mut_ptr())[i] };
+            unsafe { ptr.drop_in_place() };
+        }
+    }
+}
+
+pub fn create_array_with<const LEN: usize, T, C>(mut creator: C) -> [T; LEN]
+where
+    C: FnMut(usize) -> T,
+{
+    let mut v = UnboxedVec::new();
+    for i in 0..LEN {
+        v.push(creator(i));
+    }
+    v.into_array()
+}
+
 #[derive(Clone, Copy, Encode, Decode, Debug, Hash, PartialEq, Eq)]
 pub struct VecN<const N: usize, T> {
     pub value: [T; N],
@@ -361,33 +421,41 @@ impl<const N: usize, T> VecN<N, T> {
     }
     pub fn zeros() -> Self
     where
-        T: Zero + Copy,
+        T: Zero,
     {
-        Self {
-            value: [T::zero(); N],
+        Self::create_with(|_| T::zero())
+    }
+    pub fn create_with<C>(mut creator: C) -> Self
+    where
+        C: FnMut(usize) -> T,
+    {
+        let mut v = UnboxedVec::<N, T>::new();
+        for i in 0..N {
+            v.push(creator(i));
         }
+        Self::new(v.into_array())
     }
     pub fn strides(&self) -> Self
     where
-        T: One + Copy,
+        T: One + Clone,
     {
-        let mut ret = [T::one(); N];
+        let mut ret = create_array_with(|_| T::one());
         for i in 0..N - 1 {
-            ret[N - 2 - i] = ret[N - 1 - i] * self[N - 1 - i];
+            ret[N - 2 - i] = ret[N - 1 - i].clone() * self[N - 1 - i].clone();
         }
         Self::new(ret)
     }
     pub fn decode_coord(&self, mut index: T) -> Self
     where
-        T: DivAssign<T> + Rem<T, Output = T> + Copy,
+        T: DivAssign<T> + Rem<T, Output = T> + Clone,
     {
         let mut ret = MaybeUninit::<Self>::uninit();
         let ptr = unsafe { &raw mut (*ret.as_mut_ptr()).value };
         for i in 0..N {
             let j = N - 1 - i;
             let p = unsafe { &raw mut (*ptr)[j] };
-            unsafe { p.write(index % self[j]) };
-            index /= self[j];
+            unsafe { p.write(index.clone() % self[j].clone()) };
+            index /= self[j].clone();
         }
         unsafe { ret.assume_init() }
     }
@@ -516,6 +584,30 @@ where
         };
         for i in 0..N {
             ret.value[i] = self.value[i] * rhs;
+        }
+        ret
+    }
+}
+
+impl<const N: usize, T> AddAssign<VecN<N, T>> for VecN<N, T>
+where
+    T: AddAssign<T> + Clone,
+{
+    fn add_assign(&mut self, rhs: VecN<N, T>) {
+        for i in 0..N {
+            self[i] += rhs[i].clone();
+        }
+    }
+}
+
+impl<const N: usize, T> Sum for VecN<N, T>
+where
+    T: Zero + AddAssign<T> + Clone,
+{
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let mut ret = VecN::zeros();
+        for term in iter {
+            ret += term;
         }
         ret
     }
@@ -781,7 +873,8 @@ where
         + FromPrimitive
         + Div<T, Output = T>
         + Sub<T, Output = T>
-        + Float,
+        + Float
+        + Display,
 {
     let mut f = evaluate_polynomial(initial.clone(), coefs);
     while f.abs() > tolerance {
@@ -791,15 +884,77 @@ where
     initial
 }
 
+pub fn interpolate_1d<T1, T2, I>(
+    x_data: &[T1],
+    y_data: &[T2],
+    x: T1,
+    extrapolate: bool,
+    mut intepolator: I,
+) -> T2
+where
+    T1: PartialOrd + Sub<T1, Output = T1> + Div<T1, Output = T1> + Clone,
+    T2: Clone,
+    I: FnMut(T2, T2, T1) -> T2,
+{
+    let len = y_data.len();
+    if x <= x_data[0] {
+        return if extrapolate {
+            intepolator(
+                y_data[0].clone(),
+                y_data[1].clone(),
+                (x - x_data[0].clone()) / (x_data[1].clone() - x_data[0].clone()),
+            )
+        } else {
+            y_data[0].clone()
+        };
+    }
+    if x_data.last().map_or(false, |x0| x >= *x0) {
+        return if extrapolate {
+            intepolator(
+                y_data[len - 2].clone(),
+                y_data[len - 1].clone(),
+                (x - x_data[len - 2].clone()) / (x_data[len - 1].clone() - x_data[len - 2].clone()),
+            )
+        } else {
+            y_data.last().unwrap().clone()
+        };
+    }
+
+    let idx = x_data.partition_point(|x0| *x0 < x);
+    intepolator(
+        y_data[idx - 1].clone(),
+        y_data[idx].clone(),
+        (x - x_data[idx - 1].clone()) / (x_data[idx].clone() - x_data[idx - 1].clone()),
+    )
+}
+
+pub fn select_range_1d<'x, 'y, T1, T2>(
+    x_data: &'x [T1],
+    y_data: &'y [T2],
+    start_x: T1,
+    end_x: T1,
+) -> (&'x [T1], &'y [T2])
+where
+    T1: PartialOrd,
+{
+    let start_index = x_data.partition_point(|x| *x < start_x);
+    let end_index = x_data.partition_point(|x| *x < end_x);
+    (
+        &x_data[start_index..end_index],
+        &y_data[start_index..end_index],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::f64::consts::PI;
 
+    use assert_approx_eq::assert_approx_eq;
     use num_complex::ComplexFloat;
 
     use crate::util::{
-        VecN, evaluate_polynomial, evaluate_polynomial_derivative, half_int_gamma,
-        newton_solve_polynomial,
+        VecN, evaluate_polynomial, evaluate_polynomial_derivative, half_int_gamma, interpolate_1d,
+        linear_interp, newton_solve_polynomial,
     };
 
     #[test]
@@ -853,6 +1008,38 @@ mod tests {
         assert_eq!(
             evaluate_polynomial_derivative(x, &coefs),
             coefs[1] + coefs[2] * x * 2.0 + coefs[3] * x * x * 3.0 + coefs[4] * x * x * x * 4.0
+        );
+    }
+
+    #[test]
+    fn intepolate() {
+        let x_data = [0.0, 1.0, 2.0];
+        let y_data = [0.0, 1.0, 4.0];
+        assert_approx_eq!(
+            interpolate_1d(&x_data, &y_data, 0.5, true, &linear_interp),
+            0.5
+        );
+        assert_approx_eq!(
+            interpolate_1d(&x_data, &y_data, 1.5, true, &linear_interp),
+            2.5
+        );
+
+        assert_approx_eq!(
+            interpolate_1d(&x_data, &y_data, 0.0, true, &linear_interp),
+            0.0
+        );
+        assert_approx_eq!(
+            interpolate_1d(&x_data, &y_data, 2.0, true, &linear_interp),
+            4.0
+        );
+
+        assert_approx_eq!(
+            interpolate_1d(&x_data, &y_data, -1.0, true, &linear_interp),
+            -1.0
+        );
+        assert_approx_eq!(
+            interpolate_1d(&x_data, &y_data, 3.0, true, &linear_interp),
+            7.0
         );
     }
 }

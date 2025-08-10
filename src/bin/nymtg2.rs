@@ -1,4 +1,5 @@
 use std::{
+    f64::consts::PI,
     fs::{File, create_dir_all},
     io::BufWriter,
     iter::zip,
@@ -13,6 +14,7 @@ use inflat::{
         TwoFieldBackgroundInput, TwoFieldBackgroundInputProvider, TwoFieldBackgroundState,
     },
     c2fn::{C2Fn, Plus2},
+    igw::tigw_2_spectrum,
     models::{LinearSinePotential, QuadraticPotential, StarobinskyPotential, ZeroFn},
     util::{ParamRange, RateLimiter, lazy_file, limit_length},
 };
@@ -35,6 +37,7 @@ struct Params<V, U> {
     pub alpha: f64,
     pub spectrum_range: ParamRange<f64>,
     pub alpha_scan_range: Option<ParamRange<f64>>,
+    pub tigw2: bool,
 }
 
 impl<V, U> Params<V, U> {
@@ -121,10 +124,20 @@ impl<V, U> Params<V, U> {
         {
             let spectrum_pos = self
                 .pert(background.len(), &background, 1.0, self.alpha)
-                .spectrum_with_cache(&format!("{}/spectrum.+.bincode", out_dir), k_range, 0.1)?;
+                .spectrum_with_cache(
+                    &format!("{}/spectrum.+.bincode", out_dir),
+                    k_range,
+                    0.1,
+                    false,
+                )?;
             let spectrum_neg = self
                 .pert(background.len(), &background, -1.0, self.alpha)
-                .spectrum_with_cache(&format!("{}/spectrum.-.bincode", out_dir), k_range, 0.1)?;
+                .spectrum_with_cache(
+                    &format!("{}/spectrum.-.bincode", out_dir),
+                    k_range,
+                    0.1,
+                    false,
+                )?;
             let mut plot = Plot::new();
             plot.add_trace(
                 Scatter::new(self.spectrum_range.as_logspace().collect(), spectrum_pos).name("+"),
@@ -151,15 +164,16 @@ impl<V, U> Params<V, U> {
             let mut spectrum_arr = Array2::zeros((scan.count, self.spectrum_range.count));
             let mut spectrum_scratch = vec![0.0; self.spectrum_range.count];
             let k_data = self.spectrum_range.as_logspace().collect::<Vec<_>>();
-            let mut plot = Plot::new();
+            let mut spectrum_plot = Plot::new();
+            let mut tigw2_plot = Plot::new();
             for (i, alpha) in zip(0.., scan.as_linspace()) {
-                println!("[scan]({}/{})", i + 1, scan.count);
                 let spectrum_pos = self
                     .pert(background.len(), &background, 1.0, alpha)
                     .spectrum_with_cache(
                         &format!("{}/spectrum.scan.{}.+.bincode", out_dir, i),
                         k_range,
                         0.1,
+                        false,
                     )?;
                 let spectrum_neg = self
                     .pert(background.len(), &background, -1.0, alpha)
@@ -167,18 +181,38 @@ impl<V, U> Params<V, U> {
                         &format!("{}/spectrum.scan.{}.-.bincode", out_dir, i),
                         k_range,
                         0.1,
+                        false,
                     )?;
                 for j in 0..self.spectrum_range.count {
-                    let val = spectrum_pos[j] + spectrum_neg[j];
+                    let val = (spectrum_pos[j] + spectrum_neg[j]) / PI; // XXX: fix an error in previously saved data
                     spectrum_scratch[j] = val;
                     spectrum_arr[[i, j]] = val;
                 }
-                plot.add_trace(
+                spectrum_plot.add_trace(
                     Scatter::new(k_data.clone(), spectrum_scratch.clone())
                         .name(&format!("alpha = {}", alpha)),
                 );
+                if self.tigw2 {
+                    let tigw2_data = lazy_file(
+                        &format!("{}/spectrum.scan.{}.tigw2.bincode", out_dir, i),
+                        BINCODE_CONFIG,
+                        || tigw_2_spectrum(&k_data, &spectrum_scratch, 100.0, 0.1, 0.1, |_, _| {}),
+                    )?;
+                    tigw2_plot.add_trace(
+                        Scatter::new(
+                            k_data.clone(),
+                            spectrum_scratch.iter().map(|f| f / 12.0).collect(),
+                        )
+                        .name(&format!("alpha = {}", alpha)),
+                    );
+                    tigw2_plot.add_trace(
+                        Scatter::new(k_data.clone(), tigw2_data)
+                            .name(&format!("tigw2 alpha = {}", alpha)),
+                    );
+                }
+                println!("[scan]({}/{})", i + 1, scan.count);
             }
-            plot.set_layout(
+            spectrum_plot.set_layout(
                 Layout::new()
                     .x_axis(
                         Axis::new()
@@ -192,7 +226,24 @@ impl<V, U> Params<V, U> {
                     )
                     .height(1000),
             );
-            plot.write_html(&format!("{}/spectrums.scan.html", out_dir));
+            spectrum_plot.write_html(&format!("{}/spectrums.scan.html", out_dir));
+            if self.tigw2 {
+                tigw2_plot.set_layout(
+                    Layout::new()
+                        .x_axis(
+                            Axis::new()
+                                .type_(AxisType::Log)
+                                .exponent_format(ExponentFormat::Power),
+                        )
+                        .y_axis(
+                            Axis::new()
+                                .type_(AxisType::Log)
+                                .exponent_format(ExponentFormat::Power),
+                        )
+                        .height(1000),
+                );
+                tigw2_plot.write_html(&format!("{}/spectrums.scan.tigw2.html", out_dir));
+            }
             {
                 let mut npz = NpzWriter::new(BufWriter::new(File::create(&format!(
                     "{}/spectrums.scan.npz",
@@ -286,6 +337,7 @@ pub fn main() {
         },
         spectrum_range: ParamRange::new(1e-10, 1e-6, 100),
         alpha_scan_range: Some(ParamRange::new(0.0, 1.56e5, 40)),
+        tigw2: true,
         // alpha_scan_range: None,
     };
     params.run("out/nymtg2.set1/").unwrap();

@@ -37,9 +37,16 @@ impl<const D: usize> LatticePosition<D> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct LatticeParam<const D: usize> {
     pub size: VecN<D, usize>,
     pub spacing: VecN<D, f64>,
+}
+
+impl<const D: usize> LatticeParam<D> {
+    pub fn volumn(&self) -> f64 {
+        (self.size.product() as f64) * self.spacing.product()
+    }
 }
 
 pub fn wrapping_shift(coord: usize, size: usize) -> (usize, usize) {
@@ -90,6 +97,13 @@ pub trait Lattice<const D: usize, T> {
         Self: Sync,
     {
         self.max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Less))
+    }
+    fn min(&self) -> (VecN<D, usize>, T)
+    where
+        T: PartialOrd + Send + Clone + Sync,
+        Self: Sync,
+    {
+        self.max_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Less))
     }
     fn dump<R, W>(&self, tag: &R, write: &mut W) -> io::Result<()>
     where
@@ -142,6 +156,9 @@ pub trait Lattice<const D: usize, T> {
             field: self,
         }
     }
+    fn reduce<Op>(&self, op: Op) -> T {
+        todo!()
+    }
     fn sum(&self) -> T
     where
         T: FromPrimitive + MulAssign<T> + Send + Sum,
@@ -160,12 +177,19 @@ pub trait Lattice<const D: usize, T> {
     {
         self.sum() / T::from_usize(self.dim().product()).unwrap()
     }
-    fn derivative_dir_at(&self, coord: &VecN<D, usize>, dx: T, dir: usize) -> T
+    fn symmetric_derivative_dir_at(&self, coord: &VecN<D, usize>, dx: T, dir: usize) -> T
     where
         T: Sub<T, Output = T> + Div<T, Output = T> + FromPrimitive,
     {
         let (p1, m1) = shift_coord(coord, self.dim(), dir);
         (self.get_by_coord(&p1) - self.get_by_coord(&m1)) / T::from_i32(2).unwrap() / dx
+    }
+    fn forward_derivative_dir_at(&self, coord: &VecN<D, usize>, dx: T, dir: usize) -> T
+    where
+        T: Sub<T, Output = T> + Div<T, Output = T>,
+    {
+        let (p1, _) = shift_coord(coord, self.dim(), dir);
+        (self.get_by_coord(&p1) - self.get_by_coord(coord)) / dx
     }
     fn derivative_square_at<T2>(&self, coord: &VecN<D, usize>, dx: &VecN<D, T2>) -> T
     where
@@ -178,11 +202,11 @@ pub trait Lattice<const D: usize, T> {
         T2: Into<T> + Clone,
     {
         let mut ret = {
-            let a = self.derivative_dir_at(coord, dx[0].clone().into(), 0);
+            let a = self.forward_derivative_dir_at(coord, dx[0].clone().into(), 0);
             a.clone() * a
         };
         for dir in 1..D {
-            let a = self.derivative_dir_at(coord, dx[dir].clone().into(), dir);
+            let a = self.forward_derivative_dir_at(coord, dx[dir].clone().into(), dir);
             ret += a.clone() * a;
         }
         ret

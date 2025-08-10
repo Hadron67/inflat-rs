@@ -384,7 +384,7 @@ where
             let spectrum = lazy_file(
                 &format!("{}/spectrum.bincode", out_dir),
                 BINCODE_CONFIG,
-                || pert.spectrum(k_range, 0.5),
+                || pert.spectrum(k_range, 0.5, false),
             )?;
             let mut plot = Plot::new();
             plot.add_trace(Scatter::new(k_range.as_logspace().collect(), spectrum));

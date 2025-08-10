@@ -147,6 +147,7 @@ where
                 &format!("{}/spectrum.bincode", out_dir),
                 self.spectrum_range,
                 0.01,
+                false,
             )?;
             let mut plot = Plot::new();
             plot.add_trace(Scatter::new(

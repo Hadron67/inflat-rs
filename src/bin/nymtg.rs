@@ -1,4 +1,5 @@
 use std::{
+    f64::consts::PI,
     fs::{File, create_dir_all},
     io::BufWriter,
     iter::zip,
@@ -13,6 +14,7 @@ use inflat::{
         Kappa, NymtgTensorPerturbationPotential, PhiD, ScaleFactor, ScaleFactorD,
     },
     c2fn::C2Fn,
+    igw::tigw_2_spectrum,
     models::{LinearSinePotential, QuadraticPotential, StarobinskyLinearPotential},
     util::{ParamRange, RateLimiter, lazy_file, limit_length},
 };
@@ -32,6 +34,7 @@ struct NymtgInputParams<F> {
     pub alpha: f64,
     pub max_dt: f64,
     pub alpha_scan: Option<ParamRange<f64>>,
+    pub tigw2: bool,
 }
 
 impl<F> Kappa for NymtgInputParams<F> {
@@ -125,12 +128,14 @@ where
                 &format!("{}/spectrum.+.bincode", out_dir),
                 k_range,
                 0.1,
+                false,
             )?;
             let pert_neg = self.pert(background.len(), &background, -1.0, self.alpha);
             let spectrum_neg = pert_neg.spectrum_with_cache(
                 &format!("{}/spectrum.-.bincode", out_dir),
                 k_range,
                 0.1,
+                false,
             )?;
             let mut plot = Plot::new();
             plot.add_trace(
@@ -156,7 +161,7 @@ where
             plot.write_html(&format!("{}/spectrum.html", out_dir));
         }
         if let Some(scan) = &self.alpha_scan {
-            let mut plot = Plot::new();
+            let mut spectrum_plot = Plot::new();
             let mut spectrum_arr = Array2::zeros((scan.count, self.spectrum_range.count));
             let mut spectrum_scratch = vec![0.0; self.spectrum_range.count];
             let k_data = self.spectrum_range.as_logspace().collect::<Vec<_>>();
@@ -168,22 +173,24 @@ where
                     &format!("{}/spectrum.scan.{}.+.bincode", out_dir, i),
                     k_range,
                     0.1,
+                    false,
                 )?;
                 let spectrum_neg = pert_neg.spectrum_with_cache(
                     &format!("{}/spectrum.scan.{}.-.bincode", out_dir, i),
                     k_range,
                     0.1,
+                    false,
                 )?;
                 for j in 0..self.spectrum_range.count {
                     spectrum_scratch[j] = spectrum_pos[j] + spectrum_neg[j];
                     spectrum_arr[[i, j]] = spectrum_scratch[j];
                 }
-                plot.add_trace(
+                spectrum_plot.add_trace(
                     Scatter::new(k_data.clone(), spectrum_scratch.clone())
                         .name(&format!("alpha = {}", alpha)),
                 );
             }
-            plot.set_layout(
+            spectrum_plot.set_layout(
                 Layout::new()
                     .x_axis(
                         Axis::new()
@@ -197,7 +204,57 @@ where
                     )
                     .height(1000),
             );
-            plot.write_html(&format!("{}/spectrums.scan.html", out_dir));
+            spectrum_plot.write_html(&format!("{}/spectrums.scan.html", out_dir));
+            if self.tigw2 {
+                let mut tigw_plot = Plot::new();
+                let mut tigw_spectrum_data = vec![];
+                for (index, spectrum) in zip(0usize.., spectrum_arr.axis_iter(ndarray::Axis(0))) {
+                    tigw_spectrum_data.clear();
+                    tigw_spectrum_data.extend_from_slice(spectrum.as_slice().unwrap());
+                    tigw_spectrum_data.iter_mut().for_each(|f| *f /= PI); // XXX: fix 
+                    let tigw2_data = lazy_file(
+                        &&format!("{}/spectrum.scan.{}.tigw2.bincode", out_dir, index),
+                        BINCODE_CONFIG,
+                        || {
+                            tigw_2_spectrum(
+                                &k_data,
+                                &tigw_spectrum_data,
+                                100.0,
+                                0.1,
+                                0.1,
+                                |_, _| {},
+                            )
+                        },
+                    )?;
+                    tigw_plot.add_trace(
+                        Scatter::new(
+                            k_data.to_vec(),
+                            tigw_spectrum_data.iter().map(|f| f / 12.0).collect(),
+                        )
+                        .name(&format!("alpha = {}", scan.linear_interp(index))),
+                    );
+                    tigw_plot.add_trace(
+                        Scatter::new(k_data.to_vec(), tigw2_data)
+                            .name(&format!("tiwg alpha = {}", scan.linear_interp(index))),
+                    );
+                    println!("[TIGW2] {}/{}", index + 1, scan.count);
+                }
+                tigw_plot.set_layout(
+                    Layout::new()
+                        .x_axis(
+                            Axis::new()
+                                .type_(AxisType::Log)
+                                .exponent_format(ExponentFormat::Power),
+                        )
+                        .y_axis(
+                            Axis::new()
+                                .type_(AxisType::Log)
+                                .exponent_format(ExponentFormat::Power),
+                        )
+                        .height(1000),
+                );
+                tigw_plot.write_html(&format!("{}/spectrums.scan.tigw.html", out_dir));
+            }
             {
                 let mut npz = NpzWriter::new(BufWriter::new(File::create(&format!(
                     "{}/spectrums.scan.npz",
@@ -262,6 +319,7 @@ fn main() {
         spectrum_range: ParamRange::new(1e-6, 1.0, 1000),
         alpha: 20.0,
         alpha_scan: None,
+        tigw2: false,
     };
     params_2112_04794.run("out/nymtg-2112.04794.set1").unwrap();
 
@@ -282,6 +340,7 @@ fn main() {
         spectrum_range,
         alpha: 30.0,
         alpha_scan: None,
+        tigw2: false,
     };
     params_2308_15329.run("out/nymtg-2308.15329.set1").unwrap();
 
@@ -302,6 +361,7 @@ fn main() {
         spectrum_range,
         alpha: 20.0,
         alpha_scan: Some(ParamRange::new(0.0, 26.0, 40)),
+        tigw2: true,
     };
     params_2112_04794_mod
         .run("out/nymtg-2112.04794-mod.set1")

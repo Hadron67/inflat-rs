@@ -1,21 +1,26 @@
-use bincode::{Decode, Encode};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter},
+};
+
+use bincode::{Decode, Encode, decode_from_std_read, encode_into_std_write};
 use libm::sqrt;
 use random::Source;
 
 use crate::{
     background::{
-        BackgroundFn, BackgroundSolver, Dimension, Dt, Interpolate, Kappa, Phi, PhiD, ScaleFactor,
-        ScaleFactorD,
+        BINCODE_CONFIG, BackgroundFn, BackgroundSolver, Dimension, Dt, Interpolate, Kappa, Phi,
+        PhiD, ScaleFactor, ScaleFactorD,
     },
     c2fn::C2Fn,
     interpolate_fields,
     lat::{BoxLattice, Lattice, LatticeMut, LatticeParam, LatticeSupplier},
     scalar::populate_noise,
-    util::{VecN, derivative_2, evaluate_polynomial},
+    util::{self, VecN, derivative_2, evaluate_polynomial, newton_solve_polynomial},
 };
 
 pub mod data {
-    use crate::{c2fn::C2Fn, util::newton_solve_polynomial};
+    use crate::c2fn::C2Fn;
 
     #[rustfmt::skip]
     pub fn vv_phi<V, Xi>(dim: usize, kappa: f64, a: f64, v_a: f64, phi: f64, v_phi: f64, laplacian_phi: f64, derivative2_phi: f64, v: &V, xi: &Xi) -> f64 where
@@ -187,38 +192,17 @@ pub mod data {
         (1.0 / (hubble * hubble) * kappa * ((-1.0 + d) * hubble * (-4.0 + (-3.0 + d) * (-2.0 + d) * hubble * hubble * kappa * xi_phi) * (16.0 * delta_phi * pv_d_phi + (-2.0 + d) * (-1.0 + d) * hubble * hubble * (delta_phi * d * (1.0 + d) * hubble * hubble + -4.0 * laplacian_delta_phi_div_a2) * xi_d_phi) + (-1.0 + d) * hubble * v_phi * (16.0 * (delta_phi * d * hubble + v_delta_phi) * (-4.0 + (-3.0 + d) * (-2.0 + d) * hubble * hubble * kappa * xi_phi) + 48.0 * delta_phi * (-2.0 + d) * hubble * kappa * pv_d_phi * xi_d_phi + (-2.0 + d) * (-2.0 + d) * (-1.0 + d) * hubble * hubble * hubble * kappa * (delta_phi * d * (7.0 + 3.0 * d) * hubble * hubble + -12.0 * laplacian_delta_phi_div_a2 + -4.0 * d * hubble * v_delta_phi) * xi_d_phi * xi_d_phi) + 16.0 * delta_phi * kappa * v_phi * v_phi * v_phi * (4.0 + -1.0 * (-2.0 + d) * (-1.0 + d) * hubble * hubble * xi_dd_phi) + 4.0 * (-2.0 + d) * (-1.0 + d) * hubble * hubble * kappa * v_phi * v_phi * xi_d_phi * (4.0 * delta_phi * (1.0 + 4.0 * d) * hubble + 8.0 * v_delta_phi + -1.0 * delta_phi * (-2.0 + d) * (-1.0 + d) * d * hubble * hubble * hubble * xi_dd_phi))) / (4.0 * (-1.0 + d) * (-1.0 + d) * (-4.0 + (-2.0 + d) * hubble * kappa * ((-3.0 + d) * hubble * xi_phi + 3.0 * v_phi * xi_d_phi)) * (-4.0 + (-2.0 + d) * hubble * kappa * ((-3.0 + d) * hubble * xi_phi + 3.0 * v_phi * xi_d_phi)))
     }
 
-    pub fn solve_hubble<V, Xi>(
-        dim: usize,
-        kappa: f64,
-        a: f64,
-        phi: f64,
-        v_phi: f64,
-        derivative2_phi: f64,
-        laplacian_phi: f64,
-        v: &V,
-        xi: &Xi,
-    ) -> f64
-    where
+    #[rustfmt::skip]
+    pub fn scalar_eff_potential<V, Xi>(dim: usize, kappa: f64, a: f64, v_a: f64, phi: f64, v_phi: f64, v: &V, xi: &Xi) -> f64 where
         V: C2Fn<f64, Output = f64>,
         Xi: C2Fn<f64, Output = f64>,
     {
+        let hubble2 = hubble2(dim, kappa, a, v_a, phi, v_phi, 0.0, 0.0, v, xi);
         let d = dim as f64;
-        let coefs = hubble_constraint_coefs(
-            dim,
-            kappa,
-            a,
-            phi,
-            v_phi,
-            laplacian_phi,
-            derivative2_phi,
-            v,
-            xi,
-        );
-        let derivative2_div_a2 = derivative2_phi / a / a;
+        let hubble = v_a / a;
+        let xi_phi = xi.value(phi);
         let pv_phi = v.value(phi);
-        let initial_h =
-            (kappa / d / (d - 1.0) * (derivative2_div_a2 + v_phi * v_phi + 2.0 * pv_phi)).sqrt();
-        newton_solve_polynomial(initial_h, &coefs, 1e-10)
+        1.0 * pv_phi + 1.0 / 16.0 * (-2.0 + d) * (-1.0 + d) * d * hubble * hubble * ((-3.0 + d) * hubble * hubble + 4.0 * hubble2) * xi_phi
     }
 }
 
@@ -252,7 +236,43 @@ where
             xi,
         ),
     )
-    // 1.0 / 2.0 * v_phi * v_phi + pv_phi + 1.0 / 16.0 * (-1.0 + d) * d * hubble * hubble * 1.0 / (kappa) * (-8.0 + (6.0 + -5.0 * d + d * d) * hubble * hubble * kappa * xi_phi) + 1.0 / 4.0 * d * (2.0 + -3.0 * d + d * d) * hubble * hubble * hubble * v_phi * xi_d_phi
+}
+
+pub fn solve_hubble<V, Xi>(
+    dim: usize,
+    kappa: f64,
+    a: f64,
+    phi: f64,
+    v_phi: f64,
+    derivative2_phi: f64,
+    laplacian_phi: f64,
+    initial_guess: Option<f64>,
+    v: &V,
+    xi: &Xi,
+) -> f64
+where
+    V: C2Fn<f64, Output = f64>,
+    Xi: C2Fn<f64, Output = f64>,
+{
+    let d = dim as f64;
+    let coefs = data::hubble_constraint_coefs(
+        dim,
+        kappa,
+        a,
+        phi,
+        v_phi,
+        laplacian_phi,
+        derivative2_phi,
+        v,
+        xi,
+    );
+    let derivative2_div_a2 = derivative2_phi / a / a;
+    let pv_phi = v.value(phi);
+    let initial_h = initial_guess.unwrap_or_else(|| {
+        (kappa / d / (d - 1.0) * (derivative2_div_a2 + v_phi * v_phi + 2.0 * pv_phi)).sqrt()
+    });
+    let ret = newton_solve_polynomial(initial_h, &coefs, 1e-10);
+    ret
 }
 
 #[derive(Debug, Clone, Copy, Encode, Decode)]
@@ -273,6 +293,16 @@ pub struct GaussBonnetBInput<V, Xi> {
     pub kappa: f64,
     pub v: V,
     pub xi: Xi,
+}
+
+impl<V, Xi> GaussBonnetBInput<V, Xi> {
+    pub fn scalar_eff_potential(&self, a: f64, v_a: f64, phi: f64, v_phi: f64) -> f64
+    where
+        V: C2Fn<f64, Output = f64>,
+        Xi: C2Fn<f64, Output = f64>,
+    {
+        data::scalar_eff_potential(self.dim, self.kappa, a, v_a, phi, v_phi, &self.v, &self.xi)
+    }
 }
 
 impl<V, Xi> Dimension for GaussBonnetBInput<V, Xi> {
@@ -296,8 +326,18 @@ impl GaussBonnetBackgroundState {
         assert_eq!(input.dim, 3);
         let hubble0 = sqrt(input.kappa * input.v.value(phi) / 3.0);
         let v_phi = -input.v.value_d(phi) / 3.0 / hubble0;
-        let v_a =
-            a * data::solve_hubble(3, input.kappa, a, phi, v_phi, 0.0, 0.0, &input.v, &input.xi);
+        let v_a = a * solve_hubble(
+            3,
+            input.kappa,
+            a,
+            phi,
+            v_phi,
+            0.0,
+            0.0,
+            None,
+            &input.v,
+            &input.xi,
+        );
         Self {
             a,
             v_a,
@@ -587,14 +627,38 @@ impl<const D: usize> GaussBonnetField<D> {
             phi: BoxLattice::constant(size, [0.0, 0.0]),
         }
     }
+    pub fn from_file(file: &str) -> util::Result<Self> {
+        Ok(decode_from_std_read(
+            &mut BufReader::new(File::open(file)?),
+            BINCODE_CONFIG,
+        )?)
+    }
+    pub fn to_file(&self, file: &str) -> util::Result<()> {
+        encode_into_std_write(
+            self,
+            &mut BufWriter::new(File::create(file)?),
+            BINCODE_CONFIG,
+        )?;
+        Ok(())
+    }
     pub fn init<V, Xi>(&mut self, a: f64, phi: f64, v_phi: f64, input: &GaussBonnetBInput<V, Xi>)
     where
         V: C2Fn<f64, Output = f64>,
         Xi: C2Fn<f64, Output = f64>,
     {
         self.a = a;
-        self.v_a =
-            a * data::solve_hubble(D, input.kappa, a, phi, v_phi, 0.0, 0.0, &input.v, &input.xi);
+        self.v_a = a * solve_hubble(
+            D,
+            input.kappa,
+            a,
+            phi,
+            v_phi,
+            0.0,
+            0.0,
+            None,
+            &input.v,
+            &input.xi,
+        );
         self.phi.par_fill([phi, v_phi]);
     }
     pub fn assign(&mut self, other: &Self) {
@@ -631,8 +695,10 @@ impl<const D: usize> GaussBonnetField<D> {
                 field.v_a,
                 phi.average(),
                 v_phi.average(),
-                phi.as_ref().laplacian(&lattice.spacing).average(),
-                phi.as_ref().derivative_square(&lattice.spacing).average(),
+                // phi.as_ref().laplacian(&lattice.spacing).average(),
+                // phi.as_ref().derivative_square(&lattice.spacing).average(),
+                0.0, // XXX: ignoring spatial phi dependency
+                0.0,
                 &input.v,
                 &input.xi,
             );
@@ -721,11 +787,15 @@ impl<const D: usize> GaussBonnetField<D> {
             &input.xi,
         )
     }
+    pub fn zeta_factor(&self) -> f64 {
+        self.v_a / self.a / self.phi.as_ref().map(|f| f[1]).average()
+    }
     pub fn populate_noise<S, V, Xi>(
         &mut self,
         source: &mut S,
         input: &GaussBonnetBInput<V, Xi>,
         lattice: &LatticeParam<D>,
+        hubble_initial_guess: Option<f64>,
     ) where
         S: Source,
         V: C2Fn<f64, Output = f64>,
@@ -734,6 +804,17 @@ impl<const D: usize> GaussBonnetField<D> {
         let mut phi = BoxLattice::zeros(lattice.size);
         let mut v_phi = BoxLattice::zeros(lattice.size);
         populate_noise(&lattice, self.a, self.v_a, source, &mut phi, &mut v_phi);
+        println!(
+            "[noise] <phi> = {:e}, <v_phi> = {:e}, <L phi L phi> / a^2 = {:e}",
+            phi.as_ref().average().re,
+            v_phi.as_ref().average().re,
+            phi.as_ref()
+                .derivative_square(&lattice.spacing)
+                .average()
+                .re
+                / self.a
+                / self.a
+        );
         self.phi.par_for_each_mut(|ptr, index, coord| {
             ptr[0] += phi.get(index, coord).re;
             ptr[1] += v_phi.get(index, coord).re;
@@ -741,23 +822,38 @@ impl<const D: usize> GaussBonnetField<D> {
         let phi = self.phi.view().map(|f| f[0]);
         let v_phi = self.phi.view().map(|f| f[1]);
         self.v_a = self.a
-            * data::solve_hubble(
+            * solve_hubble(
                 input.dim,
                 input.kappa,
                 self.a,
                 phi.average(),
                 v_phi.average(),
-                phi.as_ref().derivative_square(&lattice.spacing).average(),
-                phi.as_ref().laplacian(&lattice.spacing).average(),
+                // phi.as_ref().derivative_square(&lattice.spacing).average(),
+                // phi.as_ref().laplacian(&lattice.spacing).average(),
+                0.0, // XXX: ignoring spatial dependency of phi
+                0.0,
+                hubble_initial_guess,
                 &input.v,
                 &input.xi,
             );
     }
 }
 
-pub struct GaussBonnetFieldSimulator<'a, 'b, const D: usize, V, Xi> {
+impl<const D: usize> ScaleFactor for GaussBonnetField<D> {
+    fn scale_factor(&self) -> f64 {
+        self.a
+    }
+}
+
+impl<const D: usize> ScaleFactorD for GaussBonnetField<D> {
+    fn v_scale_factor(&self, _kappa: f64) -> f64 {
+        self.v_a
+    }
+}
+
+pub struct GaussBonnetFieldSimulator<'a, const D: usize, V, Xi> {
     pub lattice: &'a LatticeParam<D>,
-    pub input: &'b GaussBonnetBInput<V, Xi>,
+    pub input: &'a GaussBonnetBInput<V, Xi>,
     pub field: GaussBonnetField<D>,
     delta: GaussBonnetField<D>,
     k1: GaussBonnetField<D>,
@@ -766,10 +862,10 @@ pub struct GaussBonnetFieldSimulator<'a, 'b, const D: usize, V, Xi> {
     k4: GaussBonnetField<D>,
 }
 
-impl<'a, 'b, const D: usize, V, Xi> GaussBonnetFieldSimulator<'a, 'b, D, V, Xi> {
+impl<'a, const D: usize, V, Xi> GaussBonnetFieldSimulator<'a, D, V, Xi> {
     pub fn new(
         lattice: &'a LatticeParam<D>,
-        input: &'b GaussBonnetBInput<V, Xi>,
+        input: &'a GaussBonnetBInput<V, Xi>,
         field: GaussBonnetField<D>,
     ) -> Self {
         let dim = lattice.size;

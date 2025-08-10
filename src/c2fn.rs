@@ -46,23 +46,24 @@ pub trait C2Fn<T> {
     }
 }
 
-// impl<T, F> C2Fn<T> for &F where
-//     F: C2Fn<T>,
-// {
-//     type Output = F::Output;
+impl<T, F> C2Fn<T> for &F
+where
+    F: C2Fn<T>,
+{
+    type Output = F::Output;
 
-//     fn value(&self, phi: T) -> Self::Output {
-//         (*self).value(phi)
-//     }
+    fn value(&self, phi: T) -> Self::Output {
+        (*self).value(phi)
+    }
 
-//     fn value_d(&self, phi: T) -> Self::Output {
-//         (*self).value_d(phi)
-//     }
+    fn value_d(&self, phi: T) -> Self::Output {
+        (*self).value_d(phi)
+    }
 
-//     fn value_dd(&self, phi: T) -> Self::Output {
-//         (*self).value_dd(phi)
-//     }
-// }
+    fn value_dd(&self, phi: T) -> Self::Output {
+        (*self).value_dd(phi)
+    }
+}
 
 pub trait C2Fn2<X, Y> {
     type Ret;

@@ -3,7 +3,7 @@ use std::{
     f64::consts::PI,
     fmt::Debug,
     iter::zip,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use bincode::{Decode, Encode};
@@ -57,6 +57,10 @@ impl<const D: usize, F> ScalarFieldParams<D, F> {
     pub fn v_a_to_mom_b(v_a: f64, a: f64, kappa: f64) -> f64 {
         let d = D as f64;
         sqrt((d - 1.0) / d / kappa) * d * a.powf(d / 2.0 - 1.0) * v_a
+    }
+    pub fn v_a_from_mom_b(mom_b: f64, a: f64, kappa: f64) -> f64 {
+        let d = D as f64;
+        mom_b / (sqrt((d - 1.0) / d / kappa) * d * a.powf(d / 2.0 - 1.0))
     }
     pub fn mom_b_to_v_a(mom_b: f64, b: f64, kappa: f64) -> f64 {
         let d = D as f64;
@@ -113,28 +117,18 @@ impl<const D: usize, F> ScalarFieldParams<D, F> {
     where
         F: C2Fn<f64, Output = f64> + Send + Sync,
     {
-        let dim = *field.phi.dim();
         let a = Self::b_to_a(field.b, self.kappa);
-        let volumn = self.lattice.spacing.product() * (self.lattice.size.product() as f64);
+        let v_a = Self::v_a_from_mom_b(field.mom_b, a, self.kappa);
         let mut noise_phi = BoxLattice::<D, Complex64>::zeros(self.lattice.size);
         let mut noise_v_phi = BoxLattice::<D, Complex64>::zeros(self.lattice.size);
-        for index in 1..dim.product() {
-            let coord = dim.decode_coord(index);
-            let rev_coord = coord.flip(&dim);
-            let phase = 2.0 * PI * source.read_f64();
-            let m = sqrt(-source.read_f64().ln() / 2.0);
-            let al = m * Complex64::new(phase.cos(), phase.sin());
-            let k_eff = effective_mom(&coord, &self.lattice.spacing, &self.lattice.size);
-            let u = 1.0 / volumn.sqrt() * Complex64::new(1.0 / sqrt(2.0 * k_eff), 0.0);
-            let u_d = 1.0 / volumn.sqrt() / a * Complex64::new(0.0, -sqrt(k_eff / 2.0));
-            *noise_phi.get_mut(index, &coord) += al * u;
-            *noise_v_phi.get_mut(index, &coord) += al * u_d;
-            *noise_phi.get_mut_by_coord(&rev_coord) += al.conj() * u.conj();
-            *noise_v_phi.get_mut_by_coord(&rev_coord) += al.conj() * u_d.conj();
-        }
-        let fft = DftNDPlan::new(self.lattice.size.value, FftDirection::Forward);
-        fft.transform_inplace(&mut noise_phi);
-        fft.transform_inplace(&mut noise_v_phi);
+        populate_noise(
+            &self.lattice,
+            a,
+            v_a,
+            source,
+            &mut noise_phi,
+            &mut noise_v_phi,
+        );
 
         let a_dimx = Self::b_to_a(field.b, self.kappa).powi(D as i32);
         field.phi.par_add_assign(&noise_phi.view().map(|f| f.re));
@@ -211,15 +205,21 @@ impl<const D: usize, F> ScalarFieldParams<D, F> {
     pub fn v_a(&self, field: &ScalarFieldState<D>) -> f64 {
         Self::mom_b_to_v_a(field.mom_b, field.b, self.kappa)
     }
-    pub fn v_phi(&self, field: &ScalarFieldState<D>) -> f64
+    pub fn hubble(&self, field: &ScalarFieldState<D>) -> f64 {
+        self.v_a(field) / self.scale_factor(field)
+    }
+    pub fn v_phi_from_mom_phi(&self, b: f64, mom_phi: f64) -> f64 {
+        let d = D as f64;
+        4.0 * (d - 1.0) / d / self.kappa / b / b * mom_phi
+    }
+    pub fn v_phi_average(&self, field: &ScalarFieldState<D>) -> f64
     where
         F: Send + Sync,
     {
-        let d = D as f64;
         field
             .mom_phi
             .view()
-            .map(|mom_phi| 4.0 * (d - 1.0) / d / self.kappa / field.b / field.b * mom_phi)
+            .map(|mom_phi| self.v_phi_from_mom_phi(field.b, mom_phi))
             .average()
     }
 }
@@ -250,7 +250,7 @@ pub fn populate_noise<const D: usize, S>(
     S: Source,
 {
     let dim = &lattice.size;
-    let inv_sqrt_volumn = 1.0 / sqrt(lattice.spacing.product() * (lattice.size.product() as f64));
+    let inv_sqrt_volumn = 1.0 / lattice.volumn().sqrt();
 
     for index in 1..dim.product() {
         let coord = dim.decode_coord(index);
@@ -275,9 +275,16 @@ pub fn populate_noise<const D: usize, S>(
     noise_phi.par_for_each_mut(|ptr, _, _| *ptr /= a);
 }
 
+pub struct SpectrumEntry {
+    pub k: f64,
+    pub amp: f64,
+    pub error: f64,
+}
+
 struct MomBin {
     pub total_k_eff: f64,
     pub total_amp: f64,
+    pub total_amp_square: f64,
     pub count: usize,
 }
 
@@ -286,11 +293,13 @@ impl MomBin {
         Self {
             total_k_eff: 0.0,
             total_amp: 0.0,
+            total_amp_square: 0.0,
             count: 0,
         }
     }
     pub fn add(&mut self, k_eff: f64, amp: f64) {
         self.total_amp += amp;
+        self.total_amp_square += amp * amp;
         self.total_k_eff += k_eff;
         self.count += 1;
     }
@@ -338,28 +347,20 @@ where
     for index in 0..dim.product() {
         let coord = dim.decode_coord(index);
         let rev_coord = coord.flip(&dim);
-        // let mode = VecN::new({
-        //     let mut c = coord.value;
-        //     for (cc, size) in zip(&mut c, &lattice.size) {
-        //         if *cc > size / 2 {
-        //             *cc = size - *cc;
-        //         }
-        //     }
-        //     c.sort();
-        //     c
-        // });
         let mode = normalize_mom_mode(coord, &lattice.size);
         let l = (mode.value.iter().map(|f| f * f).sum::<usize>() as f64)
             .sqrt()
             .round() as usize;
-        let value = scratch_field.get_by_coord(&coord) * scratch_field.get_by_coord(&rev_coord);
-        if !spectrum_bins.contains_key(&l) {
-            spectrum_bins.insert(l, MomBin::zero());
+        if l != 0 {
+            let value = scratch_field.get_by_coord(&coord) * scratch_field.get_by_coord(&rev_coord);
+            if !spectrum_bins.contains_key(&l) {
+                spectrum_bins.insert(l, MomBin::zero());
+            }
+            spectrum_bins.get_mut(&l).unwrap().add(
+                effective_mom(&mode, &lattice.spacing, &lattice.size),
+                factor * value.re,
+            );
         }
-        spectrum_bins.get_mut(&l).unwrap().add(
-            effective_mom(&mode, &lattice.spacing, &lattice.size),
-            factor * value.re,
-        );
     }
     let mut ret = spectrum_bins
         .iter()
@@ -377,6 +378,10 @@ where
     spectrum_with_scratch(phi, lattice, &mut scratch_field)
 }
 
+pub trait ScalarEffectivePotential {
+    fn scalar_eff_potential(&self, a: f64, v_a: f64, phi: f64, v_phi: f64) -> f64;
+}
+
 pub fn construct_zeta_inplace<const D: usize, Zeta, Phi1, Phi2, Solver, M>(
     zeta: &mut Zeta,
     a: f64,
@@ -388,7 +393,8 @@ pub fn construct_zeta_inplace<const D: usize, Zeta, Phi1, Phi2, Solver, M>(
     max_dt: f64,
     solver: &Solver,
     step_monitor: M,
-) where
+) -> bool
+where
     Phi1: Lattice<D, f64> + Sync,
     Phi2: Lattice<D, f64> + Sync,
     Zeta: LatticeMut<D, f64>,
@@ -398,21 +404,28 @@ pub fn construct_zeta_inplace<const D: usize, Zeta, Phi1, Phi2, Solver, M>(
 {
     let total_count = phi.dim().product();
     let done_count = AtomicUsize::new(0);
+    let mut terminated = AtomicBool::new(false);
     let sm = &step_monitor;
+    let tm = &terminated;
     zeta.par_assign(&phi.as_ref().zip(v_phi.as_ref()).map(move |(phi, v_phi)| {
-        let dt = fmin(max_dt, (reference_phi - phi) / v_phi / (dt_segs as f64));
-        let mut state = solver.create_state(a, v_a, phi, v_phi);
-        solver.evaluate_to_phi(&mut state, dt, reference_phi);
-        sm(done_count.fetch_add(1, Ordering::SeqCst) + 1, total_count);
-        let ret = (state.scale_factor() / a).ln();
-        if ret.is_infinite() || ret.is_nan() {
-            println!(
-                "found nan, a = {}, v_a = {}, phi = {}, v_phi = {}, final_state = {:?}",
-                a, v_a, phi, v_phi, &state
-            );
+        if tm.load(Ordering::SeqCst) {
+            reference_phi
+        } else {
+            let dt = fmin(max_dt, (reference_phi - phi) / v_phi / (dt_segs as f64));
+            let mut state = solver.create_state(a, v_a, phi, v_phi);
+            solver.evaluate_to_phi(&mut state, dt, reference_phi);
+            sm(done_count.fetch_add(1, Ordering::SeqCst) + 1, total_count);
+            let ret = (state.scale_factor() / a).ln();
+            if ret.is_infinite() || ret.is_nan() {
+                println!(
+                    "[warning/zeta] found NaN, a = {}, v_a = {}, phi = {}, v_phi = {}, final_state = {:?}",
+                    a, v_a, phi, v_phi, &state
+                );
+            }
+            ret
         }
-        ret
     }));
+    !*terminated.get_mut()
 }
 
 pub fn construct_zeta<const D: usize, Phi1, Phi2, Solver, M>(
@@ -447,4 +460,48 @@ where
         step_monitor,
     );
     zeta
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        lat::{BoxLattice, Lattice, LatticeParam},
+        scalar::populate_noise,
+        util::VecN,
+    };
+
+    fn run_noise_test(size: usize, l: f64) -> (f64, f64) {
+        let dx = l / (size as f64);
+        let lattice = LatticeParam {
+            spacing: VecN::new([dx; 3]),
+            size: VecN::new([size; 3]),
+        };
+        let mut noise_phi = BoxLattice::zeros(lattice.size);
+        let mut noise_v_phi = BoxLattice::zeros(lattice.size);
+        populate_noise(
+            &lattice,
+            10.0,
+            1e-2,
+            &mut random::default(1),
+            &mut noise_phi,
+            &mut noise_v_phi,
+        );
+        (
+            noise_phi.as_ref().map(|f| f.re * f.re).average(),
+            noise_phi
+                .as_ref()
+                .map(|f| f.re)
+                .derivative_square(&lattice.spacing)
+                .average(),
+        )
+    }
+
+    #[test]
+    fn noise() {
+        let (phi1, ds1) = run_noise_test(16, 1.0);
+        let (phi2, ds2) = run_noise_test(64, 1.0);
+        println!("phi1 = {phi1}, phi2 = {phi2}, ds1 = {ds1}, ds2 = {ds2}");
+        assert!((phi1 - phi2).abs() < 1e-10);
+        assert!((ds1 - ds2).abs() < 1e-10);
+    }
 }
