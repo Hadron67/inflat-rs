@@ -224,7 +224,7 @@ where
             }
             println!(
                 "v_phi[0] = {}, v_a[0] = {}, t[-1] = {}",
-                background[0].v_phi(),
+                background[0].v_phi(&self.input),
                 background[0].v_a(&self.input),
                 t
             );

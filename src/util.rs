@@ -23,6 +23,11 @@ use libm::sqrt;
 use ndarray::{Linspace, linspace};
 use num_complex::Complex64;
 use num_traits::{Float, FromPrimitive, One, Zero};
+use plotly::{
+    Layout, Plot, Scatter,
+    common::ExponentFormat,
+    layout::{Axis, AxisType},
+};
 use rayon::iter::{
     IndexedParallelIterator, ParallelIterator,
     plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge},
@@ -945,6 +950,55 @@ where
     )
 }
 
+pub fn plot_spectrum(out_file: &str, spectrums: &[(&str, &[f64], &[f64])], k_unit: f64) {
+    let mut plot = Plot::new();
+    for (name, k, spec) in spectrums.iter().cloned() {
+        plot.add_trace(
+            Scatter::new(k.iter().map(|k| k * k_unit).collect(), spec.into())
+                .name(name.to_string()),
+        );
+    }
+    plot.set_layout(
+        Layout::new()
+            .x_axis(
+                Axis::new()
+                    .type_(AxisType::Log)
+                    .exponent_format(ExponentFormat::Power),
+            )
+            .y_axis(
+                Axis::new()
+                    .type_(AxisType::Log)
+                    .exponent_format(ExponentFormat::Power),
+            )
+            .height(800),
+    );
+    plot.write_html(out_file);
+}
+
+pub fn remove_first_and_last<T>(arr: &[T]) -> &[T] {
+    &arr[..arr.len() - 1]
+}
+
+pub fn encode_to_file<E, C>(file: &str, config: C, encode: E) -> Result<()>
+where
+    E: Encode,
+    C: Config,
+{
+    encode_into_std_write(encode, &mut BufWriter::new(File::open(file)?), config)?;
+    Ok(())
+}
+
+pub fn decode_from_file<D, C>(file: &str, config: C) -> Result<D>
+where
+    C: Config,
+    D: Decode<()>,
+{
+    Ok(decode_from_std_read(
+        &mut BufReader::new(File::open(file)?),
+        config,
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::f64::consts::PI;
@@ -976,8 +1030,9 @@ mod tests {
     }
 
     #[test]
-    fn mom_factor() {
-        assert!((half_int_gamma(3) - PI.sqrt() / 2.0).abs() <= 1e-20);
+    fn gamma_fn() {
+        assert_approx_eq!(half_int_gamma(1), PI.sqrt());
+        assert_approx_eq!(half_int_gamma(3), PI.sqrt() / 2.0);
     }
 
     #[test]

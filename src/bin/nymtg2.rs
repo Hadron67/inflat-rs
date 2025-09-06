@@ -82,7 +82,7 @@ impl<V, U> Params<V, U> {
             for state in limit_length(&background, max_length) {
                 efolding.push(state.a().ln());
                 phi.push(state.phi);
-                v_phi.push(state.v_phi().abs() / self.v0.sqrt());
+                v_phi.push(state.v_phi(&self.input).abs() / self.v0.sqrt());
                 chi.push(state.chi);
                 epsilon.push(state.epsilon(&self.input));
             }
@@ -119,7 +119,7 @@ impl<V, U> Params<V, U> {
             );
             plot.write_html(&format!("{}/background.html", out_dir));
         }
-        let k_coef = background[0].mom_unit_coef_hz(self.input.kappa, 0.05);
+        let k_coef = background[0].mom_unit_coef_hz(&self.input, 0.05);
         let k_range = self.spectrum_range / k_coef;
         {
             let spectrum_pos = self

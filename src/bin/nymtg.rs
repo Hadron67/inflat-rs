@@ -84,9 +84,9 @@ where
             let mut v_phi = vec![];
             let mut epsilon = vec![];
             for state in limit_length(&background, max_length) {
-                efolding.push(state.scale_factor().ln());
+                efolding.push(state.scale_factor(&self.input).ln());
                 phi.push(state.phi);
-                v_phi.push(state.v_phi().abs());
+                v_phi.push(state.v_phi(&self.input).abs());
                 epsilon.push(state.epsilon(&self.input));
             }
             let mut plot = Plot::new();
@@ -120,7 +120,7 @@ where
             );
             plot.write_html(&format!("{}/background.html", out_dir));
         }
-        let k_coef = background[0].mom_unit_coef_hz(self.input.kappa, 0.05);
+        let k_coef = background[0].mom_unit_coef_hz(&self.input, 0.05);
         let k_range = self.spectrum_range / k_coef;
         {
             let pert_pos = self.pert(background.len(), &background, 1.0, self.alpha);

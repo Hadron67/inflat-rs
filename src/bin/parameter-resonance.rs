@@ -75,11 +75,11 @@ where
             let mut epsilon = vec![];
             let mut hubble = vec![];
             for state in limit_length(&background, max_length) {
-                efoldings.push(state.scale_factor().ln());
+                efoldings.push(state.scale_factor(&self.input).ln());
                 phi.push(state.phi);
                 epsilon.push(state.epsilon(&self.input));
                 zdd_z.push(state.z_potential(&self.input));
-                hubble.push(state.v_a(&self.input) / state.scale_factor());
+                hubble.push(state.v_a(&self.input) / state.scale_factor(&self.input));
             }
             let mut plot = Plot::new();
             plot.add_trace(Scatter::new(efoldings.clone(), phi).name("phi"));
@@ -127,7 +127,7 @@ where
             let mut phi = vec![];
             let _ = pert.run(1e6, 0.01, |_, b, _s, phi0, _, _| {
                 phi.push(phi0.abs());
-                efolding.push(b.scale_factor().ln());
+                efolding.push(b.scale_factor(&self.input).ln());
             });
             let mut plot = Plot::new();
             plot.add_trace(Scatter::new(efolding, phi));

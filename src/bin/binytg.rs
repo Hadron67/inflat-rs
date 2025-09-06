@@ -366,7 +366,7 @@ where
             );
             plot.write_html(&format!("{}/background.html", out_dir));
         }
-        let k_coef = background[0].mom_unit_coef_hz(self.input.kappa, 0.05);
+        let k_coef = background[0].mom_unit_coef_hz(&self.input, 0.05);
         {
             let spectrum_no_alpha = self
                 .pert(background.len(), &background, 0.0, 0.0)

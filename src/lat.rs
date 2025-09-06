@@ -156,8 +156,18 @@ pub trait Lattice<const D: usize, T> {
             field: self,
         }
     }
-    fn reduce<Op>(&self, op: Op) -> T {
-        todo!()
+    fn times<F>(self, other: F) -> LatticeTimes<D, T, Self, F> where Self: Sized {
+        LatticeTimes { lhs: self, rhs: other, _elem: PhantomData }
+    }
+    fn subscript(self, index: usize) -> LatticeSubscript<T, Self>
+    where
+        Self: Sized,
+    {
+        LatticeSubscript {
+            field: self,
+            index,
+            _t: PhantomData,
+        }
     }
     fn sum(&self) -> T
     where
@@ -444,6 +454,27 @@ where
 }
 
 #[must_use = "Lattice operations do nothing unless used"]
+pub struct LatticeTimes<const D: usize, T, F1, F2> {
+    lhs: F1,
+    rhs: F2,
+    _elem: PhantomData<T>,
+}
+
+impl<const D: usize, T, F1, F2> Lattice<D, T::Output> for LatticeTimes<D, T, F1, F2> where
+    F1: Lattice<D, T>,
+    F2: Lattice<D, T>,
+    T: Mul<T>,
+{
+    fn dim(&self) -> &VecN<D, usize> {
+        self.lhs.dim()
+    }
+
+    fn get(&self, index: usize, coord: &VecN<D, usize>) -> T::Output {
+        self.lhs.get(index, coord) * self.rhs.get(index, coord)
+    }
+}
+
+#[must_use = "Lattice operations do nothing unless used"]
 pub struct LatticeDerivativeSquare<const D: usize, T, F> {
     field: F,
     dx: VecN<D, T>,
@@ -510,6 +541,27 @@ where
 
     fn get(&self, index: usize, coord: &VecN<D, usize>) -> (T1, T2) {
         (self.lhs.get(index, coord), self.rhs.get(index, coord))
+    }
+}
+#[must_use = "Lattice operations do nothing unless used"]
+pub struct LatticeSubscript<T, F> {
+    field: F,
+    index: usize,
+    _t: PhantomData<T>,
+}
+
+impl<const D: usize, T, F> Lattice<D, T::Output> for LatticeSubscript<T, F>
+where
+    F: Lattice<D, T>,
+    T: Index<usize>,
+    T::Output: Sized + Clone,
+{
+    fn dim(&self) -> &VecN<D, usize> {
+        self.field.dim()
+    }
+
+    fn get(&self, index: usize, coord: &VecN<D, usize>) -> T::Output {
+        self.field.get(index, coord)[self.index].clone()
     }
 }
 
