@@ -862,6 +862,11 @@ impl<const D: usize> LatticeState<D> for ScalarFieldState<D> {
     }
 }
 
+pub trait MeasurableCreator<F> {
+    type Measurable;
+    fn create(&self, field: &F) -> Self::Measurable;
+}
+
 #[derive(Debug, Clone, Copy, Encode, Decode)]
 pub struct LatticeMeasurables {
     pub a: f64,
@@ -881,6 +886,7 @@ pub struct LatticeInput<const D: usize, S> {
     pub k_unit: f64,
     pub no_noise: bool,
     pub seed: u64,
+    pub orignal_initial_a: f64,
 }
 
 #[derive(Encode, Decode)]
@@ -894,10 +900,19 @@ pub struct LatticeOutputData<const D: usize, S> {
 }
 
 impl<const D: usize, S> LatticeInput<D, S> {
+    pub fn k_min(&self) -> f64 {
+        self.k_unit * 2.0 * PI / self.lattice.spacing[0] / (self.lattice.size[0] as f64)
+    }
+    pub fn k_max(&self) -> f64 {
+        self.k_unit * 2.0 * sqrt(D as f64) / self.lattice.spacing[0]
+    }
+    pub fn orignal_final_a(&self) -> f64 {
+        self.orignal_initial_a * self.end_n.exp()
+    }
     pub fn from_background_and_k_normalized<C: ?Sized>(
         background: &[S],
         ctx: &C,
-        start_k: f64,
+        k_min: f64,
         subhorizon_tolerance: f64,
         superhorizon_tolerance: f64,
         lattice_size: usize,
@@ -906,8 +921,8 @@ impl<const D: usize, S> LatticeInput<D, S> {
     where
         S: ScaleFactor<C> + ScaleFactorD<C> + ScaleFactorMut<C> + Clone,
     {
-        let starting_horizon = start_k / subhorizon_tolerance;
-        let end_k = start_k * sqrt(D as f64) / PI * (lattice_size as f64);
+        let starting_horizon = k_min / subhorizon_tolerance;
+        let end_k = k_min * sqrt(D as f64) / PI * (lattice_size as f64);
         let end_horizon = end_k * superhorizon_tolerance;
         let start_state = background
             .iter()
@@ -915,7 +930,7 @@ impl<const D: usize, S> LatticeInput<D, S> {
             .unwrap();
         let start_k_state = background
             .iter()
-            .find(|state| state.v_scale_factor(ctx) >= start_k)
+            .find(|state| state.v_scale_factor(ctx) >= k_min)
             .unwrap();
         let end_state = background
             .iter()
@@ -935,9 +950,10 @@ impl<const D: usize, S> LatticeInput<D, S> {
             state,
             dt,
             end_n: (end_state.scale_factor(ctx) / start_state.scale_factor(ctx)).ln(),
-            k_unit: start_k / normalized_start_k,
+            k_unit: k_min / normalized_start_k,
             no_noise: false,
             seed: 10,
+            orignal_initial_a: start_state.scale_factor(ctx),
         }
     }
     pub fn run<'a, LatState, SimCreator, I>(
@@ -1204,12 +1220,12 @@ impl<const D: usize, S> LatticeOutputData<D, S> {
         );
         plot.write_html(out_file);
     }
-    pub fn plot_spectrums(&self, out_file: &str, k_star: f64) {
+    pub fn plot_spectrums(&self, out_file: &str, k_unit: f64) {
         let mut plot = Plot::new();
         let ks = self
             .spectrum_k
             .iter()
-            .map(|k| k / k_star)
+            .map(|k| k * k_unit)
             .collect::<Vec<_>>();
         for (n, spec) in &self.spectrums {
             plot.add_trace(Scatter::new(ks.clone(), spec.clone()).name(&format!("N = {}", n)));

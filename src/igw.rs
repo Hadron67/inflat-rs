@@ -72,7 +72,7 @@ pub fn tigw_2_integrand(u: f64, v: f64, k: f64, mut p_h: impl FnMut(f64) -> f64)
         + 2.0 * u4 * (7.0 + 118.0 * v2 + 35.0 * v4)
         + 4.0 * u2 * (13.0 + 105.0 * v2 + 151.0 * v4 + 35.0 * v6);
 
-    let term_c = poly * (std::f64::consts::PI.powi(2) + ln_val.powi(2));
+    let term_c = poly * (PI.powi(2) + ln_val.powi(2));
 
     // 组合括号内的三项
     let bracket = term_a + term_b + term_c;
@@ -85,8 +85,11 @@ pub fn tigw_2_integrand(u: f64, v: f64, k: f64, mut p_h: impl FnMut(f64) -> f64)
 }
 
 pub fn sigw_2_integrand<F: FnMut(f64) -> f64>(u: f64, v: f64, k: f64, mut p_zeta: F) -> f64 {
+    if u.abs() <= 1e-10 || v.abs() <= 1e-10 {
+        return 0.0;
+    }
     let factor1 = ((4.0 * v * v - (1.0 + v * v - u * u).powi(2)) / 4.0 / u / v).powi(2);
-    let factor2 = (3.0 * (u * u + v * v - 3.0) / 4.0 / (u * v).powi(2)).powi(2);
+    let factor2 = (3.0 * (u * u + v * v - 3.0) / 4.0 / (u * v).powi(3)).powi(2);
     let log_den = log_div(3.0 - (u + v).powi(2), 3.0 - (u - v).powi(2));
     let factor3 = (-4.0 * u * v + (u * u + v * v - 3.0) * log_den).powi(2)
         + if u + v >= sqrt(3.0) {
@@ -114,6 +117,44 @@ where
         }
     }
     ret * du * dv
+}
+
+pub fn sigw_2_spectrum_one(
+    k_data: &[f64],
+    spectrum: &[f64],
+    k: f64,
+    u_max: f64,
+    du: f64,
+    dv: f64,
+) -> f64 {
+    uv_integrate(u_max, du, dv, |u, v| {
+        let ret = sigw_2_integrand(v, u, k, move |k0| {
+            interpolate_1d(k_data, spectrum, k0, false, &log_interp)
+        });
+        if ret.is_nan() {
+            println!("found nan on u = {:e}, v = {:e}", u, v);
+        }
+        ret
+    })
+}
+
+pub fn sigw_2_spectrum<S>(
+    k_data: &[f64],
+    spectrum: &[f64],
+    u_max: f64,
+    du: f64,
+    dv: f64,
+    step_monitor: S,
+) -> Vec<f64> where S: Fn(usize, usize) + Sync {
+    let done_count = AtomicUsize::new(0);
+    k_data
+        .par_iter()
+        .map(|k| {
+            let ret = sigw_2_spectrum_one(k_data, spectrum, *k, u_max, du, dv);
+            step_monitor(done_count.fetch_add(1, Ordering::SeqCst) + 1, k_data.len());
+            ret
+        })
+        .collect::<Vec<_>>()
 }
 
 pub fn tigw_2_spectrum_one(

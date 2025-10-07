@@ -688,22 +688,34 @@ impl<const D: usize> GaussBonnetField<D> {
     {
         let phi = field.phi.view().map(|f| f[0]);
         let v_phi = field.phi.view().map(|f| f[1]);
+        let hubble2 = data::hubble2(
+            input.dim,
+            input.kappa,
+            field.a,
+            field.v_a,
+            phi.average(),
+            v_phi.average(),
+            phi.as_ref().laplacian(&lattice.spacing).average(),
+            phi.as_ref().derivative_square(&lattice.spacing).average(),
+            // 0.0, // XXX: ignoring spatial phi dependency
+            // 0.0,
+            &input.v,
+            &input.xi,
+        );
+        let hubble2 = LatticeSupplier::new(lattice.size, |index, coord| data::hubble2(
+            input.dim,
+            input.kappa,
+            field.a,
+            field.v_a,
+            phi.get(index, coord),
+            v_phi.get(index, coord),
+            phi.laplacian_at(coord, &lattice.spacing),
+            phi.derivative_square_at(coord, &lattice.spacing),
+            &input.v,
+            &input.xi,
+        )).average();
         self.a = field.v_a;
-        self.v_a = field.a
-            * data::hubble2(
-                input.dim,
-                input.kappa,
-                field.a,
-                field.v_a,
-                phi.average(),
-                v_phi.average(),
-                phi.as_ref().laplacian(&lattice.spacing).average(),
-                phi.as_ref().derivative_square(&lattice.spacing).average(),
-                // 0.0, // XXX: ignoring spatial phi dependency
-                // 0.0,
-                &input.v,
-                &input.xi,
-            );
+        self.v_a = field.a * hubble2;
         self.phi.par_for_each_mut(|ptr, index, coord| {
             ptr[0] = v_phi.get(index, coord);
             ptr[1] = data::vv_phi(

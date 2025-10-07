@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
+assert_approx_eq = "1.1.0"
 bincode = "2.0.1"
 libm = "0.2.11"
 ndarray = { version = "0.16.1", features = ["rayon"] }

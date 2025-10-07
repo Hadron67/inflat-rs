@@ -2,27 +2,16 @@ use std::{env, f64::consts::PI, fs::create_dir_all, time::Duration};
 
 use bincode::{Decode, Encode};
 use inflat::{
-    background::{DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelector, MPC_HZ},
-    c2fn::C2Fn,
-    gauss_bonnet::{
-        GaussBonnetBInput, GaussBonnetBackgroundState, GaussBonnetField,
-        GaussBonnetFieldSimulatorCreator, GaussBonnetScalarPerturbationCoef,
-        GaussBonnetScalarPerturbationPotential,
-    },
-    lat::BoxLattice,
-    models::TanhPotential,
-    scalar::LatticeInput,
-    util::{
-        self, ParamRange, RateLimiter, limit_length, linear_interp, plot_spectrum,
-        remove_first_and_last,
-    },
+    background::{DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelector, ScaleFactorD, BINCODE_CONFIG, MPC_HZ}, c2fn::C2Fn, gauss_bonnet::{
+        data::perturbation_lag_coef_a_2, GaussBonnetBInput, GaussBonnetBackgroundState, GaussBonnetField, GaussBonnetFieldSimulatorCreator, GaussBonnetScalarPerturbationCoef, GaussBonnetScalarPerturbationPotential
+    }, igw::sigw_2_spectrum, lat::{self, BoxLattice}, models::TanhPotential, scalar::{LatticeInput, LatticeOutputData}, util::{
+        self, decode_from_file, lazy_file, limit_length, linear_interp, plot_spectrum, remove_first_and_last, ParamRange, RateLimiter
+    }
 };
 use libm::{cos, sin};
 use num_complex::ComplexFloat;
 use plotly::{
-    Layout, Plot, Scatter,
-    common::ExponentFormat,
-    layout::{Axis, AxisType, LayoutGrid},
+    common::{DashType, ExponentFormat, Line}, layout::{Axis, AxisType, LayoutGrid}, Layout, Plot, Scatter
 };
 
 struct NaturalInflationPotential {
@@ -54,16 +43,6 @@ struct LatticeMeasurables {
     pub v_phi: f64,
     pub hubble_constraint: f64,
     pub metric_perts: (f64, f64),
-}
-
-#[derive(Encode, Decode)]
-struct LatticeOutputData<const D: usize> {
-    pub measurables: Vec<LatticeMeasurables>,
-    pub final_state: GaussBonnetField<D>,
-    pub spectrum_k: Vec<f64>,
-    pub spectrums: Vec<(f64, Vec<f64>)>,
-    pub zeta_spectrum: Vec<f64>,
-    pub final_zeta: BoxLattice<D, f64>,
 }
 
 pub fn plot_background<V, Xi>(
@@ -224,16 +203,16 @@ where
     pert.spectrum_with_cache(out_file, k_range, da, quiet)
 }
 
-#[allow(unused)]
-fn run_perturbation<V, Xi>(
+fn run_perturbation<V, Xi, I>(
     out_file: &str,
     background: &[GaussBonnetBackgroundState],
     input: &GaussBonnetBInput<V, Xi>,
-    ks: &[f64],
+    ks: I,
+    a_unit: f64,
     k_unit: f64,
     da: f64,
     horizon_tolerance: f64,
-) {
+) where I: IntoIterator<Item = f64> {
     let pert = HamitonianSimulator::new(
         input,
         background.len(),
@@ -243,14 +222,14 @@ fn run_perturbation<V, Xi>(
         HorizonSelector::new(horizon_tolerance),
         GaussBonnetScalarPerturbationCoef,
     );
-    let max_length = 500000usize;
+    let max_length = 50000usize;
     let mut plot = Plot::new();
     for k0 in ks {
         let mut efolding = vec![];
         let mut phi = vec![];
         let mut potential = vec![];
         pert.run(k0 * k_unit, da, |_, b, _, s, pot, _| {
-            efolding.push(b.a.ln());
+            efolding.push((b.a * a_unit).ln());
             phi.push(s.abs());
             potential.push(pot);
         });
@@ -262,14 +241,14 @@ fn run_perturbation<V, Xi>(
                 efolding.clone(),
                 limit_length(&phi, max_length).cloned().collect(),
             )
-            .name(&format!("k = {:e}", *k0)),
+            .name(&format!("k = {:e}", k0)),
         );
         plot.add_trace(
             Scatter::new(
                 efolding.clone(),
                 limit_length(&potential, max_length).cloned().collect(),
             )
-            .name(&format!("k = {:e}", *k0))
+            .name(&format!("k = {:e}", k0))
             .y_axis("y2"),
         );
     }
@@ -312,6 +291,20 @@ fn param_set1(
 
 type LI = LatticeInput<3, GaussBonnetBackgroundState>;
 
+#[derive(Encode, Decode)]
+struct LatticeSpectrumOutput {
+    pub spectrum_k: Vec<f64>,
+    pub linear_spectrum: Vec<f64>,
+    pub zeta_spectrum: Vec<f64>,
+}
+
+#[derive(Encode, Decode)]
+struct SpectrumOutput {
+    pub linear_spectrum_k: Vec<f64>,
+    pub linear_spectrum: Vec<f64>,
+    pub lat: Option<LatticeSpectrumOutput>,
+}
+
 fn run_common<'a, V, Xi>(
     out_dir: &str,
     name: &str,
@@ -319,9 +312,9 @@ fn run_common<'a, V, Xi>(
     background_quiet: bool,
     remote: bool,
     misc_tests: bool,
-    skip_lattice: bool,
-    lattice_k0: f64,
-) -> anyhow::Result<()>
+    perturbation_k_count: usize,
+    lat: Option<ScanLatticeInput>,
+) -> anyhow::Result<SpectrumOutput>
 where
     V: C2Fn<f64, Output = f64> + Sync,
     Xi: C2Fn<f64, Output = f64> + Sync,
@@ -352,6 +345,7 @@ where
         .unwrap()
         .1;
     let k_star = 0.05 * MPC_HZ / spectrum_k_range.log_interp(pivot_k_index);
+    let linear_spectrum_k = (spectrum_k_range * k_star).as_logspace().collect::<Vec<_>>();
     plot_spectrum(
         &format!("{}/{}.spectrum.html", out_dir, name),
         &[(
@@ -367,66 +361,83 @@ where
             &format!("{}/{}.misc_test.perturbation.html", out_dir, name),
             &background,
             input,
-            &[1e-7, 1e-8, 1e-9],
+            [1e-7, 1e-8, 1e-9],
+            1.0,
             1.0 / k_star,
             0.1,
             1e3,
         );
     }
 
-    if !skip_lattice {
-        if misc_tests {
-            let lat_test = LI::from_background_and_k_normalized(
-                &background,
-                input,
-                1e-9 / k_star,
-                1.3,
-                20.0,
-                32,
-                2.0,
-            )
-            .run(
-                &GaussBonnetFieldSimulatorCreator,
-                input,
-                &format!("{}/{}.lattice.test1.bincode", out_dir, name),
-                true,
-                10,
-            )?;
-            lat_test.plot_spectrums(
-                &format!("{}/{}.lattice.test1.spectrums.html", out_dir, name),
-                k_star,
-            );
-            lat_test.plot_background(&format!("{}/{}.lattice.test1.background.html", out_dir, name));
-            plot_spectrum(
-                &format!(
-                    "{}/{}.lattice.test1.combined_spectrum.html",
-                    out_dir, name
-                ),
-                &[
-                    (
-                        "tree",
-                        &spectrum_k_range.as_logspace().collect::<Vec<_>>(),
-                        &pert_spectrum,
-                    ),
-                    (
-                        "lattice",
-                        remove_first_and_last(&lat_test.spectrum_k),
-                        remove_first_and_last(&lat_test.zeta_spectrum),
-                    ),
-                ],
-                k_star,
-            );
-        }
-        if let Ok(lat_remote) = LI::from_background_and_k_normalized(
+    if misc_tests {
+        let lat_test = LI::from_background_and_k_normalized(
             &background,
             input,
-            lattice_k0 / k_star,
+            1e-9 / k_star,
             1.3,
             20.0,
-            128,
+            32,
             2.0,
         )
         .run(
+            &GaussBonnetFieldSimulatorCreator,
+            input,
+            &format!("{}/{}.lattice.test1.bincode", out_dir, name),
+            true,
+            10,
+        )?;
+        lat_test.plot_spectrums(
+            &format!("{}/{}.lattice.test1.spectrums.html", out_dir, name),
+            k_star,
+        );
+        lat_test.plot_background(&format!("{}/{}.lattice.test1.background.html", out_dir, name));
+        plot_spectrum(
+            &format!(
+                "{}/{}.lattice.test1.combined_spectrum.html",
+                out_dir, name
+            ),
+            &[
+                (
+                    "tree",
+                    &spectrum_k_range.as_logspace().collect::<Vec<_>>(),
+                    &pert_spectrum,
+                ),
+                (
+                    "lattice",
+                    remove_first_and_last(&lat_test.spectrum_k),
+                    remove_first_and_last(&lat_test.zeta_spectrum),
+                ),
+            ],
+            k_star,
+        );
+    }
+    if let Some(lat_param) = lat {
+        let lat_in = LI::from_background_and_k_normalized(
+            &background,
+            input,
+            lat_param.k0 / k_star,
+            lat_param.subhorizon_tolerance,
+            lat_param.superhorizon_tolerance,
+            lat_param.size,
+            lat_param.dt,
+        );
+        if perturbation_k_count > 0 {
+            let k_min = lat_in.k_min();
+            run_perturbation(
+                &format!("{}/{}.perturbations_test.html", out_dir, name),
+                &background,
+                input,
+                ParamRange::new(k_min, lat_in.k_max(), perturbation_k_count).as_logspace(),
+                1.0 / lat_in.orignal_initial_a,
+                1.0,
+                0.1,
+                1e3,
+            );
+        }
+        let background_start_index = background.partition_point(|b|b.a <= lat_in.orignal_initial_a);
+        let background_end_index = background.partition_point(|b|b.a <= lat_in.orignal_final_a());
+        plot_background(&format!("{}/{}.lattice.background_preview.html", out_dir, name), &background[background_start_index..=background_end_index], input);
+        if let Ok(lat_remote) = lat_in.run(
             &GaussBonnetFieldSimulatorCreator,
             input,
             &format!("{}/{}.lattice.remote.bincode", out_dir, name),
@@ -457,16 +468,37 @@ where
                 ],
                 k_star,
             );
+            Ok(SpectrumOutput {
+                linear_spectrum_k,
+                linear_spectrum: pert_spectrum,
+                lat: Some(LatticeSpectrumOutput {
+                    spectrum_k: lat_remote.spectrum_k.iter().map(|k|k * k_star).collect(),
+                    linear_spectrum: lat_remote.spectrums.last().unwrap().1.clone(),
+                    zeta_spectrum: lat_remote.zeta_spectrum,
+                }),
+            })
+        } else {
+            Ok(SpectrumOutput {
+                linear_spectrum_k,
+                linear_spectrum: pert_spectrum,
+                lat: None,
+            })
         }
+    } else {
+        Ok(SpectrumOutput {
+            linear_spectrum_k,
+            linear_spectrum: pert_spectrum,
+            lat: None,
+        })
     }
-
-    Ok(())
 }
 
 struct ScanLatticeInput {
     pub k0: f64,
     pub dt: f64,
     pub size: usize,
+    pub subhorizon_tolerance: f64,
+    pub superhorizon_tolerance: f64,
 }
 
 fn run_scan<F, V, Xi>(
@@ -518,8 +550,8 @@ where
                 &background,
                 &param,
                 lat_params.k0 / k_star,
-                40.0,
-                40.0,
+                1.3,
+                20.0,
                 lat_params.size,
                 lat_params.dt,
             )
@@ -595,8 +627,66 @@ fn piecewise_linear_interp(a: f64, b: f64, c: f64, l: f64, l1: f64) -> f64 {
     }
 }
 
+fn run_scan_case1(out_dir: &str, case_name: &str, is_remote: bool) -> anyhow::Result<()> {
+    let gb_scans = [
+        ("set1.xi01.1331", 1.1331e7),
+        ("set1.xi01.1332", 1.1332e7),
+        ("set1.xi01.1333", 1.1333e7),
+        ("set1.xi01.1334", 1.1334e7),
+        ("set1.xi01.1335", 1.1335e7),
+        ("set1.xi01.1336", 1.1336e7),
+        ("set1.xi01.1337", 1.1337e7),
+        ("set1.xi01.1338", 1.1338e7),
+        ("set1.xi01.1339", 1.1339e7),
+        ("set1.xi01.134", 1.134e7),
+        ("set1.xi01.13405", 1.13405e7),
+        ("set1.xi01.1341", 1.1341e7),
+        ("set1.xi01.13411", 1.13411e7),
+        ("set1.xi01.13412", 1.13412e7),
+    ];
+    let mut combined_plots = Plot::new();
+    for (name, xi0) in gb_scans {
+        let output = run_common(
+            out_dir,
+            &format!("{}_k2e-9", name),
+            &param_set1(9.6, xi0, 30.0),
+            true,
+            is_remote,
+            false,
+            0,
+            Some(ScanLatticeInput {
+                k0: 2e-9,
+                dt: 2.0,
+                size: 200,
+                subhorizon_tolerance: 1.3,
+                superhorizon_tolerance: 200.0,
+            }),
+        )?;
+        combined_plots.add_trace(Scatter::new(output.linear_spectrum_k, output.linear_spectrum).line(Line::new().dash(DashType::Dash)).name(&format!("linear xi0 = {:e}", xi0)));
+        if let Some(lat) = output.lat {
+            let sigw_omega = lazy_file(
+                &format!("{}/{}.{}.sigw.bincode", out_dir, case_name, name), BINCODE_CONFIG, || {
+                    println!("[run_case] sigw for {}", name);
+                    sigw_2_spectrum(&lat.spectrum_k, &lat.zeta_spectrum, 100.0, 0.05, 0.05, |_, _| {})
+                })?;
+            combined_plots.add_trace(Scatter::new(lat.spectrum_k.clone(), lat.zeta_spectrum).name(&format!("lattice xi0 = {:e}", xi0)));
+            combined_plots.add_trace(Scatter::new(lat.spectrum_k, sigw_omega.iter().map(|f|f * 0.9e-4).collect()).name(&format!("sigw xi0 = {:e}", xi0)).y_axis("y2"));
+        }
+    }
+    combined_plots.set_layout(
+        Layout::new().grid(LayoutGrid::new().rows(2).columns(1))
+        .x_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
+        .y_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
+        .y_axis2(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
+        .height(1000)
+    );
+    combined_plots.write_html(&format!("{}/{}.combined_plots.html", out_dir, case_name));
+    Ok(())
+}
+
 pub fn main() {
     let is_remote = env::var("REMOTE").map(|v| v != "false").unwrap_or(false);
+    run_scan_case1("out/gauss_bonnet", "case1", is_remote).unwrap();
     // run_common(
     //     "out/gauss_bonnet",
     //     "set1.xi01.000",
@@ -658,22 +748,147 @@ pub fn main() {
     //     &param_set1(9.6, 1.134e7, 30.0),
     //     true,
     //     is_remote,
-    //     true,
     //     false,
-    //     1e-9,
+    //     Some(ScanLatticeInput {
+    //         k0: 1e-9,
+    //         dt: 2.0,
+    //         size: 256,
+    //     }),
     // )
     // .unwrap();
-    run_common(
-        "out/gauss_bonnet",
-        "set1.xi01.13417",
-        &param_set1(9.6, 1.13417e7, 30.0),
-        true,
-        is_remote,
-        true,
-        false,
-        1e-9,
-    )
-    .unwrap();
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.1341",
+    //     &param_set1(9.6, 1.1341e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     false,
+    //     0,
+    //     Some(ScanLatticeInput {
+    //         k0: 1e-9,
+    //         dt: 2.0,
+    //         size: 200,
+    //         subhorizon_tolerance: 1.3,
+    //         superhorizon_tolerance: 40.0,
+    //     }),
+    // )
+    // .unwrap();
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.1341_k6e-9",
+    //     &param_set1(9.6, 1.1341e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     false,
+    //     0,
+    //     Some(ScanLatticeInput {
+    //         k0: 6e-9,
+    //         dt: 2.0,
+    //         size: 200,
+    //         subhorizon_tolerance: 1.3,
+    //         superhorizon_tolerance: 200.0,
+    //     }),
+    // )
+    // .unwrap();
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.1341_k3e-9",
+    //     &param_set1(9.6, 1.1341e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     false,
+    //     0,
+    //     Some(ScanLatticeInput {
+    //         k0: 3e-9,
+    //         dt: 2.0,
+    //         size: 128,
+    //         subhorizon_tolerance: 1.3,
+    //         superhorizon_tolerance: 200.0,
+    //     }),
+    // )
+    // .unwrap();
+
+    // scan manually
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.1341_k2e-9",
+    //     &param_set1(9.6, 1.1341e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     false,
+    //     5,
+    //     Some(ScanLatticeInput {
+    //         k0: 2e-9,
+    //         dt: 2.0,
+    //         size: 220,
+    //         subhorizon_tolerance: 1.3,
+    //         superhorizon_tolerance: 200.0,
+    //     }),
+    // )
+    // .unwrap();
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.13417_k2e-9",
+    //     &param_set1(9.6, 1.13417e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     false,
+    //     5,
+    //     Some(ScanLatticeInput {
+    //         k0: 2e-9,
+    //         dt: 2.0,
+    //         size: 220,
+    //         subhorizon_tolerance: 1.3,
+    //         superhorizon_tolerance: 200.0,
+    //     }),
+    // )
+    // .unwrap();
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.133_k2e-9",
+    //     &param_set1(9.6, 1.133e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     false,
+    //     5,
+    //     Some(ScanLatticeInput {
+    //         k0: 2e-9,
+    //         dt: 2.0,
+    //         size: 200,
+    //         subhorizon_tolerance: 1.3,
+    //         superhorizon_tolerance: 200.0,
+    //     }),
+    // )
+    // .unwrap();
+
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.13417_k2e-9_st500",
+    //     &param_set1(9.6, 1.13417e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     false,
+    //     5,
+    //     Some(ScanLatticeInput {
+    //         k0: 2e-9,
+    //         dt: 2.0,
+    //         size: 220,
+    //         subhorizon_tolerance: 1.3,
+    //         superhorizon_tolerance: 500.0,
+    //     }),
+    // )
+    // .unwrap();
+    // run_common(
+    //     "out/gauss_bonnet",
+    //     "set1.xi01.13417",
+    //     &param_set1(9.6, 1.13417e7, 30.0),
+    //     true,
+    //     is_remote,
+    //     true,
+    //     5,
+    //     Some(ScanLatticeInput { k0: 1e-9, dt: 2.0, size: 128 }),
+    // )
+    // .unwrap();
 
     // run_scan(
     //     "out/gauss_bonnet",

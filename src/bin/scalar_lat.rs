@@ -1,4 +1,4 @@
-use std::{f64::consts::PI, fmt::Display, fs::create_dir_all, time::Duration};
+use std::{f64::consts::PI, fmt::Display, fs::create_dir_all, iter::zip, time::Duration};
 
 use bincode::{Decode, Encode};
 use inflat::{
@@ -480,7 +480,7 @@ fn run_common<F>(
     phi0: f64,
     dt: f64,
     linear_spectrum_k_range: ParamRange<f64>,
-    lattice_in: Option<LatticeIn>,
+    lattice_in: &[LatticeIn],
 ) -> util::Result<()>
 where
     F: C2Fn<f64, Output = f64> + Sync,
@@ -550,7 +550,10 @@ where
         ],
         0.05 * MPC_HZ,
     );
-    if let Some(lat_param) = &lattice_in {
+    let mut spectrum_plot = Plot::new();
+    let k_unit = 0.05 * MPC_HZ / k_star;
+    spectrum_plot.add_trace(Scatter::new((k_range * k_unit).as_logspace().collect(), linear_spectrum.clone()).name("linear"));
+    for (index, lat_param) in zip(0usize.., lattice_in) {
         let lat_in = LatticeInput::<3, BackgroundState>::from_background_and_k_normalized(
             &background,
             input,
@@ -567,18 +570,21 @@ where
         let output = lat_in.run(
             &ScalarFieldSimulatorCreator,
             input,
-            &format!("{}/{}.lattice", dir, name),
+            &format!("{}/{}.lattice.i={}", dir, name, index),
             true,
             10,
         )?;
         output.plot_all(
             dir,
-            &format!("{}.lattice", name),
-            0.05 * MPC_HZ / k_star,
+            &format!("{}.lattice.i={}", name, index),
+            k_unit,
             k_range,
             &linear_spectrum,
         );
+        spectrum_plot.add_trace(Scatter::new(output.spectrum_k.iter().map(|k|k * k_unit).collect(), output.zeta_spectrum).name(&format!("lattice {}", index)));
     }
+    spectrum_plot.set_layout(Layout::new().grid(LayoutGrid::new().columns(1).rows(1)).height(1000).x_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power)).y_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power)));
+    spectrum_plot.write_html(&format!("{}/{}.lattice.combined_spectrums.html", dir, name));
     Ok(())
 }
 
@@ -635,30 +641,30 @@ fn report_err<T, E: Display>(res: Result<T, E>) {
 
 pub fn main() {
     let mass = 0.51e-5;
-    let params_set1 = {
-        let size = 32usize;
-        let l = 1.4 / mass;
-        Params {
-            input: BackgroundStateInput {
-                kappa: 1.0,
-                potential: QuadraticPotential::new(mass),
-            },
-            lattice_param: LatticeParam {
-                spacing: VecN::new([l / (size as f64); 3]),
-                size: VecN::new([size; 3]),
-            },
-            linear_spectrum_k: ParamRange::new(0.0, 1.0, 1000),
-            a: 1.0,
-            phi: 14.5,
-            linear_phi: 16.0,
-            v_phi: -0.8152 * mass,
-            dt: 1.0,
-            end_n: 7.0,
-            mass,
-            spectrum_count: 10,
-        }
-    };
-    report_err(params_set1.run("out/scalar_lat.set1", false));
+    // let params_set1 = {
+    //     let size = 64usize;
+    //     let l = 1.4 / mass;
+    //     Params {
+    //         input: BackgroundStateInput {
+    //             kappa: 1.0,
+    //             potential: QuadraticPotential::new(mass),
+    //         },
+    //         lattice_param: LatticeParam {
+    //             spacing: VecN::new([l / (size as f64); 3]),
+    //             size: VecN::new([size; 3]),
+    //         },
+    //         linear_spectrum_k: ParamRange::new(0.0, 1.0, 1000),
+    //         a: 1.0,
+    //         phi: 14.5,
+    //         linear_phi: 16.0,
+    //         v_phi: -0.8152 * mass,
+    //         dt: 1.0,
+    //         end_n: 6.9,
+    //         mass,
+    //         spectrum_count: 10,
+    //     }
+    // };
+    // report_err(params_set1.run("out/scalar_lat.set1", false));
 
     // let params_set2 = {
     //     let size = 256usize;
@@ -725,155 +731,235 @@ pub fn main() {
         // report_err(params_set2.run("out/scalar_lat.set2_alt", false));
     }
 
-    // let params_set4 = {
-    //     let size = 64usize;
-    //     let l = 0.6 / mass;
-    //     let dx = l / (size as f64);
-    //     Params {
-    //         input: BackgroundStateInput {
-    //             kappa: 1.0,
-    //             potential: PhiPotential2 {
-    //                 mass,
-    //                 s: -0.0020365,
-    //                 d: 0.003,
-    //                 phi_step: 14.1,
-    //             },
-    //         },
-    //         lattice_param: LatticeParam {
-    //             size: VecN::new([size; 3]),
-    //             spacing: VecN::new([dx; 3]),
-    //         },
-    //         linear_spectrum_k: ParamRange::new(0.0, 0.5, 2000),
-    //         a: 1.0,
-    //         phi: 14.5,
-    //         linear_phi: 17.5,
-    //         v_phi: -0.8152 * mass,
-    //         dt: 1.0,
-    //         end_n: 7.0,
-    //         mass,
-    //         spectrum_count: 10,
-    //     }
-    // };
-    // report_err(params_set4.run("out/scalar_lat.set4", true));
-
     {
-        let set4_input = BackgroundStateInput {
+        let set3_input = BackgroundStateInput {
             kappa: 1.0,
             potential: PhiPotential2 {
                 mass,
-                s: -0.0020365,
+                s: -0.0020363,
                 d: 0.003,
                 phi_step: 14.1,
             },
         };
         report_err(run_common(
             "out/scalar_lat",
-            "set4",
-            &set4_input,
+            "set3",
+            &set3_input,
             17.5,
             1.0,
             ParamRange::new(0.0, 1.0, 1000),
-            Some(LatticeIn {
+            &[LatticeIn {
                 size: 64,
                 k: 0.32,
-                subhorizon_tolerance: 10.0,
-                superhorizon_tolerance: 40.0,
-            }),
-        ));
-    }
-    {
-        let set4_input = BackgroundStateInput {
-            kappa: 1.0,
-            potential: PhiPotential2 {
-                mass,
-                s: -0.00201,
-                d: 0.003,
-                phi_step: 14.1,
-            },
-        };
-        report_err(run_common(
-            "out/scalar_lat",
-            "set4_alt",
-            &set4_input,
-            17.5,
-            1.0,
-            ParamRange::new(0.0, 1.0, 1000),
-            Some(LatticeIn {
-                size: 32,
-                k: 0.2,
-                subhorizon_tolerance: 5.0,
-                superhorizon_tolerance: 40.0,
-            }),
-        ));
-    }
-    {
-        let set4_input = BackgroundStateInput {
-            kappa: 1.0,
-            potential: PhiPotential2 {
-                mass,
-                s: -0.00201,
-                d: 0.003,
-                phi_step: 14.1,
-            },
-        };
-        report_err(run_common(
-            "out/scalar_lat",
-            "set4_alt2",
-            &set4_input,
-            17.5,
-            1.0,
-            ParamRange::new(0.0, 1.0, 1000),
-            Some(LatticeIn {
-                size: 32,
-                k: 0.31,
-                subhorizon_tolerance: 50.0,
-                superhorizon_tolerance: 100.0,
-            }),
-        ));
-    }
-    {
-        let set5_input = BackgroundStateInput {
-            kappa: 1.0,
-            potential: PhiPotential2 {
-                mass,
-                s: 0.01,
-                d: 0.005,
-                phi_step: 14.35,
-            },
-        };
-        report_err(run_common(
-            "out/scalar_lat",
-            "set5",
-            &set5_input,
-            17.5,
-            1.0,
-            ParamRange::new(0.25, 0.4, 1000),
-            Some(LatticeIn {
+                subhorizon_tolerance: 1.3,
+                superhorizon_tolerance: 20.0,
+            }, LatticeIn {
                 size: 32,
                 k: 0.32,
-                subhorizon_tolerance: 40.0,
-                superhorizon_tolerance: 40.0,
-            }),
-        ));
-    }
-    {
-        let qp_set1_input = BackgroundStateInput {
-            kappa: 1.0,
-            potential: QuadraticPotential::new(mass),
-        };
-        report_err(run_common(
-            "out/scalar_lat",
-            "qp_set1_alt",
-            &qp_set1_input,
-            17.5,
-            1.0,
-            ParamRange::new(0.0, 1.0, 1000),
-            Some(LatticeIn {
-                size: 32,
-                k: 0.37,
                 subhorizon_tolerance: 1.3,
-                superhorizon_tolerance: 40.0,
-            }),
+                superhorizon_tolerance: 20.0,
+            }],
         ));
     }
+
+    // {
+    //     let set4_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: PhiPotential2 {
+    //             mass,
+    //             s: -0.0020365,
+    //             d: 0.003,
+    //             phi_step: 14.1,
+    //         },
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "set4",
+    //         &set4_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.0, 1.0, 1000),
+    //         &[LatticeIn {
+    //             size: 64,
+    //             k: 0.32,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 20.0,
+    //         }, LatticeIn {
+    //             size: 64,
+    //             k: 0.31,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 20.0,
+    //         }, LatticeIn {
+    //             size: 64,
+    //             k: 0.34,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 20.0,
+    //         }, LatticeIn {
+    //             size: 64,
+    //             k: 0.37,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 20.0,
+    //         }],
+    //     ));
+    // }
+    // {
+    //     let set4_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: PhiPotential2 {
+    //             mass,
+    //             s: -0.00201,
+    //             d: 0.003,
+    //             phi_step: 14.1,
+    //         },
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "set4_alt2",
+    //         &set4_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.0, 1.0, 1000),
+    //         Some(LatticeIn {
+    //             size: 32,
+    //             k: 0.31,
+    //             subhorizon_tolerance: 50.0,
+    //             superhorizon_tolerance: 100.0,
+    //         }),
+    //     ));
+    // }
+    // {
+    //     let set5_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: PhiPotential2 {
+    //             mass,
+    //             s: 0.01,
+    //             d: 0.005,
+    //             phi_step: 14.35,
+    //         },
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "set5",
+    //         &set5_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.25, 0.4, 1000),
+    //         Some(LatticeIn {
+    //             size: 64,
+    //             k: 0.34,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 20.0,
+    //         }),
+    //     ));
+    // }
+    // {
+    //     let set5_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: PhiPotential2 {
+    //             mass,
+    //             s: 0.01,
+    //             d: 0.005,
+    //             phi_step: 14.35,
+    //         },
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "set5.k37",
+    //         &set5_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.25, 0.4, 1000),
+    //         Some(LatticeIn {
+    //             size: 64,
+    //             k: 0.35,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 20.0,
+    //         }),
+    //     ));
+    // }
+    // {
+    //     let set5_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: PhiPotential2 {
+    //             mass,
+    //             s: 0.01,
+    //             d: 0.005,
+    //             phi_step: 14.35,
+    //         },
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "set5.1",
+    //         &set5_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.0, 1.0, 1000),
+    //         Some(LatticeIn {
+    //             size: 64,
+    //             k: 0.4,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 20.0,
+    //         }),
+    //     ));
+    // }
+    // {
+    //     let qp_set1_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: QuadraticPotential::new(mass),
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "qp_set1_alt",
+    //         &qp_set1_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.0, 1.0, 1000),
+    //         Some(LatticeIn {
+    //             size: 64,
+    //             k: 0.6,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 40.0,
+    //         }),
+    //     ));
+    // }
+    // {
+    //     let qp_set1_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: QuadraticPotential::new(mass),
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "qp_set1_alt2",
+    //         &qp_set1_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.0, 1.0, 1000),
+    //         Some(LatticeIn {
+    //             size: 64,
+    //             k: 0.35,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 40.0,
+    //         }),
+    //     ));
+    // }
+    // {
+    //     let qp_set1_input = BackgroundStateInput {
+    //         kappa: 1.0,
+    //         potential: QuadraticPotential::new(mass),
+    //     };
+    //     report_err(run_common(
+    //         "out/scalar_lat",
+    //         "qp_set1_alt3",
+    //         &qp_set1_input,
+    //         17.5,
+    //         1.0,
+    //         ParamRange::new(0.0, 1.0, 1000),
+    //         Some(LatticeIn {
+    //             size: 64,
+    //             k: 0.1,
+    //             subhorizon_tolerance: 1.3,
+    //             superhorizon_tolerance: 40.0,
+    //         }),
+    //     ));
+    // }
 }
