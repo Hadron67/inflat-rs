@@ -145,7 +145,10 @@ pub fn sigw_2_spectrum<S>(
     du: f64,
     dv: f64,
     step_monitor: S,
-) -> Vec<f64> where S: Fn(usize, usize) + Sync {
+) -> Vec<f64>
+where
+    S: Fn(usize, usize) + Sync,
+{
     let done_count = AtomicUsize::new(0);
     k_data
         .par_iter()

@@ -6,22 +6,19 @@ use crate::{
     background::{
         BackgroundFn, BackgroundSolver, Dimension, Dt, Interpolate, Kappa, Phi, PhiD, ScaleFactor,
         ScaleFactorD, ScaleFactorMut,
-    },
-    c2fn::C2Fn,
-    interpolate_fields,
-    lat::{
+    }, c2fn::C2Fn, interpolate_fields, lat::{
         BoxLattice, Lattice, LatticeMut, LatticeParam, LatticeRef, LatticeSubscript,
         LatticeSupplier,
-    },
-    scalar::{
-        LatticeInitializer, LatticeNoiseGenerator, LatticePhi, LatticePhiD, LatticeSimulator,
-        LatticeSimulatorCreator, LatticeState, ScalarEffectivePotential, populate_noise,
-    },
-    util::{VecN, derivative_2, evaluate_polynomial, newton_solve_polynomial},
+    }, models::ZeroFn, scalar::{
+        populate_noise, LatticeInitializer, LatticeNoiseGenerator, LatticePhi, LatticePhiD, LatticeSimulator, LatticeSimulatorCreator, LatticeState, ScalarEffectivePotential
+    }, util::{derivative_2, evaluate_polynomial, newton_solve_polynomial, VecN}
 };
 
 pub mod data {
+    use num_traits::Pow;
+
     use crate::c2fn::C2Fn;
+    use crate::util::int_pow;
 
     #[rustfmt::skip]
     pub fn vv_phi<V, Xi>(dim: usize, kappa: f64, a: f64, v_a: f64, phi: f64, v_phi: f64, laplacian_phi: f64, derivative2_phi: f64, v: &V, xi: &Xi) -> f64 where
@@ -109,10 +106,7 @@ pub mod data {
             1.0 / 2.0 * (der2_phi + v_phi2) + potential_phi,
             0.0,
             -1.0 / 4.0 * (-1.0 + d) * 1.0 / (kappa)
-                * (2.0 * d
-                    + (-2.0 + d)
-                        * kappa
-                        * (laplacian_phi_xi_d_phi + der2_phi_xi_dd_phi)),
+                * (2.0 * d + (-2.0 + d) * kappa * (laplacian_phi_xi_d_phi + der2_phi_xi_dd_phi)),
             1.0 / 4.0 * (-2.0 + d) * (-1.0 + d) * d * v_phi_xi_d_phi,
             1.0 / 16.0 * (-3.0 + d) * (-2.0 + d) * (-1.0 + d) * d * xi_phi,
         ]
@@ -229,6 +223,15 @@ pub mod data {
         let xi_phi = xi.value(phi);
         let pv_phi = v.value(phi);
         1.0 * pv_phi + 1.0 / 16.0 * (-2.0 + d) * (-1.0 + d) * d * hubble * hubble * ((-3.0 + d) * hubble * hubble + 4.0 * hubble2) * xi_phi
+    }
+
+    #[rustfmt::skip]
+    pub fn a_zeta2(dim: usize, kappa: f64, a: f64, v_a: f64, phi: f64, v_phi: f64, xi: &impl C2Fn<f64, Output = f64>) -> f64 {
+        let d = dim as f64;
+        let hubble = v_a / a;
+        let xi_d_phi = xi.value_d(phi);
+        let xi_phi = xi.value(phi);
+        1.0 / 8.0 * int_pow(hubble, -2) * a.pow(1.0 + d) * int_pow(v_phi, 2) * int_pow(-4.0 + (6.0 + -5.0 * d + int_pow(d, 2)) * int_pow(hubble, 2) * kappa * xi_phi + 3.0 * (-2.0 + d) * hubble * kappa * v_phi * xi_d_phi, -2) * (64.0 + -64.0 * (-2.0 + d) * hubble * kappa * v_phi * xi_d_phi + 16.0 * (-3.0 + d) * int_pow(-2.0 + d, 2) * int_pow(hubble, 3) * int_pow(kappa, 2) * v_phi * xi_phi * xi_d_phi + -1.0 * int_pow(-2.0 + d, 3) * d * (3.0 + -4.0 * d + int_pow(d, 2)) * int_pow(hubble, 6) * int_pow(kappa, 2) * xi_phi * int_pow(xi_d_phi, 2) + -2.0 * int_pow(-2.0 + d, 3) * (-1.0 + d) * d * int_pow(hubble, 5) * int_pow(kappa, 2) * v_phi * int_pow(xi_d_phi, 3) + 4.0 * int_pow(-2.0 + d, 2) * int_pow(hubble, 4) * kappa * (int_pow(-3.0 + d, 2) * kappa * int_pow(xi_phi, 2) + (-1.0 + d) * d * int_pow(xi_d_phi, 2)) + -16.0 * (-2.0 + d) * int_pow(hubble, 2) * kappa * (2.0 * (-3.0 + d) * xi_phi + -1.0 * (-2.0 + d) * kappa * int_pow(v_phi, 2) * int_pow(xi_d_phi, 2)))
     }
 }
 
@@ -365,6 +368,25 @@ impl GaussBonnetBackgroundState {
             pert_a: 0.0,
             pert_c: 0.0,
         }
+    }
+    pub fn a_zeta2_derive(&self, input: &GaussBonnetBInput<impl C2Fn<f64, Output = f64>, impl C2Fn<f64, Output = f64>>) -> f64 {
+        data::perturbation_lag_coef_a_2(
+            input.dim,
+            input.kappa,
+            self.a,
+            self.v_a,
+            self.phi,
+            self.v_phi,
+            &input.xi,
+        ) / data::perturbation_lag_coef_a_2(
+            input.dim,
+            input.kappa,
+            self.a,
+            self.v_a,
+            self.phi,
+            self.v_phi,
+            &ZeroFn::default(),
+        )
     }
     pub fn epsilon<V, Xi>(&self, input: &GaussBonnetBInput<V, Xi>) -> f64
     where
@@ -702,18 +724,21 @@ impl<const D: usize> GaussBonnetField<D> {
             &input.v,
             &input.xi,
         );
-        let hubble2 = LatticeSupplier::new(lattice.size, |index, coord| data::hubble2(
-            input.dim,
-            input.kappa,
-            field.a,
-            field.v_a,
-            phi.get(index, coord),
-            v_phi.get(index, coord),
-            phi.laplacian_at(coord, &lattice.spacing),
-            phi.derivative_square_at(coord, &lattice.spacing),
-            &input.v,
-            &input.xi,
-        )).average();
+        let hubble2 = LatticeSupplier::new(lattice.size, |index, coord| {
+            data::hubble2(
+                input.dim,
+                input.kappa,
+                field.a,
+                field.v_a,
+                phi.get(index, coord),
+                v_phi.get(index, coord),
+                phi.laplacian_at(coord, &lattice.spacing),
+                phi.derivative_square_at(coord, &lattice.spacing),
+                &input.v,
+                &input.xi,
+            )
+        })
+        .average();
         self.a = field.v_a;
         self.v_a = field.a * hubble2;
         self.phi.par_for_each_mut(|ptr, index, coord| {
@@ -793,12 +818,21 @@ impl<const D: usize> GaussBonnetField<D> {
             input.kappa,
             self.v_a / self.a,
             phi.as_ref().derivative_square(&lattice.spacing).average(),
-            v_phi.as_ref().map(|f|f * f).average(),
-            phi.as_ref().map(|phi|input.v.value(phi)).average(),
-            phi.as_ref().laplacian(&lattice.spacing).times(phi.as_ref().map(|phi|input.xi.value_d(phi))).average(),
-            phi.as_ref().derivative_square(&lattice.spacing).times(phi.as_ref().map(|phi|input.xi.value_dd(phi))).average(),
-            v_phi.as_ref().times(phi.as_ref().map(|phi|input.xi.value_d(phi))).average(),
-            phi.as_ref().map(|phi|input.xi.value(phi)).average(),
+            v_phi.as_ref().map(|f| f * f).average(),
+            phi.as_ref().map(|phi| input.v.value(phi)).average(),
+            phi.as_ref()
+                .laplacian(&lattice.spacing)
+                .times(phi.as_ref().map(|phi| input.xi.value_d(phi)))
+                .average(),
+            phi.as_ref()
+                .derivative_square(&lattice.spacing)
+                .times(phi.as_ref().map(|phi| input.xi.value_dd(phi)))
+                .average(),
+            v_phi
+                .as_ref()
+                .times(phi.as_ref().map(|phi| input.xi.value_d(phi)))
+                .average(),
+            phi.as_ref().map(|phi| input.xi.value(phi)).average(),
         )
     }
     pub fn zeta_factor(&self) -> f64 {
@@ -840,14 +874,23 @@ impl<const D: usize> GaussBonnetField<D> {
                 input.dim,
                 input.kappa,
                 phi.as_ref().derivative_square(&lattice.spacing).average(),
-                v_phi.as_ref().map(|f|f * f).average(),
-                phi.as_ref().map(|phi|input.v.value(phi)).average(),
-                phi.as_ref().laplacian(&lattice.spacing).times(phi.as_ref().map(|phi|input.xi.value_d(phi))).average(),
-                phi.as_ref().derivative_square(&lattice.spacing).times(phi.as_ref().map(|phi|input.xi.value_dd(phi))).average(),
-                v_phi.as_ref().times(phi.as_ref().map(|phi|input.xi.value_d(phi))).average(),
+                v_phi.as_ref().map(|f| f * f).average(),
+                phi.as_ref().map(|phi| input.v.value(phi)).average(),
+                phi.as_ref()
+                    .laplacian(&lattice.spacing)
+                    .times(phi.as_ref().map(|phi| input.xi.value_d(phi)))
+                    .average(),
+                phi.as_ref()
+                    .derivative_square(&lattice.spacing)
+                    .times(phi.as_ref().map(|phi| input.xi.value_dd(phi)))
+                    .average(),
+                v_phi
+                    .as_ref()
+                    .times(phi.as_ref().map(|phi| input.xi.value_d(phi)))
+                    .average(),
                 // 0.0, // XXX: ignoring spatial dependency of phi
                 // 0.0,
-                phi.as_ref().map(|phi|input.xi.value(phi)).average(),
+                phi.as_ref().map(|phi| input.xi.value(phi)).average(),
                 hubble_initial_guess,
             );
     }

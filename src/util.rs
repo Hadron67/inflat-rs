@@ -177,6 +177,7 @@ where
     if let Ok(file) = File::open(name) {
         Ok(decode_from_std_read(&mut BufReader::new(file), config)?)
     } else if create {
+        println!("[lazy_file_opt] creating file: {}", name);
         let value = creator();
         let file = File::create(name).unwrap();
         encode_into_std_write(&value, &mut BufWriter::new(file), config)?;
@@ -997,6 +998,25 @@ where
         &mut BufReader::new(File::open(file)?),
         config,
     )?)
+}
+
+pub fn int_pow(x: f64, n: i32) -> f64 {
+    if n == 0 {
+        return 1.0;
+    }
+    if n > 0 {
+        let mut result = x;
+        for _ in 1..n {
+            result *= x;
+        }
+        result
+    } else {
+        let mut result = 1.0 / x;
+        for _ in 1..-n {
+            result /= x;
+        }
+        result
+    }
 }
 
 #[cfg(test)]

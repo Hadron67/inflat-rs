@@ -156,8 +156,15 @@ pub trait Lattice<const D: usize, T> {
             field: self,
         }
     }
-    fn times<F>(self, other: F) -> LatticeTimes<D, T, Self, F> where Self: Sized {
-        LatticeTimes { lhs: self, rhs: other, _elem: PhantomData }
+    fn times<F>(self, other: F) -> LatticeTimes<D, T, Self, F>
+    where
+        Self: Sized,
+    {
+        LatticeTimes {
+            lhs: self,
+            rhs: other,
+            _elem: PhantomData,
+        }
     }
     fn subscript(self, index: usize) -> LatticeSubscript<T, Self>
     where
@@ -460,7 +467,8 @@ pub struct LatticeTimes<const D: usize, T, F1, F2> {
     _elem: PhantomData<T>,
 }
 
-impl<const D: usize, T, F1, F2> Lattice<D, T::Output> for LatticeTimes<D, T, F1, F2> where
+impl<const D: usize, T, F1, F2> Lattice<D, T::Output> for LatticeTimes<D, T, F1, F2>
+where
     F1: Lattice<D, T>,
     F2: Lattice<D, T>,
     T: Mul<T>,

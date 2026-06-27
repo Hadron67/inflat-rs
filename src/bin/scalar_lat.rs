@@ -3,16 +3,23 @@ use std::{f64::consts::PI, fmt::Display, fs::create_dir_all, iter::zip, time::Du
 use bincode::{Decode, Encode};
 use inflat::{
     background::{
-        spectrum_k_range_from_background, BackgroundSolver, BackgroundState, BackgroundStateInput, BackgroundStateInputProvider, DefaultPerturbationInitializer, HamitonianSimulator, HorizonSelector, HubbleConstraint, Kappa, PhiD, ScalarPerturbationFactor, ScalarPerturbationPotential, ScaleFactor, ScaleFactorD, SlowrollEpsilon, SlowrollKappa, BINCODE_CONFIG, MPC_HZ
+        BINCODE_CONFIG, BackgroundSolver, BackgroundState, BackgroundStateInput,
+        BackgroundStateInputProvider, DefaultPerturbationInitializer, HamitonianSimulator,
+        HorizonSelector, HubbleConstraint, Kappa, MPC_HZ, PhiD, ScalarPerturbationFactor,
+        ScalarPerturbationPotential, ScaleFactor, ScaleFactorD, SlowrollEpsilon, SlowrollKappa,
+        spectrum_k_range_from_background,
     },
     c2fn::C2Fn,
     lat::{BoxLattice, Lattice, LatticeParam},
     models::QuadraticPotential,
     scalar::{
-        spectrum, spectrum_with_scratch, LatticeInput, LatticeNoiseGenerator as _, LatticeSimulator, LatticeSimulatorCreator, LatticeState, ScalarFieldSimulatorCreator, ScalarFieldState
+        LatticeInput, LatticeNoiseGenerator as _, LatticeSimulator, LatticeSimulatorCreator,
+        LatticeState, ScalarFieldSimulatorCreator, ScalarFieldState, spectrum,
+        spectrum_with_scratch,
     },
     util::{
-        self, lazy_file_opt, limit_length, log_interp, plot_spectrum, Hms, ParamRange, RateLimiter, TimeEstimator, VecN
+        self, Hms, ParamRange, RateLimiter, TimeEstimator, VecN, lazy_file_opt, limit_length,
+        log_interp, plot_spectrum,
     },
 };
 use libm::{cosh, tanh};
@@ -347,7 +354,11 @@ where
                         .y_axis(Axis::new().exponent_format(ExponentFormat::Power))
                         .y_axis2(Axis::new().exponent_format(ExponentFormat::Power))
                         .y_axis3(Axis::new().exponent_format(ExponentFormat::Power))
-                        .y_axis4(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power))
+                        .y_axis4(
+                            Axis::new()
+                                .type_(AxisType::Log)
+                                .exponent_format(ExponentFormat::Power),
+                        )
                         .height(1200),
                 );
                 plot.write_html(&format!("{}/background.lattice.html", out_dir));
@@ -552,7 +563,13 @@ where
     );
     let mut spectrum_plot = Plot::new();
     let k_unit = 0.05 * MPC_HZ / k_star;
-    spectrum_plot.add_trace(Scatter::new((k_range * k_unit).as_logspace().collect(), linear_spectrum.clone()).name("linear"));
+    spectrum_plot.add_trace(
+        Scatter::new(
+            (k_range * k_unit).as_logspace().collect(),
+            linear_spectrum.clone(),
+        )
+        .name("linear"),
+    );
     for (index, lat_param) in zip(0usize.., lattice_in) {
         let lat_in = LatticeInput::<3, BackgroundState>::from_background_and_k_normalized(
             &background,
@@ -581,9 +598,29 @@ where
             k_range,
             &linear_spectrum,
         );
-        spectrum_plot.add_trace(Scatter::new(output.spectrum_k.iter().map(|k|k * k_unit).collect(), output.zeta_spectrum).name(&format!("lattice {}", index)));
+        spectrum_plot.add_trace(
+            Scatter::new(
+                output.spectrum_k.iter().map(|k| k * k_unit).collect(),
+                output.zeta_spectrum,
+            )
+            .name(&format!("lattice {}", index)),
+        );
     }
-    spectrum_plot.set_layout(Layout::new().grid(LayoutGrid::new().columns(1).rows(1)).height(1000).x_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power)).y_axis(Axis::new().type_(AxisType::Log).exponent_format(ExponentFormat::Power)));
+    spectrum_plot.set_layout(
+        Layout::new()
+            .grid(LayoutGrid::new().columns(1).rows(1))
+            .height(1000)
+            .x_axis(
+                Axis::new()
+                    .type_(AxisType::Log)
+                    .exponent_format(ExponentFormat::Power),
+            )
+            .y_axis(
+                Axis::new()
+                    .type_(AxisType::Log)
+                    .exponent_format(ExponentFormat::Power),
+            ),
+    );
     spectrum_plot.write_html(&format!("{}/{}.lattice.combined_spectrums.html", dir, name));
     Ok(())
 }
@@ -748,17 +785,20 @@ pub fn main() {
             17.5,
             1.0,
             ParamRange::new(0.0, 1.0, 1000),
-            &[LatticeIn {
-                size: 64,
-                k: 0.32,
-                subhorizon_tolerance: 1.3,
-                superhorizon_tolerance: 20.0,
-            }, LatticeIn {
-                size: 32,
-                k: 0.32,
-                subhorizon_tolerance: 1.3,
-                superhorizon_tolerance: 20.0,
-            }],
+            &[
+                LatticeIn {
+                    size: 64,
+                    k: 0.32,
+                    subhorizon_tolerance: 1.3,
+                    superhorizon_tolerance: 20.0,
+                },
+                LatticeIn {
+                    size: 32,
+                    k: 0.32,
+                    subhorizon_tolerance: 1.3,
+                    superhorizon_tolerance: 20.0,
+                },
+            ],
         ));
     }
 

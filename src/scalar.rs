@@ -20,8 +20,8 @@ use rustfft::{FftDirection, num_complex::Complex64};
 
 use crate::{
     background::{
-        BINCODE_CONFIG, BackgroundSolver, BackgroundStateInput, Kappa, Phi, PhiD,
-        ScaleFactor, ScaleFactorD, ScaleFactorMut, spectrum_factor,
+        BINCODE_CONFIG, BackgroundSolver, BackgroundStateInput, Kappa, Phi, PhiD, ScaleFactor,
+        ScaleFactorD, ScaleFactorMut, spectrum_factor,
     },
     c2fn::C2Fn,
     fft::DftNDPlan,
@@ -988,7 +988,12 @@ impl<const D: usize, S> LatticeInput<D, S> {
             BINCODE_CONFIG,
             create,
             || {
-                println!("[lattice] input = {{H = {:e}, phi = {:e}, v_phi = {:e}}}", self.state.hubble(input), self.state.phi(input), self.state.v_phi(input));
+                println!(
+                    "[lattice] input = {{H = {:e}, phi = {:e}, v_phi = {:e}}}",
+                    self.state.hubble(input),
+                    self.state.phi(input),
+                    self.state.v_phi(input)
+                );
                 let mut simulator = simulator_creator.create(self.lattice, input);
                 let checkpoint_file_name = format!("{}.checkpoint.bincode", out_file);
                 let mut lattice_state = if let Ok(state) =

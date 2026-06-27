@@ -1,0 +1,292 @@
+\documentclass[reprint, 10pt, amsmath, amssymb, floatfix, aps, prd, superscriptaddress, nofootinbib, nobibnotes,twocolumn]{revtex4-1}
+
+\usepackage{orcidlink}
+\usepackage{acro}
+\usepackage{braket}
+
+\DeclareAcronym{gb}{
+    short = {GB},
+    long = {Gauss-Bonnet},
+}
+\DeclareAcronym{sgb}{
+    short = {SGB},
+    long = {scalar Gauss-Bonnet},
+}
+\DeclareAcronym{twa}{
+    short = {TWA},
+    long = {truncated Wigner approximation},
+}
+\DeclareAcronym{usr}{
+    short = {USR},
+    long = {ultra slow-roll},
+}
+
+\def\dd{{\mathrm{d}}}
+\def\lagd{{\mathcal{L}}}
+
+\begin{document}
+
+\author{Fei-Yu Chen\orcidlink{0000-0002-8674-9316}}
+\email{chenfy@tju.edu.cn}
+\affiliation{Center for Joint Quantum Studies and Department of Physics,
+School of Science, Tianjin University, Tianjin 300350, China}
+
+\author{Jing-Zhi Zhou\orcidlink{0000-0003-2792-3182}}
+\email{zhoujingzhi@tju.edu.cn}
+\affiliation{Center for Joint Quantum Studies and Department of Physics,
+School of Science, Tianjin University, Tianjin 300350, China}
+
+\author{Zhi-Chao Li\orcidlink{0009-0005-7984-2626}}
+\affiliation{Center for Joint Quantum Studies and Department of Physics,
+School of Science, Tianjin University, Tianjin 300350, China}
+
+\author{Di Wu\orcidlink{0000-0001-7309-574X}}
+\affiliation{School of Fundamental Physics and Mathematical Sciences, Hangzhou Institute for Advanced Study, University of Chinese Academy of Sciences, Hangzhou 310024, China}
+
+\begin{abstract}
+	We use lattice method to study inflation in scalar-Gauss-Bonnet gravity theory. We focus on the case of utra-slow-roll with the peak frequency located in the PTA range. For the case we study, we find the lattice results are larger than perturbative results, a difference from Einstein gravity. We find lattice corrections become significant when the peak of primordial curvature spectrum reaches $\sim 10^{-2}$.
+\end{abstract}
+\title{Inflation on the lattice: scalar Gauss-Bonnet single field inflation}
+
+\maketitle
+
+\section{Introduction}
+\label{sec:intro}
+Cosmological inflation is currently a highly successful theory describing the very early evolution of the universe. Within the standard cosmological framework based on FLRW metric, inflationary theory predicts a nearly scale-invariant primordial power spectrum of curvature perturbations, which is consistent with observations on CMB scales. Furthermore, experimental observations have placed strong constraints on the power spectrum parameters at these scales. However, the constraints from experimental observations are much looser on smaller scales. Therefore, to enable experimental data to constrain the inflationary models under study, we require the inflationary theory to generate large curvature perturbations on small scales. On the other hand, primordial curvature perturbations can serve as source terms for higher-order tensor perturbations, generating induced gravitational waves that affect the stochastic gravitational wave background. This provides a potential explanation for the observational data from PTA. In summary, we aim for the inflationary models under investigation to produce large curvature perturbations on small scales.
+
+The calculation of the primordial power spectrum is typically performed at the linear order. Therefore, when curvature perturbations become sufficiently large, higher-order corrections can no longer be neglected and may even lead to the breakdown of perturbation theory. The lattice method offers a potential solution to this issue. The fundamental idea of the lattice method is to discretize spacetime and solve the full cosmological evolution equations, thereby non-perturbatively deriving the primordial power spectrums. Ref.~\cite{Caravano:2024moy} provides a detailed analysis of the single-field ultra-slow-roll (USR) scenario and finds that when the peak of the linear primordial power spectrum reaches $10^{-3} \sim 10^{-2}$, noticeable deviations emerge compared to the results from lattice calculations.
+
+Most single-field inflationary models considered in the literature are based on Einstein gravity. However, Einstein gravity is evidently not a complete theory of gravity, making it meaningful to explore modified theories of gravity. For instance, in the low-energy effective theory of string theory, higher-order curvature correction terms appear in the Lagrangian. The \ac{gb} term, ${\mathcal L}_{\rm GB} = R^2 - 4 R_{\mu\nu}R^{\mu\nu} + R_{\mu\nu\rho\sigma}R^{\mu\nu\rho\sigma}$, is a well-behaved quadratic curvature term because it yields second-order equations of motion. Refs.\cite{Kawai:2021bye,Kawai:2021edk} first investigated an inflationary theory of \ac{sgb} gravity, which involves a coupling term between a scalar field $\phi$ and the \ac{gb} term. This theory features a non-trivial fixed point of $\phi$, near which ultra-slow-roll inflation occurs, amplifying the primordial power spectrum within a certain frequency range. For the parameter set considered in that study, the peak of the primordial power spectrum reaches $10^{-2}$, which already falls within the range $10^{-3} \sim 10^{-2}$ where the linear approximation breaks down, as mentioned earlier. Although this range was originally derived from Einstein gravity, and may not apply to \ac{sgb} gravity, it is still essential to investigate \ac{sgb} gravity and examine the results it yields. Therefore, in this paper, we consider the \ac{sgb} and employ the lattice method to compute the primordial power spectrum, comparing the results with those obtained from perturbation theory.
+
+This paper is organized as follows. In Sec. \ref{sec:gb-gravity} we review the \ac{sgb} gravity theory and the corresponding inflation model. In Sec. \ref{sec:lattice-method} we review the lattice approach to cosmic inflation, specifically, the lattice calculation of primodial scalar power spectrum. In Sec. \ref{sec:results} we present our results and discuss the implifications. We conclude this work in Sec. \ref{sec:conclusion}. We set $c = \hbar = \kappa = 1$ throughout this paper.
+
+\section{SGB inflation theory}
+\label{sec:gb-gravity}
+The Lagrangian of \ac{sgb} gravity theory is given by
+\begin{equation}
+    \mathcal L = \frac{1}{2\kappa}R - \frac12\partial_\mu\phi\partial^\mu\phi - V(\phi) - \frac{\xi(\phi)}{16}\mathcal{L}_{\rm GB},
+\end{equation}
+where $\mathcal{L}_{\rm GB} = R^2 - 4R_{\mu\nu}R^{\mu\nu} + R_{\mu\nu\rho\sigma}R^{\mu\nu\rho\sigma}$, $V(\phi)$ and $\xi(\phi)$ are two functions at our choice. Assuming the background spacetime to be the FLRW one
+\begin{equation}
+    \dd s^2 = -\dd t^2 + a(t)^2(\dd x^2 + \dd y^2 + \dd z^2),
+\end{equation}
+the background equation of motion is given by
+\begin{gather}
+    3H^2 = \frac12 \dot\phi^2 + V(\phi) + \frac32 H^3\xi'(\phi)\dot\phi,\nonumber\\
+    \ddot\phi + 3H\dot\phi + \frac{\partial V_{\rm eff}}{\partial\phi}(\phi, H) = 0,\label{eq:flrw-eom-2}
+\end{gather}
+where $\dot{\phi} = \dd\phi/\dd t$, and the scalar effective potential $V_{\rm eff}$ is given by
+\begin{equation}
+	V_{\rm eff}(\phi, H) = V(\phi) + \frac32 H^2\left(\dot H + H^2\right)\xi(\phi).
+\end{equation}
+The non-trivial fixed point $\phi_\ast$ satisfies
+\begin{equation}
+    V'(\phi) + \frac{\kappa}{6}\xi'(\phi) = 0,
+\end{equation}
+which follows from $\dot H = \dot\phi = 0$.
+
+Following Ref.~\cite{Kawai:2021edk}, we choose $\xi(\phi)$ to be a step-like function
+\begin{equation}
+    \xi(\phi) = \xi_0\tanh[\xi_1(\phi - \phi_c)],
+\end{equation}
+and the scalar potential $V(\phi)$ is chosen to be the natural inflation model
+\begin{equation}
+    V(\phi) = \Lambda^4\left(1 + \cos\frac{\phi}{f}\right),
+\end{equation}
+where $\xi_{0,1}$, $\phi_c$, $\Lambda$, $f$ are parameters, and $\phi_c$ is chosen to be the non-trivial fixed point, \textit{i.e.} $\phi_c = \phi_\ast$. Near the non-trivial fixed point, Eq. \eqref{eq:flrw-eom-2} becomes $\ddot\phi + 3H\dot\phi \approx 0$, which indicates an ultra-slow-roll regime and would results in an enhancement in the curvature power spectrum.
+
+The quadratic action of the curvature perturbation $\zeta$ is given by
+\begin{align}
+    S_\zeta^{(2)} & = \frac12\int\dd t\dd^3x\frac{A_\zeta^2}{a}\left(a^2\dot\zeta^2 - C_\zeta^2\partial_i\zeta\partial^i\zeta\right)\nonumber\\
+    & = \frac12\int\dd\eta\dd^3x A_\zeta^2 \left(\zeta'^2 - C_\zeta^2\partial_i\zeta\partial^i\zeta\right),
+\end{align}
+where ${}'$ denotes derivative with respect to the conformal time $\eta$. Coefficients $C_\zeta$ and $A_\zeta$ can be expressed in terms of background quantities $a$, $\phi$ and their time derivatives. For details, see Refs. \cite{Kawai:2021bye,Kawai:2021edk}. We record the explicit expressions of $C_\zeta$ and $A_\zeta$ in Appendix.
+
+Define Mukhanov-Sasaki variable $\hat u = A_\zeta\zeta$ and perform mode expansion
+\begin{equation}\label{eq:u-mode-expansion}
+	\hat u(\vec x, t) = \int\frac{\dd^3k}{\sqrt{(2\pi)^3}}\left[a_{\vec k} u_k(t) + a_{-\vec k}^\dagger u_k^\ast(t)\right] e^{i\vec k\cdot\vec x},
+\end{equation}
+where $a_k$ are ladder operators obeying $[a_k, a_{k'}^\dagger] = \delta^{(3)}(\vec k - \vec k')$. $u_k$ is mode function, its equation of motion is given by
+\begin{equation}\label{eq:curvature-pert-eom}
+    u_k'' + \left(C_\zeta^2k^2 - \frac{A_\zeta''}{A_\zeta}\right)u_k = 0, \qquad u_k = A_\zeta\zeta_k.
+\end{equation}
+In sub-horizon limit, the initial condition of $\zeta$ is chosen as the Bunch-Davies vacuum, in which case the mode function takes the following asymptotic form
+\begin{equation}\label{eq:scalar-bd-vacuum}
+	u_k^{\rm BD} = \frac{1}{\sqrt{2C_\zeta k}}e^{-iC_\zeta k\eta}.
+\end{equation}
+The curvature power spectrum is given by
+\begin{equation}
+	\mathcal P_\zeta = \frac{\kappa k^3}{2\pi^2}\left|\frac{u_k}{A_\zeta}\right|^2.
+\end{equation}
+In this perturbative approach, we first solve the background equation of motion Eq.\eqref{eq:flrw-eom-2} numerically. Then we solve perturbation equation of motion \eqref{eq:curvature-pert-eom} numerically, by initializing $u_k$ using \eqref{eq:scalar-bd-vacuum} at the time when the mode is deep inside of the Hubble sphere, specifically we require $k / (aH) \sim 10^3$. We then evaluate $u_k$ until the mode exits the Hubble sphere where $k / (aH) \sim 10^{-3}$ and the mode function $\zeta_k$ approaches constant.
+
+\section{Lattice methodology}
+\label{sec:lattice-method}
+To analyse the nonlinear aspects of \ac{usr} in \ac{sgb} inflation theory, we use lattice simulation method of inflation developed in \cite{Caravano:2021pgc,Caravano:2022epk}. In this section, we briefly review this method.
+
+\subsection{Equation of motion}
+We begin by discretizing the space as a cubic box of $N^3$ lattice points, with lattice spacing $\Delta x = L / N$, where $L$ is the physical edge length of the box. The inflaton $\phi$ field is defined by their values on each lattice sites
+\begin{equation}
+	\phi(\vec x, t) \to \phi(\vec n L / N, t),
+\end{equation}
+where $\vec n = (n_x, n_y, n_z)$ is a vector containing the lattice positions. The momentum space is given by the reciprocal lattice
+\begin{equation}
+	\vec k = \frac{2\pi\vec n}{L}.
+\end{equation}
+
+In the lattice method, fields are evolved using classical equation of motion. The full equation of motion of $\phi$ has one extra term compared to \eqref{eq:flrw-eom-2}
+\begin{equation}
+	\ddot\phi + 3H\dot\phi + V_{\rm eff}'(\phi) - \frac{\nabla^2\phi}{a^2} = 0.
+\end{equation}
+We choose the discretized Laplacian to be
+\begin{equation}
+	\nabla^2\phi(\vec n, t) = \frac{1}{\Delta x^2}\sum_j \left[\phi(\vec n + \vec n_j, t) + \phi(\vec n - \vec n_j, t) - 2\phi(\vec n, t)\right],
+\end{equation}
+where $\vec n_i$ is the direction vector at $i$-th coordinate. This gives the modified dispersion relation on lattice
+\begin{equation}
+	\nabla^2 e^{i\vec k\cdot\vec x} = -k_{\rm eff}^2 e^{i\vec k\cdot\vec x},
+\end{equation}
+where
+\begin{equation}\label{eq:k-eff}
+	k_{\rm eff} = \frac{2}{\Delta x}\sqrt{\sum_i\sin^2\frac{k_i\Delta x}{2}} = \frac{2}{\Delta x}\sqrt{\sum_i\sin^2 \frac{\pi i_i}{N}}.
+\end{equation}
+In the continuum limit $k_{\rm eff}$ reduces to $|\vec k|$. This gives the correct expression of momentum magnitude on the lattice and is needed for the correctness of power spectrums in the lattice simulation, as pointed out in Ref.\cite{Caravano:2021pgc}. For example, on the lattice the BD vacuum \eqref{eq:scalar-bd-vacuum} becomes
+\begin{equation}\label{eq:scalar-bd-vacuum-lat}
+	u_k^{\rm BD} \to u_k^{\rm BD, lat} = \frac{1}{\sqrt{2C_\zeta k_{\rm eff}}} e^{-iC_\zeta k_{\rm eff}\eta}.
+\end{equation}
+
+The metric is assumed to be the FLRW metric, \textit{i.e.} we neglect the perturbation of the metric. In inflation model of Einstein gravity, this approximation is valid since the coupling between metric and inflaton is slow-roll suppressed. While for GB gravity, this may not hold. To ensure the validity of our lattice computation, we explicitly compute the perturbations of lapse $N$ and shift $\beta^i$ during our lattice simulation. We found their magnitudes are small ($< 10^{-8}$) when compared to the scale factor, thus neglecting metric perturbation is a good approximation.
+
+\subsection{Discrete and continuum power spectra}
+Before proceeding let us first derive the relation between continuum and discrete power spectra. For any field $f$, we use the following convention for its Fourier transformation $\tilde f$
+\begin{align}
+	\tilde f(\vec k) & = \int\frac{\dd^3x}{\sqrt{(2\pi)^3}} e^{-i\vec k\cdot\vec x}f(\vec x),\\
+	f(\vec x) & = \int\frac{\dd^3k}{\sqrt{(2\pi)^3}} e^{i\vec k\cdot\vec x}\tilde f(\vec x),
+\end{align}
+and the discretize version on the lattice
+\begin{align}
+	\hat{\tilde f}(\vec k) & = \sum_{\vec x} e^{-i\vec k\cdot\vec x}f(\vec x),\\
+	f(\vec x) & = \frac{1}{N^3}\sum_{\vec k} e^{i\vec k\cdot\vec x}\hat{\tilde f}(\vec k),
+\end{align}
+so that we have
+\begin{equation}\label{eq:f-hat-f-relation}
+    \tilde f = \frac{\Delta x^3}{\sqrt{(2\pi)^3}}\hat{\tilde f}.
+\end{equation}
+The spectrum $\Delta_f$ and its dimensionless version $\mathcal P_f$ \footnote{The definitions of $\Delta_f$ and $\mathcal P_f$ are sometimes interchanged in the literature.} is defined by
+\begin{equation}
+	\braket{\tilde f(\vec k_1)\tilde f(\vec k_2)} = \Delta_f(k_1) \delta^{(3)}(\vec k_1 + \vec k_2), \quad \mathcal P_f = \frac{k^3}{2\pi^2}\Delta_f.
+\end{equation}
+It's easy to verify the convention-independent relation
+\begin{equation}
+	\braket{f^2(\vec x)} = \int\dd\ln k \mathcal P_f(k).
+\end{equation}
+On the lattice we are actually working with $\hat{\tilde f}$ and calculating
+\begin{equation}
+	\braket{\hat{\tilde f}(\vec k_1)\hat{\tilde f}(\vec k_2)} = \tilde\Delta_f(k_1)\delta_{\vec k_1 + \vec k_2}.
+\end{equation}
+Using \eqref{eq:f-hat-f-relation} and the lattice momentum space delta function
+\begin{align}
+	\delta^{(3)}(\vec k) & = \int\frac{\dd^3x}{(2\pi)^3}e^{-i\vec k\cdot\vec x}\\
+	& \to \frac{\Delta x^3}{(2\pi)^3}\sum_{\vec x} e^{-i\vec k\cdot\vec x} = \frac{V}{(2\pi)^3}\delta_{\vec k},
+\end{align}
+where $V = L^3 = (N\Delta x)^3$ is the physical volumn of the lattice. We then get the relation
+\begin{equation}
+	\Delta_f(\vec k) = \left(\frac{\Delta x}{N}\right)^3\tilde\Delta_f(\vec k).
+\end{equation}
+So that we finally get
+\begin{equation}\label{eq:lat-spectrum-relation}
+	\mathcal P_f(k) = \frac{k_{\rm eff}^3}{2\pi^2}\left(\frac{\Delta x}{N}\right)^3\tilde\Delta_f(\vec k),
+\end{equation}
+note that we have replaced $k$ with $k_{\rm eff}$.
+
+\subsection{Initial condition}
+The initial fluctuation of $\phi$ in our simulation is crucial for calculating primordial power spectrum. The fluctuation $\delta\phi$ is defined by
+\begin{equation}
+	\delta\phi = \phi - \braket{\phi}_{\rm lat},
+\end{equation}
+where $\braket{.}_{\rm lat}$ denotes average over lattice points. We need to correctly generate $\phi$ and $\dot\phi$ so that the stochastical correlators $\braket{\delta\phi^2}_{\rm lat}$, $\braket{\delta\phi\delta\dot\phi}_{\rm lat}$ and $\braket{\delta\dot\phi^2}_{\rm lat}$ matches the quantum correlators. We then evolve the field using classical equations of motion. At the end of simulation, we calculate the power spectrum using stochastical average
+\begin{equation}
+	\braket{\delta\phi(\vec x)\delta\phi(\vec y)} = \braket{\delta\phi(\vec x)\delta\phi(\vec y)}_{\rm lat}.
+\end{equation}
+This stochastical approach to simulate quantum system is known as \ac{twa}, which remains valid when the occupation numbers are large, or quantum fluctuation is small compared to field magnitude. In the case of inflation should hold.
+
+Perform mode expansion on $\delta\phi$ and discretize it
+\begin{align}
+	\delta\phi(\vec x) & = \int\frac{\dd^3k}{\sqrt{(2\pi)^3}}\left(a_{\vec k} \varphi_k + a_{-\vec k}^\dagger\varphi_k^\ast\right) e^{i\vec k\cdot\vec x},\nonumber\\
+	& \to \frac{1}{\sqrt V}\sum_{\vec k}\left(\hat a_{\vec k}\varphi_k + \hat a_{-\vec k}^\dagger\varphi_k^\ast\right)e^{i\vec k\cdot\vec x}\label{eq:delta-phi-mode-expand-lat},
+\end{align}
+where $\hat a_{\vec k} = \sqrt{(2\pi)^3 / V}a_{\vec k}$ is the discretize ladder operator, satisfying $[\hat a_{\vec k}, \hat a_{\vec k'}^\dagger] = \delta_{\vec k - \vec k'}$. This means we can regard $a_{\vec k}$ as complex Gaussian random numbers with variation 1. It's easy to verify that this produces correct stochastical correlators. We can then generate $a_{\vec k}$ using Box–Muller method as described in Ref.\cite{Caravano:2021pgc}, and compute $\delta\phi$ and $\delta\dot\phi$ using FFT according to \eqref{eq:delta-phi-mode-expand-lat}.
+
+It remains to determine the mode function $\varphi_k$. Lattice simulation is done in spatial flat gauge, where $\delta\phi$ is related to $\zeta$ through the relation $\zeta = -H\delta\phi / \dot\phi$ and
+\begin{equation}
+	\delta\phi = \phi - \braket{\phi},
+\end{equation}
+where $\dot\phi$ should be understood as $\braket{\dot\phi}$. So that
+\begin{equation}
+	\delta\phi = -\frac{\braket{\dot\phi}}{H}\zeta = -\frac{\braket
+	{\dot\phi}}{H A_\zeta}\hat u \equiv -\frac{C_\phi}{a}\hat u,
+\end{equation}
+so we get the mode function
+\begin{equation}
+	\varphi_k = -\frac{C_\phi}{a}\hat u_k.
+\end{equation}
+At the start of simulation we put all modes inside of the horizon, so the the initial condition \eqref{eq:scalar-bd-vacuum-lat} is used.
+
+\subsection{Extract curvature power spectrum}
+To extract curvature power spectrum $\Delta_\zeta$ at the end of lattice simulation, one could use the perturbative relation $\zeta = -H\delta\phi / \braket{\dot\phi}$. However, this does not capture the nonlinear relation between field $\phi$ and $\zeta$. We shall use the method propsed by Ref.\cite{Caravano:2025diq} to compute $\zeta$. This is a nonperturbative approach based on $\delta N$ formalism. At the end of lattice simulation, the effective volumns of every lattice sites have grown larger than the Hubble radius and effectively become separated universes. The field $\zeta$ then measures the relative count of e-folds required for each lattice site to evolve into the state of constant inflaton field.
+
+Thus at the end of lattice simulation, we evolve the fields $a, \phi$ for each lattice sites using the background equation of motion until the value of $\phi$ reaches a destination value $\phi_0$. The value $\phi_0$ is chosen to minimize $V_{\rm eff}$. We then collect the final value of $a$ of each lattice sites into a scalar field $a(\vec x)$ and compute $\zeta$ by
+\begin{equation}
+	\zeta(\vec x) = \ln a(\vec x) - \braket{\ln a(\vec x)}.
+\end{equation}
+We then proceed to calculate $\Delta_\zeta$ and $\mathcal P_\zeta$ using \eqref{eq:lat-spectrum-relation}.
+
+\section{Numeric results}
+\label{sec:results}
+We are now ready to carry out the lattice simulation. We first use the numeric method described in Sec.\ref{sec:gb-gravity} to calculate the perturbative primordial power spectrum, then apply lattice simulation on the frequency range near the peak of the power spectrum. The frequency range of lattice simulation is controlled by lattice size $N$ and physical length $L$. We can get from Eq.\eqref{eq:k-eff} that the minimum and maximum momentum magnitudes are
+\begin{equation}
+	k_{\rm eff,min} \approx \frac{2\pi}{L}, \qquad k_{\rm eff,max} = \frac{2\sqrt3}{\Delta x},
+\end{equation}
+so that $k_{\rm eff,max} / k_{\rm eff,min} = \sqrt3 N / \pi$. The start time of lattice simulation is chosen so that $k_{\rm eff,min} = aH / 1.3$, where all modes are sub-horizon. We then evolve the fields until $k_{\rm eff,max} = 200 aH$, where all modes are super-horizon. We choose lattice size to be $N = 200$, since the equation of motion for \ac{gb} inflation theory is significantly more complicated than Einstein case, larger lattice size is unfeasible in performance.
+
+\begin{table}
+    \caption{\label{tab:lat-sim-params}Parameter values used.}
+	\begin{tabular}{cccc}
+	    \hline
+		$f$ & $\Lambda$ & $\xi_1$ & $\phi_c$ \\
+		7.0 & 0.0065 & 9.6 & 30.0\\
+		\hline
+	\end{tabular}
+\end{table}
+
+We fix the values of parameters $f, \Lambda, \xi_1, \phi_c$ as given in Table.\ref{tab:lat-sim-params} and vary $\xi_0$. We select 14 values in $[1.1331\times 10^7, 1.13412\times 10^7]$ with $i$-th value given by
+\begin{equation}
+	(\xi_0)_i = 1.133 \times 10^7 + a_i \times 10^3,
+\end{equation}
+where
+\begin{equation}
+	a_i = \{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10.5, 11, 11.1, 11.2\}.
+\end{equation}
+We plot 7 primordial spectra in Fig.\ref{fig:primordial-spectra}. We can see that when the peak of $\mathcal P_\zeta$ reaches $\sim 10^{-2}$ the lattice correction becomes significant. We also notices a difference from Einstein gravity studied in Ref.\cite{Caravano:2024moy} that lattice results are larger than perturbative results.
+\begin{figure}
+	\caption{\label{fig:primordial-spectra} Numeric results of primordial spectra. In the upper panel, dashed lines represent perturbative results $\mathcal P_{\zeta,\rm lin}$, solid lines represent lattice results $\mathcal P_{\zeta,\rm lat}$. In the lower panel we plot the relative difference of perturbative and lattice results.}
+	\includegraphics[width=8cm]{fig/plot-gb-primordial-specs.pdf}
+\end{figure}
+
+\section{SIGW Observation constraints}
+\label{sec:observation-constraints}
+
+\section{Conclusions}
+\label{sec:conclusion}
+
+\bibliography{refs}
+
+\appendix
+
+\section{On the irrelavence of metric perturbation}
+
+
+\section{Details of Gauss-Bonnet theory}
+
+
+\end{document}

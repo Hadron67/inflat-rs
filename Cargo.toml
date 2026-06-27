@@ -13,6 +13,7 @@ ndarray-npy = { version = "0.9.1", features = ["compressed_npz"] }
 num-complex = "0.4.6"
 num-traits = "0.2.19"
 plotly = { version = "0.12.1", features = ["plotly_ndarray"] }
+pyo3 = "0.29.0"
 random = "0.14.0"
 rayon = "1.10.0"
 rustfft = "6.2.0"
@@ -51,3 +52,7 @@ path = "src/bin/binytg.rs"
 [[bin]]
 name = "gauss_bonnet"
 path = "src/bin/gauss_bonnet.rs"
+
+[[bin]]
+name = "log_normal"
+path = "src/bin/log_normal.rs"
