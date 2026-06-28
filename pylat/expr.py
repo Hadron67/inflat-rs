@@ -11,6 +11,8 @@ class Expr:
         if isinstance(expr, Expr):
             return expr
         match expr:
+            case str():
+                return Symbol(tuple(['root'] + expr.split('.')))
             case int():
                 return Int(expr)
             case float():
@@ -633,7 +635,7 @@ def _gcd(a: int, b: int) -> int:
 @exprclass
 class Symbol(Expr):
     fully_qualified_name: tuple[str, ...]
-    type: Expr = field(default=ComplexType(), compare=False)
+    type: Expr = field(default=RealType(), compare=False)
     shape: tuple[Expr, ...] | None = field(default=None, compare=False)
 
     def input_form(self) -> str:
@@ -979,6 +981,37 @@ class Slice(Expr):
     @override
     def input_form(self) -> str:
         return f"({self.expr.input_form()} [{self.axis}, {self.index}])"
+
+class AssignExpr:
+    lhs: Expr
+    rhs: Expr
+    type: Expr
+    shape: tuple[Expr, ...] | None
+    op: str
+
+    def __init__(self, lhs: Expr, rhs: Expr, op: str = '') -> None:
+        self.lhs = lhs
+        self.rhs = rhs
+        self.op = op
+        lhs_type = lhs.get_type()
+        rhs_type = rhs.get_type()
+        assert lhs_type.is_subtype(rhs_type), f"cannot assign type {rhs_type} to {lhs_type}"
+        self.type = lhs_type
+
+        lhs_shape = lhs.get_shape()
+        rhs_shape = rhs.get_shape()
+        shape = merge_shape(lhs_shape, rhs_shape)
+        assert shape == lhs_shape, "incompatible shape"
+        self.shape = shape
+
+    def __str__(self) -> str:
+        return f"{self.lhs} {self.op}= {self.rhs}"
+
+    def total_size(self):
+        if self.shape is not None:
+            return Times(self.shape).evaluate()
+        else:
+            return None
 
 def derivative(expr: Expr, var: Expr, default_case_handler: Callable[[Expr, Expr], Expr] | None = None) -> Expr:
     match expr:

@@ -1,10 +1,19 @@
 from enum import IntEnum
 import math
 from abc import abstractmethod
-from dataclasses import dataclass, field
-from typing import override
+from dataclasses import dataclass
+from typing import final, override
 
-from .util import next_unique_name
+from .util import ObjectCounter, StrBiMap, SubExprFnBuilder, next_unique_name
+
+class NameContext:
+    @abstractmethod
+    def get_struct_type_name(self, type: 'StructType') -> str:
+        pass
+
+    @abstractmethod
+    def get_global_name(self, value: 'GlobalValue') -> str:
+        pass
 
 class Type:
     def from_float(self, value: float) -> 'Value':
@@ -13,12 +22,48 @@ class Type:
     def from_int(self, value: int) -> 'Value':
         return self.from_float(float(value))
 
+    def stringify(self, name_context: 'NameContext | None' = None) -> str:
+        return str(self)
+
+    def get_children(self) -> 'list[Type]':
+        return []
+
+class Value:
+    @abstractmethod
+    def get_type(self) -> Type:
+        pass
+
+    @final
+    def stringify(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
+        return self.get_type().stringify(name_context) + ' ' + self.stringify_value(name_context, local_counter)
+
+    @abstractmethod
+    def stringify_value(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
+        return str(self)
+
+    def get_children(self) -> 'list[Value]':
+        return []
+
+def gen_get_children(cls=None, excludes: set[str] | None = None):
+    def wrapper(cls):
+        children_builder = SubExprFnBuilder(Value if issubclass(cls, Value) else Type)
+        get_children = 'get_children'
+        globals = {}
+        source = '\n'.join(children_builder.generate_get_children(cls, get_children, excludes))
+        exec(source, globals=globals)
+        setattr(cls, get_children, globals[get_children])
+        return cls
+
+    if cls is not None:
+        return wrapper(cls)
+    return wrapper
+
 class FloatType(Type):
     @abstractmethod
     def bits(self) -> int:
         pass
 
-@dataclass
+@dataclass(frozen=True)
 class HalfFloatType(FloatType):
     @override
     def from_float(self, value: float) -> 'Value':
@@ -32,7 +77,7 @@ class HalfFloatType(FloatType):
     def bits(self) -> int:
         return 16
 
-@dataclass
+@dataclass(frozen=True)
 class Float32Type(FloatType):
     def __str__(self) -> str:
         return 'float'
@@ -46,7 +91,7 @@ class Float32Type(FloatType):
         # TODO: check range
         return FloatValue(value, self)
 
-@dataclass
+@dataclass(frozen=True)
 class Float64Type(FloatType):
     def __str__(self) -> str:
         return 'double'
@@ -60,7 +105,7 @@ class Float64Type(FloatType):
         # TODO: check range
         return FloatValue(value, self)
 
-@dataclass
+@dataclass(frozen=True)
 class IntType(Type):
     bits: int
     signed: bool
@@ -68,11 +113,25 @@ class IntType(Type):
     def __str__(self) -> str:
         return f'{"i"}{self.bits}'
 
+    @final
     def get_range(self) -> tuple[int, int]:
-        if self.signed:
-            return (-2**(self.bits - 1), 2**(self.bits - 1) - 1)
+        return IntType.get_range_from_data(self.bits, self.signed)
+
+    @staticmethod
+    def get_range_from_data(bits: int, signed: bool):
+        if signed:
+            return (-2**(bits - 1), 2**(bits - 1) - 1)
         else:
-            return (0, 2**self.bits - 1)
+            return (0, 2**bits - 1)
+
+    @staticmethod
+    def get_suitable_type(minv: int, maxv: int):
+        signed = minv < 0
+        bits = 8
+        min, max = IntType.get_range_from_data(bits, signed)
+        while minv < min and maxv > max:
+            bits <<= 1
+        return IntType(bits, signed)
 
     @override
     def from_int(self, value: int) -> 'Value':
@@ -81,19 +140,37 @@ class IntType(Type):
             raise ValueError(f'value {value} out of range for {self}')
         return IntValue(value, self)
 
-@dataclass
+@dataclass(frozen=True)
 class LabelType(Type):
     def __str__(self) -> str:
         return 'label'
 
-@dataclass
+@dataclass(frozen=True)
+@gen_get_children
 class PointerType(Type):
     child: Type
 
     def __str__(self) -> str:
+        return f"*{self.child}"
+
+    def stringify(self, name_context: 'NameContext | None' = None) -> str:
         return 'ptr'
 
-@dataclass
+@dataclass(frozen=True)
+@gen_get_children
+class ArrayType(Type):
+    child: Type
+    length: int
+
+    def __str__(self) -> str:
+        return f"[{self.length} x {self.child}]"
+
+    @override
+    def stringify(self, name_context: 'NameContext | None' = None) -> str:
+        return f"[{self.length} x {self.child.stringify(name_context)}]"
+
+@dataclass(frozen=True)
+@gen_get_children
 class FnType(Type):
     args: tuple[Type, ...]
     return_type: Type
@@ -102,47 +179,77 @@ class FnType(Type):
     def __str__(self) -> str:
         return f'fn({",".join(str(arg) for arg in self.args)}) -> {self.return_type}'
 
+    @override
+    def get_children(self) -> 'list[Type]':
+        ret = list(self.args)
+        ret.append(self.return_type)
+        return ret
+
 @dataclass
 class VoidType(Type):
     def __str__(self) -> str:
         return 'void'
 
-@dataclass
+@gen_get_children
 class StructType(Type):
-    name: str
     fields: tuple[Type, ...]
 
+    def __init__(self, *fields: Type) -> None:
+        self.fields = fields
+
     def __str__(self) -> str:
-        return '%' + self.name
+        return f"struct@{id(self)} {{{", ".join(str(i) for i in self.fields)}}}"
 
-    def write_definition(self) -> list[str]:
-        return [f"%{self.name} = type {{{', '.join(str(i) for i in self.fields)}}}"]
+    def write_definition(self, name_context: 'NameContext') -> list[str]:
+        return [f"%{name_context.get_struct_type_name(self)} = type {{{', '.join(i.stringify(name_context) for i in self.fields)}}}"]
 
-class Value:
-    @abstractmethod
-    def get_type(self) -> Type:
-        pass
+    def __hash__(self) -> int:
+        return object.__hash__(self)
 
-@dataclass
-class RegisterValue(Value):
-    name: str
+    def __eq__(self, value: object, /) -> bool:
+        return self is value
+
+    def stringify(self, name_context: 'NameContext | None' = None) -> str:
+        if name_context is not None:
+            return '%' + name_context.get_struct_type_name(self)
+        else:
+            return str(self)
+
+class LocalValue(Value):
+    def __eq__(self, other) -> bool:
+        return self is other
+
+    def __hash__(self) -> int:
+        return object.__hash__(self)
+
+    @final
+    @override
+    def stringify_value(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
+        assert local_counter is not None
+        return f"%{local_counter.get_id(self)}"
+
+class ArgValue(LocalValue):
     type: Type
+    index: int
 
-    def __str__(self) -> str:
-        return str(self.type) + ' %' + self.name
+    def __init__(self, type: Type, index: int) -> None:
+        self.type = type
+        self.index = index
 
     @override
     def get_type(self) -> Type:
         return self.type
 
-@dataclass
-class ArgValue(RegisterValue):
-    index: int
+    def __str__(self) -> str:
+        return f"{self.type} %{self.index}"
+
+    def __repr__(self) -> str:
+        return f"ArgValue@{id(self)}(type={repr(self.type)}, index={self.index})"
 
 @dataclass
 class VoidValue(Value):
     def __str__(self) -> str:
-        return 'void'
+        return ''
 
     @override
     def get_type(self) -> Type:
@@ -154,11 +261,15 @@ class IntValue(Value):
     type: IntType
 
     def __str__(self) -> str:
-        return str(self.type) + ' ' + str(self.value)
+        return str(self.value)
 
     @override
     def get_type(self) -> Type:
         return self.type
+
+BOOL_TYPE = IntType(1, False)
+BOOL_TRUE = IntValue(1, BOOL_TYPE)
+BOOL_FALSE = IntValue(0, BOOL_TYPE)
 
 @dataclass
 class FloatValue(Value):
@@ -172,65 +283,99 @@ class FloatValue(Value):
     def get_type(self) -> Type:
         return self.type
 
-class Module:
-    globals: 'dict[str, GlobalValue]'
-    struct_types: 'dict[str, StructType]'
+@dataclass
+class AggregateValue(Value):
+    type: Type
+    values: tuple[Value, ...]
+
+    @override
+    def get_type(self) -> Type:
+        return self.type
+
+    @override
+    def stringify_value(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
+        return f"{{{", ".join(v.stringify(name_context, local_counter) for v in self.values)}}}"
+
+class Module(NameContext):
+    _globals: 'StrBiMap[GlobalValue]'
+    _struct_types: 'StrBiMap[StructType]'
 
     def __init__(self) -> None:
-        self.globals = {}
-        self.struct_types = {}
+        self._globals = StrBiMap()
+        self._struct_types = StrBiMap()
 
-    def next_unique_global_name(self, prefix: str='') -> str:
-        i = 0
-        while True:
-            name = prefix + str(i)
-            if name not in self.globals:
-                return name
-            i += 1
+    def add_recursively(self, types: list[Type] | None = None, values: 'list[Value] | None' = None):
+        todo_values: list[Value] = []
+        todo_types: list[Type] = []
+        if types is not None:
+            todo_types.extend(types)
+        if values is not None:
+            todo_values.extend(values)
 
-    def next_unique_type_name(self, prefix: str = '') -> str:
-        i = 0
-        while True:
-            name = prefix + str(i)
-            if name not in self.struct_types:
-                return name
-            i += 1
+        while len(todo_values) > 0:
+            value = todo_values.pop()
+            if isinstance(value, GlobalValue):
+                if self._globals.has_value(value):
+                    continue
+                name = value.get_required_name()
+                assert name is None or not self._globals.has_key(name)
+                self._add_global(value, name)
+            todo_values.extend(value.get_children())
+            todo_types.append(value.get_type())
 
-    def add_global(self, value: 'GlobalValue'):
-        if value.name not in self.globals:
-            self.globals[value.name] = value
+        while len(todo_types) > 0:
+            type = todo_types.pop()
+            if isinstance(type, StructType):
+                if self._struct_types.has_value(type):
+                    continue
+                self._add_struct_type(type)
+            todo_types.extend(type.get_children())
 
-    def add_struct_type(self, name_prefix: str, fields: tuple[Type, ...]) -> StructType:
-        ret = StructType(self.next_unique_type_name(name_prefix), fields)
-        self.struct_types[ret.name] = ret
-        return ret
+    @override
+    def get_global_name(self, value: 'GlobalValue') -> str:
+        return self._globals.get_key(value)
 
-    def add_function(self, name_prefix: str = 'fn.') -> 'Function':
-        ret = Function(self.next_unique_global_name(name_prefix))
-        self.globals[ret.name] = ret
-        return ret
+    @override
+    def get_struct_type_name(self, type: 'StructType') -> str:
+        return self._struct_types.get_key(type)
+
+    def _add_global(self, value: 'GlobalValue', name_prefix: str | None = None):
+        if name_prefix is None:
+            name_prefix = 'global'
+        self._globals.add(self._globals.next_unique_name(name_prefix), value)
+
+    def _add_struct_type(self, type: StructType, name_prefix: str | None = None):
+        if name_prefix is None:
+            name_prefix = 'struct'
+        self._struct_types.add(self._globals.next_unique_name(name_prefix), type)
 
     def write(self) -> list[str]:
         ret: list[str] = []
-        for type in self.struct_types.values():
-            ret.extend(type.write_definition())
-        for value in self.globals.values():
-            ret.extend(value.write_definition())
+        for type in self._struct_types.values():
+            ret.extend(type.write_definition(self))
+        for value in self._globals.values():
+            ret.extend(value.write_definition(self))
         return ret
 
-@dataclass
 class GlobalValue(Value):
-    name: str
-    internal: bool
+    def __eq__(self, value: object, /) -> bool:
+        return self is value
 
-    def __str__(self) -> str:
-        return '@' + self.name
+    def __hash__(self) -> int:
+        return object.__hash__(self)
 
     @abstractmethod
-    def write_definition(self) -> list[str]:
+    def write_definition(self, name_context: NameContext) -> list[str]:
         pass
 
-@dataclass
+    @override
+    @final
+    def stringify_value(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue] | None = None) -> str:
+        return '@' + name_context.get_global_name(self)
+
+    def get_required_name(self) -> str | None:
+        return None
+
 class GlobalDefineValue(GlobalValue):
     value: Value
     is_const: bool = True
@@ -238,7 +383,7 @@ class GlobalDefineValue(GlobalValue):
     is_unnamed_addr: bool = True
 
     @override
-    def write_definition(self) -> list[str]:
+    def write_definition(self, name_context: NameContext) -> list[str]:
         flags: list[str] = []
         if self.is_private:
             flags.append('private')
@@ -246,10 +391,12 @@ class GlobalDefineValue(GlobalValue):
             flags.append('unnamed_addr')
         if self.is_const:
             flags.append('constant')
-        return [f'@{self.name} = {' '.join(flags)}{self.value}']
+        return [f'@{name_context.get_global_name(self)} = {' '.join(flags)}{self.value} {self.value.stringify(name_context)}']
 
+@gen_get_children
 class DeclareFunction(GlobalValue):
     type: FnType
+    name: str
 
     def __init__(self, name: str, type: FnType, internal: bool = False):
         self.name = name
@@ -259,14 +406,20 @@ class DeclareFunction(GlobalValue):
     def get_type(self) -> Type:
         return self.type
 
-    @override
-    def write_definition(self) -> list[str]:
+    def write_args(self, name_context: NameContext) -> list[str]:
         args: list[str] = []
         for arg in self.type.args:
-            args.append(str(arg))
+            args.append(arg.stringify(name_context))
         if self.type.varargs:
             args.append('...')
-        return [f"declare {self.type.return_type} @{self.name}({', '.join(args)})"]
+        return args
+
+    @override
+    def write_definition(self, name_context: NameContext) -> list[str]:
+        return [f"declare {self.type.return_type.stringify(name_context)} @{self.name}({', '.join(self.write_args(name_context))})"]
+
+    def get_required_name(self) -> str | None:
+        return self.name
 
 class FunctionState(IntEnum):
     BUILDING_ARGS = 0
@@ -275,33 +428,43 @@ class FunctionState(IntEnum):
     FINISHED = 3
 
 class Function(GlobalValue):
-    blocks: 'list[BasicBlock]'
-    _args: list[RegisterValue]
+    name: str | None
+    _entry: 'BasicBlock'
+    _args: list[ArgValue]
 
     _used_names: set[str] = set()
     _type: FnType | None
 
-    def __init__(self, name: str, internal: bool = False) -> None:
+    def __init__(self, name: str | None = None) -> None:
         self.name = name
-        self.blocks = []
+        self._entry = BasicBlock()
         self._args = []
-        self.type = None
+        self._type = None
 
         self._used_names = set()
 
-        self.internal = internal
-
-    def __str__(self) -> str:
-        return '@' + self.name
+    @property
+    def entry(self):
+        return self._entry
 
     @override
-    def write_definition(self) -> list[str]:
-        assert self.type is not None
+    def write_definition(self, name_context: NameContext) -> list[str]:
+        assert self._type is not None
         ret: list[str] = []
-        ret.append(f'define {'internal ' if self.internal else ''}{self.type.return_type} @{self.name}({', '.join(str(i) for i in self._args)}) {{')
-        for block in self.blocks:
-            ret.append(block.name + ':')
-            for line in block.write():
+        local_counter: ObjectCounter[LocalValue] = ObjectCounter()
+        ret.append(f'define {'internal ' if self.name is None else ''}{self._type.return_type.stringify(name_context)} @{name_context.get_global_name(self)}({', '.join(i.stringify(name_context, local_counter) for i in self._args)}) {{')
+
+        blocks = self._entry.collect_blocks()
+
+        # allocate the indices first, as required by llvm ir
+        for block in blocks:
+            local_counter.get_id(block)
+            for inst in block.insts:
+                local_counter.get_id(inst)
+
+        for block in blocks:
+            ret.append(str(local_counter.get_id(block)) + ':')
+            for line in block.write(name_context, local_counter):
                 ret.append('    ' + line)
         ret.append('}')
         return ret
@@ -311,140 +474,135 @@ class Function(GlobalValue):
 
     @override
     def get_type(self) -> Type:
-        assert self.type is not None
-        return self.type
+        assert self._type is not None
+        return PointerType(self._type)
 
     def add_arg(self, type: Type, name_prefix: str | None = None) -> ArgValue:
         assert self._type is None
-        ret = ArgValue(self.next_unique_name(name_prefix if name_prefix is not None else 'arg.'), type, len(self._args))
+        ret = ArgValue(type, len(self._args))
         self._args.append(ret)
         return ret
+
+    def get_arg(self, index: int) -> ArgValue:
+        return self._args[index]
 
     def set_return_type(self, type: Type):
         assert self._type is None
         self._type = FnType(tuple(i.type for i in self._args), type)
 
-    def add_block(self, name_prefix: str | None = None) -> 'BasicBlockBuilder':
-        ret = BasicBlock(self.next_unique_name(name_prefix if name_prefix is not None else 'label.'))
-        self.blocks.append(ret)
-        return BasicBlockBuilder(self, ret)
+    @override
+    def get_children(self) -> list[Value]:
+        assert self._type is not None
+        ret: list[Value] = []
+        for b in self._entry.collect_blocks():
+            ret.extend(b.get_children())
+        return ret
 
-class Inst:
+    def get_required_name(self) -> str | None:
+        return self.name
+
+class Inst(LocalValue):
     @abstractmethod
-    def get_type(self) -> Type:
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
         pass
 
-class BasicBlock(Value):
-    name: str
-    insts: list[tuple[RegisterValue | None, Inst]]
+    def try_evaluate(self) -> Value | None:
+        return None
 
-    def __init__(self, name: str) -> None:
-        self.name = name
+@gen_get_children
+class BasicBlock(LocalValue):
+    insts: list[Inst]
+
+    def __init__(self) -> None:
         self.insts = []
 
-    def write(self) -> list[str]:
+    @final
+    def write(self, name_context: NameContext, inst_counter: ObjectCounter[LocalValue]) -> list[str]:
         ret: list[str] = []
-        for value, inst in self.insts:
-            if value is None:
-                ret.append(str(inst))
+        for inst in self.insts:
+            if inst.get_type() == VoidType():
+                ret.append(inst.stringify_inst(name_context, inst_counter))
             else:
-                ret.append(f"%{value.name} = {inst}")
+                ret.append(f"%{inst_counter.get_id(inst)} = {inst.stringify_inst(name_context, inst_counter)}")
+        return ret
+
+    def collect_blocks(self):
+        ret: list[BasicBlock] = []
+        seen_blocks: set[BasicBlock] = set()
+        todo: list[BasicBlock] = [self]
+        while len(todo) > 0:
+            item = todo.pop()
+            if item in seen_blocks:
+                continue
+            seen_blocks.add(item)
+            ret.append(item)
+            children = item.get_children()
+            children.reverse()
+            todo.extend(i for i in children if isinstance(i, BasicBlock))
         return ret
 
     @override
     def get_type(self) -> Type:
         return LabelType()
 
-    def __str__(self) -> str:
-        return 'label %' + self.name
+    # build methods
 
-@dataclass
-class BasicBlockBuilder:
-    fn: Function
-    block: BasicBlock
+    def emit(self, inst: Inst) -> Value:
+        value = inst.try_evaluate()
+        if value is not None:
+            return value
+        self.insts.append(inst)
+        return inst
 
-    def emit(self, inst: Inst, reg_name: str | None = None) -> Value:
-        type = inst.get_type()
-        match type:
-            case VoidType():
-                self.block.insts.append((None, inst))
-                return VoidValue()
-            case _:
-                value = RegisterValue(self.fn.next_unique_name(reg_name if reg_name is not None else 'reg.'), type)
-                self.block.insts.append((value, inst))
-                return value
-
-    def add(self, lhs: Value, rhs: Value, reg_name: str | None = None) -> Value:
-        if isinstance(lhs, IntValue) and isinstance(rhs, IntValue):
-            assert lhs.type == rhs.type
-            return IntValue(lhs.value + rhs.value, lhs.type)
-        if isinstance(lhs, FloatValue) and isinstance(rhs, FloatValue):
-            return FloatValue(lhs.value + rhs.value, lhs.type)
-
+    def add(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
             case IntType():
                 if isinstance(rhs, IntValue) and rhs.value < 0:
-                    return self.emit(Sub(lhs, IntValue(-rhs.value, rhs.type)), reg_name)
-                return self.emit(Add(lhs, rhs), reg_name)
+                    return self.emit(Sub(lhs, IntValue(-rhs.value, rhs.type)))
+                return self.emit(Add(lhs, rhs))
             case FloatType():
-                return self.emit(FAdd(lhs, rhs), reg_name)
+                return self.emit(FAdd(lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
-    def sub(self, lhs: Value, rhs: Value, reg_name: str | None = None) -> Value:
+    def sub(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(Sub(lhs, rhs), reg_name)
+                return self.emit(Sub(lhs, rhs))
             case FloatType():
-                return self.emit(FSub(lhs, rhs), reg_name)
+                return self.emit(FSub(lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
-    def mul(self, lhs: Value, rhs: Value, reg_name: str | None = None) -> Value:
-        if isinstance(lhs, IntValue) and isinstance(rhs, IntValue):
-            assert lhs.type == rhs.type
-            return IntValue(lhs.value * rhs.value, lhs.type)
-        if isinstance(lhs, FloatValue) and isinstance(rhs, FloatValue):
-            return FloatValue(lhs.value * rhs.value, lhs.type)
-
+    def mul(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(Mul(lhs, rhs), reg_name)
+                return self.emit(Mul(lhs, rhs))
             case FloatType():
-                return self.emit(FMul(lhs, rhs), reg_name)
+                return self.emit(FMul(lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
-    def div(self, lhs: Value, rhs: Value, reg_name: str | None = None) -> Value:
-        if isinstance(lhs, IntValue) and isinstance(rhs, IntValue):
-            return IntValue(lhs.value // rhs.value, lhs.type)
-        if isinstance(lhs, FloatValue) and isinstance(rhs, FloatValue):
-            return FloatValue(lhs.value / rhs.value, lhs.type)
-
+    def div(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(Div(lhs, rhs), reg_name)
+                return self.emit(Div(lhs, rhs))
             case FloatType():
-                return self.emit(FDiv(lhs, rhs), reg_name)
+                return self.emit(FDiv(lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
-    def rem(self, lhs: Value, rhs: Value, reg_name: str | None = None) -> Value:
-        if isinstance(lhs, IntValue) and isinstance(rhs, IntValue):
-            return IntValue(lhs.value % rhs.value, lhs.type)
-        if isinstance(lhs, FloatValue) and isinstance(rhs, FloatValue):
-            return FloatValue(lhs.value % rhs.value, lhs.type)
-
+    def rem(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(Rem(lhs, rhs), reg_name)
+                return self.emit(Rem(lhs, rhs))
             case FloatType():
-                return self.emit(FRem(lhs, rhs), reg_name)
+                return self.emit(FRem(lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
-    def load(self, ptr: Value, reg_name: str | None = None) -> Value:
-        return self.emit(Load(ptr), reg_name)
+    def load(self, ptr: Value) -> Value:
+        return self.emit(Load(ptr))
 
     def store(self, ptr: Value, value: Value):
         self.emit(Store(ptr, value))
@@ -452,7 +610,16 @@ class BasicBlockBuilder:
     def ret(self, value: Value | None = None):
         self.emit(Ret(value if value is not None else VoidValue()))
 
-    def coerce(self, value: Value, type: Type, reg_name: str | None = None) -> Value:
+    def extract_value(self, value: Value, *indices: int):
+        return self.emit(ExtractValue(value, indices))
+
+    def fneg(self, value: Value):
+        return self.emit(FNeg(value))
+
+    def int_to_float(self, value: Value, float_type: FloatType):
+        return self.emit(IntToFloat(value, float_type))
+
+    def coerce(self, value: Value, type: Type) -> Value:
         value_type = value.get_type()
         if value_type == type:
             return value
@@ -461,24 +628,24 @@ class BasicBlockBuilder:
                 if value_type.bits() > type.bits():
                     if isinstance(value, FloatValue):
                         return FloatValue(value.value, type)
-                    return self.emit(FloatTrunc(value, type), reg_name)
+                    return self.emit(FloatTrunc(value, type))
                 else:
-                    return self.emit(FloatExt(value, type), reg_name)
+                    return self.emit(FloatExt(value, type))
             if isinstance(type, IntType):
-                return self.emit(FloatToInt(value, type), reg_name)
+                return self.emit(FloatToInt(value, type) if type.signed else FloatToUInt(value, type))
         if isinstance(value_type, IntType):
             if isinstance(type, FloatType):
-                return self.emit(IntToFloat(value, type), reg_name)
+                return self.emit(IntToFloat(value, type) if value_type.signed else UIntToFloat(value, type))
             if isinstance(type, IntType):
                 if value_type.bits > type.bits:
-                    return self.emit(IntTrunc(value, type), reg_name)
-                return self.emit(IntExt(value, type), reg_name)
+                    return self.emit(IntTrunc(value, type))
+                return self.emit(IntExt(value, type) if type.signed else UIntExt(value, type))
         raise ValueError(f"Cannot coerce {value_type} to {type}")
 
-    def get_array_element_ptr(self, array: Value, index: Value, reg_name: str | None = None) -> Value:
+    def get_array_element_ptr(self, array: Value, index: Value) -> Value:
         assert isinstance(array.get_type(), PointerType)
         assert isinstance(index.get_type(), IntType)
-        return self.emit(GetElementPtr(array, (index, )), reg_name)
+        return self.emit(GetElementPtr(array, (index, )))
 
     def sqrt(self, value: Value, reg_name: str | None = None) -> Value:
         match value:
@@ -486,82 +653,112 @@ class BasicBlockBuilder:
                 return FloatValue(math.sqrt(fv), type)
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(SQRT_F32, (value, )), reg_name)
+                return self.emit(Call(SQRT_F32, (value, )))
             case Float64Type():
-                return self.emit(Call(SQRT_F64, (value, )), reg_name)
+                return self.emit(Call(SQRT_F64, (value, )))
             case _:
                 raise TypeError(f"Cannot take sqrt of {value.get_type()}")
 
     def pow(self, value: Value, exponent: Value, reg_name: str | None = None) -> Value:
-        if isinstance(value, FloatValue) and isinstance(exponent, FloatValue):
-            return FloatValue(math.pow(value.value, exponent.value), value.type)
-
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(POW_F32, (value, exponent)), reg_name)
+                return self.emit(Call(POW_F32, (value, exponent)))
             case Float64Type():
-                return self.emit(Call(POW_F64, (value, exponent)), reg_name)
+                return self.emit(Call(POW_F64, (value, exponent)))
             case _:
                 raise TypeError(f"Cannot take pow of {value.get_type()}")
 
     def exp(self, value: Value, reg_name: str | None = None) -> Value:
-        if isinstance(value, FloatValue):
-            return FloatValue(math.exp(value.value), value.type)
-
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(EXP_F32, (value, )), reg_name)
+                return self.emit(Call(EXP_F32, (value, )))
             case Float64Type():
-                return self.emit(Call(EXP_F64, (value, )), reg_name)
+                return self.emit(Call(EXP_F64, (value, )))
             case _:
                 raise TypeError(f"Cannot take exp of {value.get_type()}")
 
     def sin(self, value: Value, reg_name: str | None = None) -> Value:
-        if isinstance(value, FloatValue):
-            return FloatValue(math.sin(value.value), value.type)
-
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(SIN_F32, (value, )), reg_name)
+                return self.emit(Call(SIN_F32, (value, )))
             case Float64Type():
-                return self.emit(Call(SIN_F64, (value, )), reg_name)
+                return self.emit(Call(SIN_F64, (value, )))
             case _:
                 raise TypeError(f"Cannot take sin of {value.get_type()}")
 
-    def cos(self, value: Value, reg_name: str | None = None) -> Value:
-        if isinstance(value, FloatValue):
-            return FloatValue(math.cos(value.value), value.type)
-
+    def cos(self, value: Value) -> Value:
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(COS_F32, (value, )), reg_name)
+                return self.emit(Call(COS_F32, (value, )))
             case Float64Type():
-                return self.emit(Call(COS_F64, (value, )), reg_name)
+                return self.emit(Call(COS_F64, (value, )))
             case _:
                 raise TypeError(f"Cannot take cos of {value.get_type()}")
 
-    def ln(self, value: Value, reg_name: str | None = None) -> Value:
-        if isinstance(value, FloatValue):
-            return FloatValue(math.log(value.value), value.type)
-
+    def ln(self, value: Value) -> Value:
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(LN_F32, (value, )), reg_name)
+                return self.emit(Call(LN_F32, (value, )))
             case Float64Type():
-                return self.emit(Call(LN_F64, (value, )), reg_name)
+                return self.emit(Call(LN_F64, (value, )))
             case _:
                 raise TypeError(f"Cannot take ln of {value.get_type()}")
 
-@dataclass
+@gen_get_children
+class Unary(Inst):
+    child: Value
+
+    def __init__(self, child: Value) -> None:
+        self.child = child
+
+    @abstractmethod
+    def _check(self):
+        pass
+
+    @abstractmethod
+    def head_name(self) -> str:
+        pass
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f"{self.head_name()} {self.child.stringify(name_context, local_counter)}"
+
+    def get_type(self) -> Type:
+        return self.child.get_type()
+
+class FNeg(Unary):
+    @override
+    def head_name(self) -> str:
+        return "fneg"
+
+    @override
+    def _check(self):
+        type = self.child.get_type()
+        assert isinstance(type, FloatType), f"float type expected, got {type}"
+
+    def try_evaluate(self) -> Value | None:
+        match self.child:
+            case FloatValue(value, t):
+                return FloatValue(-value, t)
+        return None
+
+@gen_get_children
 class Binary(Inst):
     lhs: Value
     rhs: Value
+    type: Type
 
-    def __post_init__(self) -> None:
-        assert self.lhs.get_type() == self.rhs.get_type()
+    def __init__(self, lhs: Value, rhs: Value) -> None:
+        self.lhs = lhs
+        self.rhs = rhs
+        lhs_type = lhs.get_type()
+        rhs_type = rhs.get_type()
+        assert lhs_type == rhs_type, f"incompatible types {lhs_type} and {rhs_type}"
+        self.type = lhs_type
 
-    def __str__(self) -> str:
-        return f'{self.head_name()} {self.lhs.get_type()} {self.lhs}, {self.rhs}'
+    @abstractmethod
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'{self.head_name()} {self.type} {self.lhs.stringify_value(name_context, local_counter)}, {self.rhs.stringify_value(name_context, local_counter)}'
 
     @override
     def get_type(self) -> Type:
@@ -571,210 +768,301 @@ class Binary(Inst):
     def head_name(self) -> str:
         pass
 
-@dataclass
 class Add(Binary):
     @override
     def head_name(self) -> str:
         return 'add'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a + b, t)
+        return None
+
 class FAdd(Binary):
     @override
     def head_name(self) -> str:
         return 'fadd'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case FloatValue(a, t), FloatValue(b, _):
+                return FloatValue(a + b, t)
+            case FloatValue(0, t), _:
+                return self.rhs
+            case _, FloatValue(0, t):
+                return self.lhs
+        return None
+
 class Sub(Binary):
     @override
     def head_name(self) -> str:
         return 'sub'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a - b, t)
+        return None
+
 class Mul(Binary):
     @override
     def head_name(self) -> str:
         return 'mul'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a * b, t)
+        return None
+
 class FMul(Binary):
     @override
     def head_name(self) -> str:
         return 'fmul'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case FloatValue(a, t), FloatValue(b, _):
+                return FloatValue(a * b, t)
+            case FloatValue(0, t), _:
+                return FloatValue(0, t)
+            case _, FloatValue(0, t):
+                return FloatValue(0, t)
+        return None
+
 class FSub(Binary):
     @override
     def head_name(self) -> str:
         return 'fsub'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case FloatValue(a, t), FloatValue(b, _):
+                return FloatValue(a - b, t)
+            case _, FloatValue(0, _):
+                return self.lhs
+        return None
+
 class Rem(Binary):
     @override
     def head_name(self) -> str:
         return 'rem'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a % b, t)
+        return None
+
 class FRem(Binary):
     @override
     def head_name(self) -> str:
         return 'frem'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case FloatValue(a, t), FloatValue(b, _):
+                return FloatValue(math.fmod(a, b), t)
+        return None
+
 class Div(Binary):
     @override
     def head_name(self) -> str:
         return 'div'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a // b, t)
+        return None
+
 class FDiv(Binary):
     @override
     def head_name(self) -> str:
         return 'fdiv'
 
-@dataclass
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case FloatValue(a, t), FloatValue(b, _):
+                return FloatValue(a / b, t)
+        return None
+
+@gen_get_children
 class Load(Inst):
     ptr: Value
-    type: Type = field(init=False, compare=False)
+    type: Type
 
-    def __post_init__(self):
-        type = self.ptr.get_type()
+    def __init__(self, ptr: Value):
+        self.ptr = ptr
+        type = ptr.get_type()
         assert isinstance(type, PointerType), f"pointer type expected, got {type}"
-        self.type = type
-
-    @override
-    def get_type(self) -> Type:
-        return self.type
-
-    def __str__(self) -> str:
-        return f'load {self.type}, {self.ptr}'
-
-@dataclass
-class FloatExt(Inst):
-    value: Value
-    type: FloatType
-
-    @override
-    def get_type(self) -> Type:
-        return self.type
-
-    def __str__(self) -> str:
-        return f'fpext {self.type} {self.value} to {self.type}'
-
-@dataclass
-class FloatTrunc(Inst):
-    value: Value
-    type: FloatType
-
-    @override
-    def get_type(self) -> Type:
-        return self.type
-
-    def __str__(self) -> str:
-        return f'fptrunc {self.type} {self.value} to {self.type}'
-
-@dataclass
-class FloatToInt(Inst):
-    value: Value
-    type: IntType
-
-    @override
-    def get_type(self) -> Type:
-        return self.type
-
-    def __str__(self) -> str:
-        return f'fpto{'s' if self.type.signed else 'u'}i {self.type} {self.value} to {self.type}'
-
-@dataclass
-class IntToFloat(Inst):
-    value: Value
-    type: FloatType
-
-    @override
-    def get_type(self) -> Type:
-        return self.type
-
-    def __str__(self) -> str:
-        type = self.value.get_type()
-        assert isinstance(type, IntType)
-        return f'fpto{'u' if type.signed else 's'}i {type} {self.value} to {self.type}'
-
-@dataclass
-class IntTrunc(Inst):
-    value: Value
-    type: IntType
-
-    @override
-    def get_type(self) -> Type:
-        return self.type
-
-    def __str__(self) -> str:
-        type = self.value.get_type()
-        assert isinstance(type, IntType)
-        return f'trunc {type} {self.value} to {self.type}'
-
-@dataclass
-class IntExt(Inst):
-    value: Value
-    type: IntType
-
-    @override
-    def get_type(self) -> Type:
-        return self.type
-
-    def __str__(self) -> str:
-        type = self.value.get_type()
-        assert isinstance(type, IntType)
-        return f'{'s' if self.type.signed else 'z'}ext {type} {self.value} to {self.type}'
-
-@dataclass
-class GetElementPtr(Inst):
-    ptr: Value
-    indices: tuple[Value, ...]
-    type: Type = field(init=False)
-
-    def __post_init__(self):
-        type = self.ptr.get_type()
-        assert isinstance(type, PointerType)
         self.type = type.child
 
     @override
     def get_type(self) -> Type:
-        return self.ptr.get_type()
+        return self.type
 
-    def __str__(self) -> str:
-        return f'getelementptr inbounds {type} {self.ptr}, {", ".join(str(i) for i in self.indices)}'
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'load {self.type.stringify(name_context)}, {self.ptr.stringify(name_context, local_counter)}'
 
-@dataclass
-class Call(Inst):
-    func: Value
-    args: tuple[Value, ...]
-    type: Type = field(init=False)
+@gen_get_children
+class ConversionInst[T: Type](Inst):
+    value: Value
+    type: T
 
-    def __post_init__(self):
-        fn = self.func.get_type()
-        if not isinstance(fn, FnType):
-            raise TypeError(f'expected function type, got {fn}')
-        if len(self.args) != len(fn.args):
-            raise TypeError(f'expected {len(fn.args)} arguments, got {len(self.args)}')
-        for arg, expected in zip(self.args, fn.args):
-            if arg.get_type() != expected:
-                raise TypeError(f'expected {expected}, got {arg.get_type()}')
-        self.type = fn.return_type
+    def __init__(self, value: Value, type: T) -> None:
+        self.value = value
+        self.type = type
+
+    @abstractmethod
+    def head_name(self) -> str:
+        pass
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'{self.head_name()} {self.value.stringify(name_context, local_counter)} to {self.type.stringify(name_context)}'
 
     @override
     def get_type(self) -> Type:
         return self.type
 
-    def __str__(self) -> str:
-        return f'call {self.type} {self.func}({", ".join(str(arg) for arg in self.args)})'
+class FloatExt(ConversionInst[FloatType]):
+    @override
+    def head_name(self) -> str:
+        return 'fpext'
 
-@dataclass
+class FloatTrunc(ConversionInst[FloatType]):
+    def head_name(self) -> str:
+        return 'fptrunc'
+
+class FloatToInt(ConversionInst[IntType]):
+    @override
+    def head_name(self) -> str:
+        return 'fptosi'
+
+class FloatToUInt(ConversionInst[IntType]):
+    @override
+    def head_name(self) -> str:
+        return 'fptoui'
+
+class IntToFloat(ConversionInst[FloatType]):
+    @override
+    def head_name(self) -> str:
+        return 'fptosi'
+
+    def try_evaluate(self) -> Value | None:
+        if isinstance(self.value, IntValue):
+            return FloatValue(float(self.value.value), self.type)
+        return None
+
+class UIntToFloat(ConversionInst[FloatType]):
+    @override
+    def head_name(self) -> str:
+        return 'fptoui'
+
+    def try_evaluate(self) -> Value | None:
+        if isinstance(self.value, IntValue):
+            return FloatValue(float(self.value.value), self.type)
+        return None
+
+class IntTrunc(ConversionInst[IntType]):
+    @override
+    def head_name(self) -> str:
+        return 'trunc'
+
+class IntExt(ConversionInst[IntType]):
+    @override
+    def head_name(self) -> str:
+        return 'sext'
+
+class UIntExt(ConversionInst[IntType]):
+    @override
+    def head_name(self) -> str:
+        return 'zext'
+
+@gen_get_children
+class GetElementPtr(Inst):
+    ptr: Value
+    indices: tuple[Value, ...]
+    type: PointerType
+
+    def __init__(self, ptr: Value, indices: tuple[Value, ...]):
+        self.ptr = ptr
+        self.indices = indices
+        type = self.ptr.get_type()
+        assert isinstance(type, PointerType), "expected pointer type"
+        type = type.child
+        i0 = indices[0]
+        i0_type = i0.get_type()
+        assert isinstance(i0_type, IntType) and i0_type.bits == 64, f"i64 is required for array subscripts, got {i0_type}"
+        for i in indices[1:]:
+            match type:
+                case StructType():
+                    assert isinstance(i, IntValue) and i.type.bits == 32, f"i32 constant is required for struct index, got {i}"
+                    assert i.value < len(type.fields), f"struct index {i.value} is out of bounds for type {type}"
+                    type = type.fields[i.value]
+                case ArrayType():
+                    i_type = i.get_type()
+                    assert isinstance(i_type, IntType) and i_type.bits >= 32, f"i32 or i64 is required for array index, got {i_type}"
+                    type = type.child
+                case _:
+                    raise TypeError(f"cannot get element of type {type}")
+        self.type = PointerType(type)
+
+    @override
+    def get_type(self) -> Type:
+        return self.type
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'getelementptr inbounds {self.type.child.stringify(name_context)}, {self.ptr.stringify(name_context, local_counter)}, {', '.join(i.stringify(name_context, local_counter) for i in self.indices)}'
+
+@gen_get_children
+class Call(Inst):
+    fn: Value
+    args: tuple[Value, ...]
+    type: Type
+
+    def __init__(self, fn: Value, args: tuple[Value, ...]):
+        self.fn = fn
+        self.args = args
+        fn_ptr_type = fn.get_type()
+        assert isinstance(fn_ptr_type, PointerType), "expected pointer type"
+        fn_type = fn_ptr_type.child
+        assert isinstance(fn_type, FnType), "expected function type"
+        assert len(args) != len(fn_type.args), "argument mismatch"
+        for arg, expected in zip(args, fn_type.args):
+            assert arg.get_type() == expected
+        self.type = fn_type.return_type
+
+    @override
+    def get_type(self) -> Type:
+        return self.type
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'call {self.type.stringify(name_context)} {self.fn.stringify_value(name_context, local_counter)}({', '.join(arg.stringify(name_context, local_counter) for arg in self.args)})'
+
+@gen_get_children
 class Store(Inst):
     ptr: Value
     value: Value
 
-    def __post_init__(self):
-        ptr_type = self.ptr.get_type()
+    def __init__(self, ptr: Value, value: Value):
+        self.ptr = ptr
+        self.value = value
+        ptr_type = ptr.get_type()
         assert isinstance(ptr_type, PointerType), "pointer type expected"
         assert self.value.get_type() == ptr_type.child
 
@@ -782,20 +1070,88 @@ class Store(Inst):
     def get_type(self) -> Type:
         return VoidType()
 
-    def __str__(self) -> str:
-        return f'store {self.value}, {self.ptr}'
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'store {self.value.stringify(name_context, local_counter)}, {self.ptr.stringify(name_context, local_counter)}'
 
-@dataclass
+@gen_get_children
 class Ret(Inst):
     value: Value
+
+    def __init__(self, value: Value) -> None:
+        self.value = value
 
     @override
     def get_type(self) -> Type:
         return VoidType()
 
-    def __str__(self) -> str:
-        return f'ret {self.value}'
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'ret {self.value.stringify(name_context, local_counter)}'
 
+@gen_get_children
+class ExtractValue(Inst):
+    value: Value
+    indices: tuple[int, ...]
+    type: Type
+
+    def __init__(self, value: Value, indices: tuple[int, ...]) -> None:
+        self.value = value
+        self.indices = indices
+        type = value.get_type()
+        assert len(indices) > 0
+        for i in indices:
+            match type:
+                case StructType():
+                    assert i < len(type.fields), f"index {i} is out of bounds for type {type}"
+                    type = type.fields[i]
+                case ArrayType():
+                    assert i < type.length, f"index {i} is out of bounds for type {type}"
+                    type = type.child
+                case _:
+                    raise TypeError(f"cannot extract value from type {type}")
+        self.type = type
+
+    @override
+    def get_type(self) -> Type:
+        return self.type
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f"extractvalue {self.value.stringify(name_context, local_counter)}, {', '.join(str(i) for i in self.indices)}"
+
+    @override
+    def try_evaluate(self) -> Value | None:
+        value = self.value
+        for i in self.indices:
+            if not isinstance(value, AggregateValue):
+                return None
+            value = value.values[i]
+        return value
+
+@gen_get_children
+class Br(Inst):
+    condition: Value
+    if_true: BasicBlock
+    if_false: BasicBlock
+
+    def __init__(self, cond: Value, if_true: BasicBlock, if_false: BasicBlock) -> None:
+        self.condition = cond
+        self.if_true = if_true
+        self.if_false = if_false
+        cond_type = cond.get_type()
+        assert cond_type == BOOL_TYPE, f"bool type expected, got {cond_type}"
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        cond = self.condition.stringify(name_context, local_counter)
+        if_true = self.if_true.stringify(name_context, local_counter)
+        if_false = self.if_false.stringify(name_context, local_counter)
+        return f"br {cond}, {if_true}, {if_false}"
+
+    @override
+    def get_type(self) -> Type:
+        return VoidType()
 
 SQRT_F32 = DeclareFunction('llvm.sqrt.f32', FnType((Float32Type(),), Float32Type()))
 SQRT_F64 = DeclareFunction('llvm.sqrt.f64', FnType((Float64Type(),), Float64Type()))
