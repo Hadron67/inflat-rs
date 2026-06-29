@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 
-from .llvm import BasicBlock, IFunction, IntType, Value
+from .llvm import BasicBlock, IFunction, IntType, Type, Value
 
 class CompiledBackendFunction:
     @abstractmethod
@@ -31,7 +31,7 @@ class ParallelForLoopProvider(IFunction):
         raise NotImplementedError
 
     @abstractmethod
-    def begin_loop(self, index_type: IntType, prologue_end: BasicBlock, total_size: Value) -> tuple[BasicBlock, Value]:
+    def begin_loop(self, prologue_end: BasicBlock, total_size: Value) -> tuple[BasicBlock, Value]:
         """
             To be called before compiling the kernel.
 
@@ -43,7 +43,24 @@ class ParallelForLoopProvider(IFunction):
     def end(self, block: BasicBlock) -> CompiledBackendFunction:
         raise NotImplementedError
 
+class LoopKernel:
+    @abstractmethod
+    def get_index_type(self) -> IntType:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_args(self) -> tuple[Type, ...]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def compile_total_size(self, begin: BasicBlock, args: tuple[Value, ...]) -> tuple[BasicBlock, Value]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value) -> BasicBlock:
+        raise NotImplementedError
+
 class Backend:
     @abstractmethod
-    def get_for_loop_provider(self) -> ParallelForLoopProvider:
+    def compile_paralell_loop(self, kernel: LoopKernel) -> CompiledBackendFunction:
         raise NotImplementedError

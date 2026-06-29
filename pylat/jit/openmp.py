@@ -7,7 +7,7 @@ from typing_extensions import override
 from pylat.jit.util import ForLoopBuilder
 
 from .llvm import I32, I64, I8, AggregateValue, BasicBlock, FnType, Function, GlobalDefineValue, IcmpOp, IntType, IntValue, Module, PointerType, StringLiteralValue, StructType, Type, Value, VoidType, VoidValue
-from .backend import Backend, CompiledBackendFunction, ParallelForLoopProvider
+from .backend import Backend, CompiledBackendFunction, LoopKernel, ParallelForLoopProvider
 
 class _Types:
     IDENT_T = StructType(I32, I32, I32, I32, PointerType(I8))
@@ -59,175 +59,107 @@ class OpenMPBackend(Backend):
                 ])
 
     @override
-    def get_for_loop_provider(self) -> ParallelForLoopProvider:
-        return OpenMPParallelForProvider(self)
-
-class OpenMPParallelForProvider(ParallelForLoopProvider):
-    _parent: OpenMPBackend
-    _api_table_type: StructType
-
-    _outer_fn: Function
-    _outer_closure_ptr: Value | None
-    _outer_api_table: Value
-    _in_loop: bool
-
-    _inner_fn: Function
-    _inner_api_table: Value
-    _outer_closure_vars: list[Value]
-    _outer_args_to_closure_map: dict[int, Value]
-    _closure_type: StructType
-    _inner_unpack_closure_block: BasicBlock
-    _inner_loop_builder: ForLoopBuilder | None
-    _ident: GlobalDefineValue
-
-    _prologue_end: BasicBlock | None
-
-    @override
-    def __init__(self, parent: OpenMPBackend) -> None:
-        self._parent = parent
-        self._api_table_type = StructType(PointerType(_Types.KMPC_FORK_CALL), PointerType(_Types.KMPC_FOR_STATIC_FINI))
-        self._ident = GlobalDefineValue(AggregateValue(_Types.IDENT_T,
+    def compile_paralell_loop(self, kernel: LoopKernel) -> CompiledBackendFunction:
+        index_type = kernel.get_index_type()
+        arg_types = kernel.get_args()
+        ident = GlobalDefineValue(AggregateValue(_Types.IDENT_T,
             IntValue(0, I32),
             IntValue(0, I32),
             IntValue(0, I32),
             IntValue(0, I32),
             GlobalDefineValue(StringLiteralValue(b';unknown;unknown;0;0;;\00')),
         ))
-
-        self._outer_closure_vars = []
-        self._outer_args_to_closure_map = {}
-        self._closure_type = StructType()
-        self._inner_loop_builder = None
-        self._prologue_end = None
-        self._outer_closure_ptr = None
-
-        self._in_loop = False
-        self._outer_fn = Function("__main")
-        outer_api_table, = self._outer_fn.add_args(PointerType(self._api_table_type))
-        self._outer_api_table = outer_api_table
-
-        self._inner_fn = Function()
-        self._inner_fn.add_args(PointerType(I32), PointerType(I32))
-        self._inner_fn.set_return_type(VoidType(), True)
-        self._inner_fn.add_arg(PointerType(self._closure_type))
-        self._inner_unpack_closure_block = BasicBlock()
-
-        self._inner_api_table = self._tunnel_through_closure(outer_api_table)
-
-    def _tunnel_through_closure(self, value: Value):
-        index = len(self._outer_closure_vars)
-        self._outer_closure_vars.append(value)
-        self._closure_type.add_field(value.get_type())
-        return self._inner_unpack_closure_block.load(
-            self._inner_unpack_closure_block.get_element_ptr(
-                self._inner_fn.get_arg(2),
-                IntValue(0, I64),
-                IntValue(index, I32),
-            )
-        )
-
-    @override
-    def begin_prologue(self) -> BasicBlock:
-        b = self._outer_fn.entry
-        self._outer_closure_ptr = b.alloca(self._closure_type)
-        return b
-
-    @override
-    def add_arg(self, type: Type) -> int:
-        return self._outer_fn.add_arg(type)
-
-    @override
-    def get_arg(self, index: int) -> Value:
-        if not self._in_loop:
-            return self._outer_fn.get_arg(index)
-
-        if index in self._outer_args_to_closure_map:
-            return self._outer_args_to_closure_map[index]
-
-        ret = self._tunnel_through_closure(self._outer_fn.get_arg(index))
-        self._outer_args_to_closure_map[index] = ret
-        return ret
-
-    @override
-    def begin_loop(self, index_type: IntType, prologue_end: BasicBlock, total_size: Value) -> tuple[BasicBlock, Value]:
-        self._prologue_end = prologue_end
-
         init_fn_name, init_fn_type = _create_kmpc_for_static_init(index_type, True)
-        self._api_table_type.add_field(PointerType(init_fn_type))
-
-        total_size = self._tunnel_through_closure(total_size)
-        b = self._inner_fn.entry
-
-        chunk = b.alloca(I32)
-        lb = b.alloca(index_type)
-        ub = b.alloca(index_type)
-        step = b.alloca(index_type)
-
-        b.jmp(self._inner_unpack_closure_block)
-        b = self._inner_unpack_closure_block
-
-        b.store(chunk, 0)
-        b.store(lb, 0)
-        max_ub = b.sub(total_size, IntValue(1, index_type))
-        b.store(ub, max_ub)
-        b.store(step, 1)
-        kmpc_for_static_init = b.load(b.get_element_ptr(self._inner_api_table, IntValue(0, I64), IntValue(2, I32)))
-        b.call(
-            kmpc_for_static_init,
-            self._ident,
-            b.load(self._inner_fn.get_arg(0)),
-            IntValue(43, I32),
-            chunk,
-            lb,
-            ub,
-            step,
-            IntValue(1, index_type),
-            IntValue(1, index_type),
+        api_table_type = StructType(
+            PointerType(_Types.KMPC_FORK_CALL),
+            PointerType(_Types.KMPC_FOR_STATIC_FINI),
+            PointerType(init_fn_type),
         )
+        closure_type = StructType(PointerType(api_table_type), *arg_types, index_type)
 
-        # clamp upper bound
-        clamper = BasicBlock()
-        clamper.store(ub, max_ub)
-        new_b = BasicBlock()
-        clamper.jmp(new_b)
-        b.br(b.icmp(IcmpOp.GT, True, b.load(ub), max_ub), clamper, new_b)
-        b = new_b
+        outer_fn = Function('main')
+        outer_fn.add_args(PointerType(api_table_type), *arg_types)
+        outer_fn.set_return_type(VoidType())
 
-        self._inner_loop_builder = ForLoopBuilder(b, True, b.load(lb), b.load(ub), IntValue(1, index_type))
+        inner_fn = Function()
+        inner_fn.add_args(PointerType(I32), PointerType(I32))
+        inner_fn.set_return_type(VoidType(), True)
+        inner_fn.add_arg(PointerType(closure_type))
 
-        self._in_loop = True
-        return self._inner_loop_builder.body_entry, self._inner_loop_builder.loop_var
+        # separate outer and inner function subroutines so that we won't accidentally use a variable across functions
+        def compile_outer():
+            b = outer_fn.entry
+            closure_ptr = b.alloca(closure_type)
+            args = outer_fn.get_args()[1:]
+            b, total_size = kernel.compile_total_size(b, args)
+            for i, value in enumerate(outer_fn.get_args() + (total_size,)):
+                b.store(b.get_element_ptr(closure_ptr, 0, i), value)
+            api_table = outer_fn.get_arg(0)
+            kmpc_fork_call = b.load(b.get_element_ptr(api_table, 0, 0))
+            b.call(kmpc_fork_call, ident, IntValue(0, I32), inner_fn, closure_ptr)
+            b.ret(VoidValue())
 
-    def end(self, block: BasicBlock) -> CompiledBackendFunction:
-        assert self._inner_loop_builder is not None
-        b = self._inner_loop_builder.end(block)
-        self._inner_loop_builder = None
-        kmpc_static_for_fini = b.load(b.get_element_ptr(self._inner_api_table, IntValue(0, I64), IntValue(1, I32)))
-        b.call(
-            kmpc_static_for_fini,
-            self._ident,
-            b.load(self._inner_fn.get_arg(0)),
-        )
-        b.ret(VoidValue())
+        def compile_inner():
+            b = inner_fn.entry
+            closure_ptr = inner_fn.get_arg(2)
 
-        assert self._prologue_end is not None
-        if self._prologue_end is not self._outer_fn.entry:
-            self._outer_fn.entry.jmp(self._prologue_end)
-        b = self._prologue_end
+            chunk = b.alloca(I32)
+            lb = b.alloca(index_type)
+            ub = b.alloca(index_type)
+            step = b.alloca(index_type)
 
-        assert self._outer_closure_ptr is not None
-        for i, value in enumerate(self._outer_closure_vars):
-            b.store(b.get_element_ptr(self._outer_closure_ptr, IntValue(0, I64), IntValue(i, I32)), value)
+            args: list[Value] = []
+            api_table = b.load(b.get_element_ptr(closure_ptr, 0, 0))
+            for i in range(len(arg_types)):
+                args.append(b.load(b.get_element_ptr(closure_ptr, 0, i + 1)))
+            inner_total_size = b.load(b.get_element_ptr(closure_ptr, 0, len(arg_types) + 1))
 
-        kmpc_fork_call = b.load(b.get_element_ptr(self._outer_api_table, IntValue(0, I64), IntValue(0, I32)))
-        b.call(kmpc_fork_call, self._ident, IntValue(0, I32), self._inner_fn, self._outer_closure_ptr)
-        b.ret(VoidValue())
+            b.store(chunk, 0)
+            b.store(lb, 0)
+            max_ub = b.sub(inner_total_size, IntValue(1, index_type))
+            b.store(ub, max_ub)
+            b.store(step, 1)
+            kmpc_for_static_init = b.load(b.get_element_ptr(api_table, 0, 2))
+            b.call(
+                kmpc_for_static_init,
+                ident,
+                b.load(inner_fn.get_arg(0)),
+                IntValue(43, I32),
+                chunk,
+                lb,
+                ub,
+                step,
+                IntValue(1, index_type),
+                IntValue(1, index_type),
+            )
 
-        self._outer_fn.set_return_type(VoidType())
+            # clamp upper bound
+            clamper = BasicBlock()
+            clamper.store(ub, max_ub)
+            new_b = BasicBlock()
+            clamper.jmp(new_b)
+            b.br(b.icmp(IcmpOp.GT, True, b.load(ub), max_ub), clamper, new_b)
+            b = new_b
+
+            loop_builder = ForLoopBuilder(b, True, b.load(lb), b.load(ub), IntValue(1, index_type))
+            b = kernel.compile_body(loop_builder.body_entry, tuple(args), loop_builder.loop_var)
+            b = loop_builder.end(b)
+
+            kmpc_static_for_fini = b.load(b.get_element_ptr(api_table, IntValue(0, I64), IntValue(1, I32)))
+            b.call(
+                kmpc_static_for_fini,
+                ident,
+                b.load(inner_fn.get_arg(0)),
+            )
+            b.ret(VoidValue())
+
+        compile_outer()
+        compile_inner()
 
         mod = Module()
-        mod.add_recursively(values=[self._outer_fn])
-        return _Compiled(self._parent, mod)
+        mod.add_recursively(values=[outer_fn])
+
+        return _Compiled(self, mod)
 
 class _Compiled(CompiledBackendFunction):
     _parent: OpenMPBackend

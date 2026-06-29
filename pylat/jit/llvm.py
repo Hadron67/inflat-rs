@@ -351,6 +351,14 @@ class StringLiteralValue(Value):
         ret += '"'
         return ret
 
+@dataclass
+class Undef(Value):
+    type: Type
+
+    @override
+    def __str__(self) -> str:
+        return "undef"
+
 class Module(NameContext):
     _globals: 'StrBiMap[GlobalValue]'
     _struct_types: 'StrBiMap[StructType]'
@@ -587,6 +595,9 @@ class Function(GlobalValue, IFunction):
     def add_args(self, *types: Type):
         return tuple(self.get_arg(self.add_arg(t)) for t in types)
 
+    def get_args(self):
+        return tuple(self._args)
+
     @override
     def get_arg(self, index: int) -> Value:
         return self._args[index]
@@ -721,23 +732,20 @@ class BasicBlock(LocalValue):
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
-    def div(self, lhs: Value, rhs: Value) -> Value:
+    def div(self, lhs: Value, rhs: Value, signed: bool) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(Div(lhs, rhs))
+                return self.emit(SDiv(lhs, rhs) if signed else UDiv(lhs, rhs))
             case FloatType():
                 return self.emit(FDiv(lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
-    def rem(self, lhs: Value, rhs: Value) -> Value:
-        match lhs.get_type():
-            case IntType():
-                return self.emit(Rem(lhs, rhs))
-            case FloatType():
-                return self.emit(FRem(lhs, rhs))
-            case _:
-                raise TypeError(f'unsupported type: {lhs.get_type()}')
+    def fdiv(self, lhs: Value, rhs: Value):
+        return self.emit(FDiv(lhs, rhs))
+
+    def rem(self, lhs: Value, rhs: Value, signed: bool) -> Value:
+        return self.emit(SRem(lhs, rhs) if signed else URem(lhs, rhs))
 
     def load(self, ptr: Value) -> Value:
         return self.emit(Load(ptr))
@@ -760,13 +768,16 @@ class BasicBlock(LocalValue):
     def extract_value(self, value: Value, *indices: int):
         return self.emit(ExtractValue(value, indices))
 
+    def insert_value(self, value: Value, elem_value: Value, *indices: int):
+        return self.emit(InsertValue(value, elem_value, *indices))
+
     def fneg(self, value: Value):
         return self.emit(FNeg(value))
 
     def int_to_float(self, value: Value, float_type: FloatType):
         return self.emit(IntToFloat(value, float_type))
 
-    def get_element_ptr(self, array: Value, *indices: Value) -> Value:
+    def get_element_ptr(self, array: Value, *indices: Value | int) -> Value:
         return self.emit(GetElementPtr(array, indices))
 
     def icmp(self, op: 'IcmpOp', signed: bool, lhs: Value, rhs: Value):
@@ -989,10 +1000,22 @@ class FSub(Binary):
                 return self.lhs
         return None
 
-class Rem(Binary):
+class SRem(Binary):
     @override
     def head_name(self) -> str:
-        return 'rem'
+        return 'srem'
+
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a % b, t)
+        return None
+
+class URem(Binary):
+    @override
+    def head_name(self) -> str:
+        return 'urem'
 
     @override
     def try_evaluate(self) -> Value | None:
@@ -1013,10 +1036,22 @@ class FRem(Binary):
                 return FloatValue(math.fmod(a, b), t)
         return None
 
-class Div(Binary):
+class SDiv(Binary):
     @override
     def head_name(self) -> str:
-        return 'div'
+        return 'sdiv'
+
+    @override
+    def try_evaluate(self) -> Value | None:
+        match self.lhs, self.rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a // b, t)
+        return None
+
+class UDiv(Binary):
+    @override
+    def head_name(self) -> str:
+        return 'udiv'
 
     @override
     def try_evaluate(self) -> Value | None:
@@ -1154,27 +1189,38 @@ class GetElementPtr(Inst):
     ptr_type: Type
     type: PointerType
 
-    def __init__(self, ptr: Value, indices: tuple[Value, ...]):
+    def __init__(self, ptr: Value, indices: tuple[Value | int, ...]):
         self.ptr = ptr
-        self.indices = indices
+        indices0: list[Value] = []
+
         ptr_type = self.ptr.get_type()
         assert isinstance(ptr_type, PointerType), "expected pointer type"
         type = ptr_type.child
         i0 = indices[0]
+        if isinstance(i0, int):
+            i0 = IntValue(i0, I64)
         i0_type = i0.get_type()
         assert isinstance(i0_type, IntType) and i0_type.bits == 64, f"i64 is required for array subscripts, got {i0_type}"
+        indices0.append(i0)
         for i in indices[1:]:
             match type:
                 case StructType():
+                    if isinstance(i, int):
+                        i = IntValue(i, I32)
                     assert isinstance(i, IntValue) and i.type.bits == 32, f"i32 constant is required for struct index, got {i}"
                     assert i.value < len(type.fields), f"struct index {i.value} is out of bounds for type {type}"
+                    indices0.append(i)
                     type = type.fields[i.value]
                 case ArrayType():
+                    if isinstance(i, int):
+                        i = IntValue(i, I64)
                     i_type = i.get_type()
                     assert isinstance(i_type, IntType) and i_type.bits >= 32, f"i32 or i64 is required for array index, got {i_type}"
+                    indices0.append(i)
                     type = type.child
                 case _:
                     raise TypeError(f"cannot get element of type {type}")
+        self.indices = tuple(indices0)
         self.ptr_type = ptr_type.child
         self.type = PointerType(type)
 
@@ -1227,8 +1273,9 @@ class Store(Inst):
         self.ptr = ptr
         self.value = value
         ptr_type = ptr.get_type()
+        value_type = value.get_type()
         assert isinstance(ptr_type, PointerType), "pointer type expected"
-        assert self.value.get_type() == ptr_type.child
+        assert ptr_type.child.is_compatible(value_type), f"incompatible types {ptr_type} and {value_type}"
 
     @override
     def get_type(self) -> Type:
@@ -1277,6 +1324,39 @@ class ExtractValue(Inst):
                 return None
             value = value.values[i]
         return value
+
+@gen_get_children
+class InsertValue(Inst):
+    value: Value
+    elem_value: Value
+    indices: tuple[int, ...]
+
+    @override
+    def __init__(self, value: Value, elem_value: Value, *indices: int) -> None:
+        type = value.get_type()
+        for i in indices:
+            match type:
+                case StructType():
+                    assert i < len(type.fields), f"index {i} is out of bounds for type {type}"
+                    type = type.fields[i]
+                case ArrayType():
+                    assert i < type.length, f"index {i} is out of bounds of {type.length}"
+                    type = type.child
+                case _:
+                    raise TypeError(f"{type} is not an aggregate type")
+        self.value = value
+        self.elem_value = elem_value
+        self.indices = indices
+
+    @override
+    def get_type(self) -> Type:
+        return self.value.get_type()
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        value = self.value.stringify(name_context, local_counter)
+        elem_value = self.elem_value.stringify(name_context, local_counter)
+        return f"insertvalue {value}, {elem_value}, {', '.join(str(i) for i in self.indices)}"
 
 class Branch(Inst):
     pass
