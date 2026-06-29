@@ -1,10 +1,16 @@
 from unittest import TestCase
 
 from pylat.jit.openmp import OpenMPBackend
+from pylat.util import add_line_numbers
 
 from .jit.llvm import Module
 from .jit.compile import JitCompiler
 from .expr import AssignExpr, ComplexType, Int, IntegerType, Plus, Rational, RealType, Symbol, Times, symbol, S
+
+from llvmlite import binding as llvm
+
+llvm.initialize_native_target()
+llvm.initialize_native_asmprinter()
 
 class TestExpr(TestCase):
     x: Symbol
@@ -38,8 +44,14 @@ class JitTest(TestCase):
             AssignExpr(phi, mom_phi * dt)
         ])
 
+        lines = fn.print_all()
+
         print()
-        for line in fn.print_all():
+        for line in add_line_numbers(lines):
             print(line)
+
+        mod = llvm.parse_assembly('\n'.join(lines))
+        mod.verify()
+
 
 all_tests = [TestExpr, JitTest]

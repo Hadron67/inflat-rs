@@ -328,15 +328,15 @@ class _CompileHelper:
     def complex_add(self, block: BasicBlock, a: Value, b: Value):
         a_re, a_im = self.expand_complex_value(block, a)
         b_re, b_im = self.expand_complex_value(block, b)
-        return AggregateValue(self.complex_type, (
+        return AggregateValue(self.complex_type,
             block.add(a_re, b_re),
             block.add(a_im, b_im),
-        ))
+        )
 
     def complex_mul(self, block: BasicBlock, a: Value, b: Value):
         a_re, a_im = self.expand_complex_value(block, a)
         b_re, b_im = self.expand_complex_value(block, b)
-        return AggregateValue(self.complex_type, (
+        return AggregateValue(self.complex_type,
             block.sub(
                 block.mul(a_re, b_re),
                 block.mul(a_im, b_im),
@@ -345,7 +345,7 @@ class _CompileHelper:
                 block.mul(a_re, b_im),
                 block.mul(a_im, b_re),
             ),
-        ))
+        )
 
     def complex_div(self, block: BasicBlock, a: Value, b: Value):
         b_re, b_im = self.expand_complex_value(block, b)
@@ -355,16 +355,16 @@ class _CompileHelper:
         )
         b_re = block.div(b_re, den)
         b_im = block.fneg(block.div(b_im, den))
-        return self.complex_mul(block, a, AggregateValue(self.complex_type, (b_re, b_im)))
+        return self.complex_mul(block, a, AggregateValue(self.complex_type, b_re, b_im))
 
     def coerce_to_complex_type(self, block: BasicBlock, value: Value, value_type: Expr):
         match value_type:
             case ComplexType():
                 return value
             case RealType():
-                return AggregateValue(self.complex_type, (value, FloatValue(0, self.parent.real_type)))
+                return AggregateValue(self.complex_type, value, FloatValue(0, self.parent.real_type))
             case IntegerType():
-                return AggregateValue(self.complex_type, (block.int_to_float(value, self.parent.real_type), FloatValue(0, self.parent.real_type)))
+                return AggregateValue(self.complex_type, block.int_to_float(value, self.parent.real_type), FloatValue(0, self.parent.real_type))
             case _:
                 raise TypeError(f"cannot coerce type {value_type} to complex")
 

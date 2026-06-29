@@ -86,14 +86,13 @@ class OpenMPParallelForProvider(ParallelForLoopProvider):
     def __init__(self, parent: OpenMPBackend) -> None:
         self._parent = parent
         self._api_table_type = StructType(PointerType(_Types.KMPC_FORK_CALL), PointerType(_Types.KMPC_FOR_STATIC_FINI))
-        self._ident = GlobalDefineValue(AggregateValue(_Types.IDENT_T, (
+        self._ident = GlobalDefineValue(AggregateValue(_Types.IDENT_T,
             IntValue(0, I32),
             IntValue(0, I32),
             IntValue(0, I32),
             IntValue(0, I32),
-            StringLiteralValue(b';unknown;unknown;0;0;;\00'),
-            # GlobalDefineValue(),
-        )))
+            GlobalDefineValue(StringLiteralValue(b';unknown;unknown;0;0;;\00')),
+        ))
 
         self._outer_closure_vars = []
         self._outer_args_to_closure_map = {}

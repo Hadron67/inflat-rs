@@ -28,6 +28,9 @@ class Type:
     def get_children(self) -> 'list[Type]':
         return []
 
+    def is_compatible(self, other: 'Type'):
+        return self == other
+
 class Value:
     @abstractmethod
     def get_type(self) -> Type:
@@ -145,10 +148,20 @@ class PointerType(Type):
     child: Type
 
     def __str__(self) -> str:
-        return f"*{self.child}"
+        return f"{self.child}*"
 
     def stringify(self, name_context: 'NameContext | None' = None) -> str:
         return 'ptr'
+
+    @override
+    def is_compatible(self, other: Type):
+        if not isinstance(other, PointerType):
+            return False
+        if self.child == other.child:
+            return True
+        if isinstance(other.child, ArrayType) and self.child == other.child.child:
+            return True
+        return False
 
 @dataclass(frozen=True)
 @gen_get_children
@@ -286,10 +299,25 @@ class FloatValue(Value):
         return self.type
 
 @dataclass
-# @gen_get_children
+@gen_get_children
 class AggregateValue(Value):
     type: Type
     values: tuple[Value, ...]
+
+    @override
+    def __init__(self, type: Type, *values: Value) -> None:
+        match type:
+            case StructType():
+                for field, value in zip(type.fields, values):
+                    value_type = value.get_type()
+                    assert field.is_compatible(value_type), f"incompatible types {field} and {value_type}"
+            case ArrayType():
+                assert len(values) == type.length, f"wrong length {type.length} != {len(values)}"
+                for value in values:
+                    value_type = value.get_type()
+                    assert type.child.is_compatible(value_type), f"incompatible types {type.child} and {value_type}"
+        self.type = type
+        self.values = values
 
     @override
     def get_type(self) -> Type:
@@ -341,7 +369,8 @@ class Module(NameContext):
 
         while len(todo_values) > 0:
             value = todo_values.pop()
-            assert not isinstance(value, Inst)
+            if isinstance(value, Inst) or isinstance(value, BasicBlock):
+                continue
             if isinstance(value, GlobalValue):
                 if self._globals.has_value(value):
                     continue
@@ -600,8 +629,11 @@ class Nop(Inst):
 class BasicBlock(LocalValue):
     insts: list[Inst]
 
+    _finished: bool
+
     def __init__(self) -> None:
         self.insts = []
+        self._finished = False
 
     @override
     def get_children(self) -> 'list[Value]':
@@ -651,24 +683,14 @@ class BasicBlock(LocalValue):
     # build methods
 
     def emit(self, inst: Inst) -> Value:
+        assert not self._finished
+        if isinstance(inst, Branch):
+            self._finished = True
         value = inst.try_evaluate()
         if value is not None:
             return value
         self.insts.append(inst)
         return inst
-
-    def reserve(self) -> int:
-        ret = len(self.insts)
-        self.emit(Nop())
-        return ret
-
-    def emit_at(self, index: int, inst: Inst):
-        value = inst.try_evaluate()
-        if value is not None:
-            return value
-        i = self.insts[index]
-        assert isinstance(i, Nop), f"expected a nop, found {i}"
-        self.insts[index] = inst
 
     def add(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
@@ -1129,14 +1151,15 @@ class UIntExt(ConversionInst[IntType]):
 class GetElementPtr(Inst):
     ptr: Value
     indices: tuple[Value, ...]
+    ptr_type: Type
     type: PointerType
 
     def __init__(self, ptr: Value, indices: tuple[Value, ...]):
         self.ptr = ptr
         self.indices = indices
-        type = self.ptr.get_type()
-        assert isinstance(type, PointerType), "expected pointer type"
-        type = type.child
+        ptr_type = self.ptr.get_type()
+        assert isinstance(ptr_type, PointerType), "expected pointer type"
+        type = ptr_type.child
         i0 = indices[0]
         i0_type = i0.get_type()
         assert isinstance(i0_type, IntType) and i0_type.bits == 64, f"i64 is required for array subscripts, got {i0_type}"
@@ -1152,6 +1175,7 @@ class GetElementPtr(Inst):
                     type = type.child
                 case _:
                     raise TypeError(f"cannot get element of type {type}")
+        self.ptr_type = ptr_type.child
         self.type = PointerType(type)
 
     @override
@@ -1160,7 +1184,7 @@ class GetElementPtr(Inst):
 
     @override
     def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
-        return f'getelementptr inbounds {self.type.child.stringify(name_context)}, {self.ptr.stringify(name_context, local_counter)}, {', '.join(i.stringify(name_context, local_counter) for i in self.indices)}'
+        return f'getelementptr inbounds {self.ptr_type.stringify(name_context)}, {self.ptr.stringify(name_context, local_counter)}, {', '.join(i.stringify(name_context, local_counter) for i in self.indices)}'
 
 @gen_get_children
 class Call(Inst):
@@ -1183,7 +1207,7 @@ class Call(Inst):
             arg = args[i]
             expected = fn_type.args[i]
             arg_type = arg.get_type()
-            assert arg_type == expected, f"argument type mismatch at {i}-th arg: {arg_type} != {expected}"
+            assert expected.is_compatible(arg_type), f"argument type mismatch at {i}-th arg: {arg_type} != {expected}"
         self.type = fn_type.return_type
 
     @override
@@ -1213,21 +1237,6 @@ class Store(Inst):
     @override
     def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
         return f'store {self.value.stringify(name_context, local_counter)}, {self.ptr.stringify(name_context, local_counter)}'
-
-@gen_get_children
-class Ret(Inst):
-    value: Value
-
-    def __init__(self, value: Value) -> None:
-        self.value = value
-
-    @override
-    def get_type(self) -> Type:
-        return VoidType()
-
-    @override
-    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
-        return f'ret {self.value.stringify(name_context, local_counter)}'
 
 @gen_get_children
 class ExtractValue(Inst):
@@ -1269,8 +1278,11 @@ class ExtractValue(Inst):
             value = value.values[i]
         return value
 
+class Branch(Inst):
+    pass
+
 @gen_get_children
-class Br(Inst):
+class Br(Branch):
     condition: Value
     if_true: BasicBlock
     if_false: BasicBlock
@@ -1294,7 +1306,7 @@ class Br(Inst):
         return VoidType()
 
 @gen_get_children
-class BrDirect(Inst):
+class BrDirect(Branch):
     target: BasicBlock
 
     @override
@@ -1308,6 +1320,21 @@ class BrDirect(Inst):
     @override
     def get_type(self) -> Type:
         return VoidType()
+
+@gen_get_children
+class Ret(Branch):
+    value: Value
+
+    def __init__(self, value: Value) -> None:
+        self.value = value
+
+    @override
+    def get_type(self) -> Type:
+        return VoidType()
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'ret {self.value.stringify(name_context, local_counter)}'
 
 @gen_get_children
 class Phi(Inst):
@@ -1367,9 +1394,9 @@ class Icmp(Inst):
         op: str = ''
         match self.op:
             case IcmpOp.EQ | IcmpOp.NE:
-                op = self.op.name
+                op = self.op.value
             case _:
-                op = ('s' if self.signed else 'u') + self.op.name
+                op = ('s' if self.signed else 'u') + self.op.value
         type = self.type.stringify(name_context)
         lhs = self.lhs.stringify_value(name_context, local_counter)
         rhs = self.rhs.stringify_value(name_context, local_counter)
