@@ -1,10 +1,10 @@
-from enum import IntEnum
+from enum import Enum, IntEnum
 import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import final, override
 
-from .util import ObjectCounter, StrBiMap, SubExprFnBuilder, next_unique_name
+from ..util import ObjectCounter, StrBiMap, SubExprFnBuilder
 
 class NameContext:
     @abstractmethod
@@ -108,14 +108,13 @@ class Float64Type(FloatType):
 @dataclass(frozen=True)
 class IntType(Type):
     bits: int
-    signed: bool
 
     def __str__(self) -> str:
         return f'{"i"}{self.bits}'
 
     @final
-    def get_range(self) -> tuple[int, int]:
-        return IntType.get_range_from_data(self.bits, self.signed)
+    def get_range(self, signed: bool) -> tuple[int, int]:
+        return IntType.get_range_from_data(self.bits, signed)
 
     @staticmethod
     def get_range_from_data(bits: int, signed: bool):
@@ -124,21 +123,16 @@ class IntType(Type):
         else:
             return (0, 2**bits - 1)
 
-    @staticmethod
-    def get_suitable_type(minv: int, maxv: int):
-        signed = minv < 0
-        bits = 8
-        min, max = IntType.get_range_from_data(bits, signed)
-        while minv < min and maxv > max:
-            bits <<= 1
-        return IntType(bits, signed)
-
     @override
     def from_int(self, value: int) -> 'Value':
-        min, max = self.get_range()
+        min, max = self.get_range(True)
         if not min <= value <= max:
             raise ValueError(f'value {value} out of range for {self}')
         return IntValue(value, self)
+
+I8 = IntType(8)
+I32 = IntType(32)
+I64 = IntType(64)
 
 @dataclass(frozen=True)
 class LabelType(Type):
@@ -192,23 +186,31 @@ class VoidType(Type):
 
 @gen_get_children
 class StructType(Type):
-    fields: tuple[Type, ...]
+    fields: list[Type]
 
+    @override
     def __init__(self, *fields: Type) -> None:
-        self.fields = fields
+        self.fields = list(fields)
 
+    def add_field(self, type: Type):
+        self.fields.append(type)
+
+    @override
     def __str__(self) -> str:
         return f"struct@{id(self)} {{{", ".join(str(i) for i in self.fields)}}}"
 
     def write_definition(self, name_context: 'NameContext') -> list[str]:
         return [f"%{name_context.get_struct_type_name(self)} = type {{{', '.join(i.stringify(name_context) for i in self.fields)}}}"]
 
+    @override
     def __hash__(self) -> int:
         return object.__hash__(self)
 
+    @override
     def __eq__(self, value: object, /) -> bool:
         return self is value
 
+    @override
     def stringify(self, name_context: 'NameContext | None' = None) -> str:
         if name_context is not None:
             return '%' + name_context.get_struct_type_name(self)
@@ -267,7 +269,7 @@ class IntValue(Value):
     def get_type(self) -> Type:
         return self.type
 
-BOOL_TYPE = IntType(1, False)
+BOOL_TYPE = IntType(1)
 BOOL_TRUE = IntValue(1, BOOL_TYPE)
 BOOL_FALSE = IntValue(0, BOOL_TYPE)
 
@@ -284,6 +286,7 @@ class FloatValue(Value):
         return self.type
 
 @dataclass
+# @gen_get_children
 class AggregateValue(Value):
     type: Type
     values: tuple[Value, ...]
@@ -295,6 +298,30 @@ class AggregateValue(Value):
     @override
     def stringify_value(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
         return f"{{{", ".join(v.stringify(name_context, local_counter) for v in self.values)}}}"
+
+_CHAR_CODES = [
+
+]
+
+@dataclass
+class StringLiteralValue(Value):
+    data: bytes
+
+    @override
+    def get_type(self) -> Type:
+        return ArrayType(I8, len(self.data))
+
+    @override
+    def __str__(self) -> str:
+        ret = 'c"'
+        for d in self.data:
+            # TODO: escape all unprintable chars
+            if d == 0:
+                ret += '\\00'
+            else:
+                ret += bytes([d]).decode()
+        ret += '"'
+        return ret
 
 class Module(NameContext):
     _globals: 'StrBiMap[GlobalValue]'
@@ -314,6 +341,7 @@ class Module(NameContext):
 
         while len(todo_values) > 0:
             value = todo_values.pop()
+            assert not isinstance(value, Inst)
             if isinstance(value, GlobalValue):
                 if self._globals.has_value(value):
                     continue
@@ -323,13 +351,13 @@ class Module(NameContext):
             todo_values.extend(value.get_children())
             todo_types.append(value.get_type())
 
-        while len(todo_types) > 0:
-            type = todo_types.pop()
-            if isinstance(type, StructType):
-                if self._struct_types.has_value(type):
-                    continue
-                self._add_struct_type(type)
-            todo_types.extend(type.get_children())
+            while len(todo_types) > 0:
+                type = todo_types.pop()
+                if isinstance(type, StructType):
+                    if self._struct_types.has_value(type):
+                        continue
+                    self._add_struct_type(type)
+                todo_types.extend(type.get_children())
 
     @override
     def get_global_name(self, value: 'GlobalValue') -> str:
@@ -341,13 +369,13 @@ class Module(NameContext):
 
     def _add_global(self, value: 'GlobalValue', name_prefix: str | None = None):
         if name_prefix is None:
-            name_prefix = 'global'
+            name_prefix = value.get_default_name_prefix()
         self._globals.add(self._globals.next_unique_name(name_prefix), value)
 
     def _add_struct_type(self, type: StructType, name_prefix: str | None = None):
         if name_prefix is None:
             name_prefix = 'struct'
-        self._struct_types.add(self._globals.next_unique_name(name_prefix), type)
+        self._struct_types.add(self._struct_types.next_unique_name(name_prefix), type)
 
     def write(self) -> list[str]:
         ret: list[str] = []
@@ -376,22 +404,39 @@ class GlobalValue(Value):
     def get_required_name(self) -> str | None:
         return None
 
+    @abstractmethod
+    def get_default_name_prefix(self) -> str:
+        raise NotImplementedError
+
+@gen_get_children
 class GlobalDefineValue(GlobalValue):
     value: Value
     is_const: bool = True
     is_private: bool = True
     is_unnamed_addr: bool = True
 
+    def __init__(self, value: Value, is_const: bool = True, is_private: bool= True, is_unnamed_addr: bool = True) -> None:
+        self.value = value
+        super().__init__()
+
     @override
     def write_definition(self, name_context: NameContext) -> list[str]:
-        flags: list[str] = []
+        flags: str = ''
         if self.is_private:
-            flags.append('private')
+            flags += 'private '
         if self.is_unnamed_addr:
-            flags.append('unnamed_addr')
+            flags += 'unnamed_addr '
         if self.is_const:
-            flags.append('constant')
-        return [f'@{name_context.get_global_name(self)} = {' '.join(flags)}{self.value} {self.value.stringify(name_context)}']
+            flags += 'constant '
+        return [f'@{name_context.get_global_name(self)} = {flags}{self.value.stringify(name_context)}']
+
+    @override
+    def get_type(self) -> Type:
+        return PointerType(self.value.get_type())
+
+    @override
+    def get_default_name_prefix(self):
+        return "global"
 
 @gen_get_children
 class DeclareFunction(GlobalValue):
@@ -404,7 +449,7 @@ class DeclareFunction(GlobalValue):
 
     @override
     def get_type(self) -> Type:
-        return self.type
+        return PointerType(self.type)
 
     def write_args(self, name_context: NameContext) -> list[str]:
         args: list[str] = []
@@ -421,27 +466,55 @@ class DeclareFunction(GlobalValue):
     def get_required_name(self) -> str | None:
         return self.name
 
+    @override
+    def get_default_name_prefix(self):
+        return 'fn'
+
 class FunctionState(IntEnum):
     BUILDING_ARGS = 0
     BUILDING_RETURN_TYPE = 1
     BUILDING_BODY = 2
     FINISHED = 3
 
-class Function(GlobalValue):
+class IFunction:
+    @abstractmethod
+    def add_arg(self, type: Type) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_arg(self, index: int) -> Value:
+        raise NotImplementedError
+
+class FunctionArgs(IFunction):
+    parent: 'FunctionArgs | None'
+    args: list[ArgValue]
+
+    def __init__(self, parent: 'FunctionArgs | None' = None) -> None:
+        self.parent = parent
+        self.args = []
+
+    @override
+    def get_arg(self, index: int) -> Value:
+        return self.args[index]
+
+    @override
+    def add_arg(self, type: Type) -> int:
+        ret = len(self.args)
+        self.args.append(ArgValue(type, ret))
+        return ret
+
+class Function(GlobalValue, IFunction):
     name: str | None
     _entry: 'BasicBlock'
     _args: list[ArgValue]
 
-    _used_names: set[str] = set()
     _type: FnType | None
 
-    def __init__(self, name: str | None = None) -> None:
+    def __init__(self, name: str | None = None, entry: 'BasicBlock | None' = None) -> None:
         self.name = name
-        self._entry = BasicBlock()
+        self._entry = entry if entry is not None else BasicBlock()
         self._args = []
         self._type = None
-
-        self._used_names = set()
 
     @property
     def entry(self):
@@ -460,7 +533,8 @@ class Function(GlobalValue):
         for block in blocks:
             local_counter.get_id(block)
             for inst in block.insts:
-                local_counter.get_id(inst)
+                if not isinstance(inst.get_type(), VoidType):
+                    local_counter.get_id(inst)
 
         for block in blocks:
             ret.append(str(local_counter.get_id(block)) + ':')
@@ -469,37 +543,46 @@ class Function(GlobalValue):
         ret.append('}')
         return ret
 
-    def next_unique_name(self, prefix: str='') -> str:
-        return next_unique_name(prefix, self._used_names)
-
     @override
     def get_type(self) -> Type:
         assert self._type is not None
         return PointerType(self._type)
 
-    def add_arg(self, type: Type, name_prefix: str | None = None) -> ArgValue:
-        assert self._type is None
+    @override
+    def add_arg(self, type: Type) -> int:
+        assert self._type is None or self._type.varargs
         ret = ArgValue(type, len(self._args))
         self._args.append(ret)
-        return ret
+        return ret.index
 
-    def get_arg(self, index: int) -> ArgValue:
+    def add_args(self, *types: Type):
+        return tuple(self.get_arg(self.add_arg(t)) for t in types)
+
+    @override
+    def get_arg(self, index: int) -> Value:
         return self._args[index]
 
-    def set_return_type(self, type: Type):
+    def set_return_type(self, type: Type, varargs: bool = False):
         assert self._type is None
-        self._type = FnType(tuple(i.type for i in self._args), type)
+        self._type = FnType(tuple(i.type for i in self._args), type, varargs)
 
     @override
     def get_children(self) -> list[Value]:
         assert self._type is not None
+        # exclude all Inst when collecting
+
         ret: list[Value] = []
         for b in self._entry.collect_blocks():
-            ret.extend(b.get_children())
+            for inst in b.insts:
+                ret.extend(i for i in inst.get_children() if not isinstance(i, Inst) and not isinstance(i, BasicBlock))
         return ret
 
     def get_required_name(self) -> str | None:
         return self.name
+
+    @override
+    def get_default_name_prefix(self) -> str:
+        return 'fn'
 
 class Inst(LocalValue):
     @abstractmethod
@@ -509,17 +592,37 @@ class Inst(LocalValue):
     def try_evaluate(self) -> Value | None:
         return None
 
-@gen_get_children
+class Nop(Inst):
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        raise RuntimeError("Nop in inst block")
+
 class BasicBlock(LocalValue):
     insts: list[Inst]
 
     def __init__(self) -> None:
         self.insts = []
 
+    @override
+    def get_children(self) -> 'list[Value]':
+        raise RuntimeError("cannot be called directly")
+
+    def get_outgoing_blocks(self):
+        ret: list[BasicBlock] = []
+        seen_blocks: set[BasicBlock] = set()
+        for inst in self.insts:
+            for c in inst.get_children():
+                if isinstance(c, BasicBlock) and c not in seen_blocks:
+                    seen_blocks.add(c)
+                    ret.append(c)
+        return ret
+
     @final
     def write(self, name_context: NameContext, inst_counter: ObjectCounter[LocalValue]) -> list[str]:
         ret: list[str] = []
         for inst in self.insts:
+            if isinstance(inst, Nop):
+                continue
             if inst.get_type() == VoidType():
                 ret.append(inst.stringify_inst(name_context, inst_counter))
             else:
@@ -536,9 +639,9 @@ class BasicBlock(LocalValue):
                 continue
             seen_blocks.add(item)
             ret.append(item)
-            children = item.get_children()
+            children = item.get_outgoing_blocks()
             children.reverse()
-            todo.extend(i for i in children if isinstance(i, BasicBlock))
+            todo.extend(children)
         return ret
 
     @override
@@ -553,6 +656,19 @@ class BasicBlock(LocalValue):
             return value
         self.insts.append(inst)
         return inst
+
+    def reserve(self) -> int:
+        ret = len(self.insts)
+        self.emit(Nop())
+        return ret
+
+    def emit_at(self, index: int, inst: Inst):
+        value = inst.try_evaluate()
+        if value is not None:
+            return value
+        i = self.insts[index]
+        assert isinstance(i, Nop), f"expected a nop, found {i}"
+        self.insts[index] = inst
 
     def add(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
@@ -604,8 +720,17 @@ class BasicBlock(LocalValue):
     def load(self, ptr: Value) -> Value:
         return self.emit(Load(ptr))
 
-    def store(self, ptr: Value, value: Value):
-        self.emit(Store(ptr, value))
+    def store(self, ptr: Value, value: Value | int):
+        if isinstance(value, Value):
+            self.emit(Store(ptr, value))
+        else:
+            ptr_type = ptr.get_type()
+            assert isinstance(ptr_type, PointerType)
+            assert isinstance(ptr_type.child, IntType)
+            return self.emit(Store(ptr, IntValue(value, ptr_type.child)))
+
+    def alloca(self, type: Type):
+        return self.emit(Alloca(type))
 
     def ret(self, value: Value | None = None):
         self.emit(Ret(value if value is not None else VoidValue()))
@@ -619,33 +744,25 @@ class BasicBlock(LocalValue):
     def int_to_float(self, value: Value, float_type: FloatType):
         return self.emit(IntToFloat(value, float_type))
 
-    def coerce(self, value: Value, type: Type) -> Value:
-        value_type = value.get_type()
-        if value_type == type:
-            return value
-        if isinstance(value_type, FloatType):
-            if isinstance(type, FloatType):
-                if value_type.bits() > type.bits():
-                    if isinstance(value, FloatValue):
-                        return FloatValue(value.value, type)
-                    return self.emit(FloatTrunc(value, type))
-                else:
-                    return self.emit(FloatExt(value, type))
-            if isinstance(type, IntType):
-                return self.emit(FloatToInt(value, type) if type.signed else FloatToUInt(value, type))
-        if isinstance(value_type, IntType):
-            if isinstance(type, FloatType):
-                return self.emit(IntToFloat(value, type) if value_type.signed else UIntToFloat(value, type))
-            if isinstance(type, IntType):
-                if value_type.bits > type.bits:
-                    return self.emit(IntTrunc(value, type))
-                return self.emit(IntExt(value, type) if type.signed else UIntExt(value, type))
-        raise ValueError(f"Cannot coerce {value_type} to {type}")
+    def get_element_ptr(self, array: Value, *indices: Value) -> Value:
+        return self.emit(GetElementPtr(array, indices))
 
-    def get_array_element_ptr(self, array: Value, index: Value) -> Value:
-        assert isinstance(array.get_type(), PointerType)
-        assert isinstance(index.get_type(), IntType)
-        return self.emit(GetElementPtr(array, (index, )))
+    def icmp(self, op: 'IcmpOp', signed: bool, lhs: Value, rhs: Value):
+        return self.emit(Icmp(op, signed, lhs, rhs))
+
+    def phi(self, *incomings: 'tuple[Value, BasicBlock]'):
+        ret = self.emit(Phi(*incomings))
+        assert isinstance(ret, Phi)
+        return ret
+
+    def br(self, cond: Value, if_true: 'BasicBlock', if_false: 'BasicBlock'):
+        self.emit(Br(cond, if_true, if_false))
+
+    def jmp(self, target: 'BasicBlock'):
+        self.emit(BrDirect(target))
+
+    def call(self, fn: Value, *args: Value):
+        return self.emit(Call(fn, args))
 
     def sqrt(self, value: Value, reg_name: str | None = None) -> Value:
         match value:
@@ -653,54 +770,54 @@ class BasicBlock(LocalValue):
                 return FloatValue(math.sqrt(fv), type)
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(SQRT_F32, (value, )))
+                return self.call(SQRT_F32, value)
             case Float64Type():
-                return self.emit(Call(SQRT_F64, (value, )))
+                return self.call(SQRT_F64, value)
             case _:
                 raise TypeError(f"Cannot take sqrt of {value.get_type()}")
 
-    def pow(self, value: Value, exponent: Value, reg_name: str | None = None) -> Value:
+    def pow(self, value: Value, exponent: Value) -> Value:
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(POW_F32, (value, exponent)))
+                return self.call(POW_F32, value, exponent)
             case Float64Type():
-                return self.emit(Call(POW_F64, (value, exponent)))
+                return self.call(POW_F64, value, exponent)
             case _:
                 raise TypeError(f"Cannot take pow of {value.get_type()}")
 
-    def exp(self, value: Value, reg_name: str | None = None) -> Value:
+    def exp(self, value: Value) -> Value:
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(EXP_F32, (value, )))
+                return self.call(EXP_F32, value)
             case Float64Type():
-                return self.emit(Call(EXP_F64, (value, )))
+                return self.call(EXP_F64, value)
             case _:
                 raise TypeError(f"Cannot take exp of {value.get_type()}")
 
-    def sin(self, value: Value, reg_name: str | None = None) -> Value:
+    def sin(self, value: Value) -> Value:
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(SIN_F32, (value, )))
+                return self.call(SIN_F32, value)
             case Float64Type():
-                return self.emit(Call(SIN_F64, (value, )))
+                return self.call(SIN_F64, value)
             case _:
                 raise TypeError(f"Cannot take sin of {value.get_type()}")
 
     def cos(self, value: Value) -> Value:
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(COS_F32, (value, )))
+                return self.call(COS_F32, value)
             case Float64Type():
-                return self.emit(Call(COS_F64, (value, )))
+                return self.call(COS_F64, value)
             case _:
                 raise TypeError(f"Cannot take cos of {value.get_type()}")
 
     def ln(self, value: Value) -> Value:
         match value.get_type():
             case Float32Type():
-                return self.emit(Call(LN_F32, (value, )))
+                return self.call(LN_F32, value)
             case Float64Type():
-                return self.emit(Call(LN_F64, (value, )))
+                return self.call(LN_F64, value)
             case _:
                 raise TypeError(f"Cannot take ln of {value.get_type()}")
 
@@ -917,6 +1034,23 @@ class Load(Inst):
         return f'load {self.type.stringify(name_context)}, {self.ptr.stringify(name_context, local_counter)}'
 
 @gen_get_children
+class Alloca(Inst):
+    type: Type
+
+    @override
+    def __init__(self, type: Type) -> None:
+        self.type = type
+
+    @override
+    def get_type(self) -> Type:
+        return PointerType(self.type)
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        type = self.type.stringify(name_context)
+        return f"alloca {type}"
+
+@gen_get_children
 class ConversionInst[T: Type](Inst):
     value: Value
     type: T
@@ -1041,9 +1175,15 @@ class Call(Inst):
         assert isinstance(fn_ptr_type, PointerType), "expected pointer type"
         fn_type = fn_ptr_type.child
         assert isinstance(fn_type, FnType), "expected function type"
-        assert len(args) != len(fn_type.args), "argument mismatch"
-        for arg, expected in zip(args, fn_type.args):
-            assert arg.get_type() == expected
+        if not fn_type.varargs:
+            assert len(args) == len(fn_type.args), "argument mismatch"
+        else:
+            assert len(args) >= len(fn_type.args), "argument mismatch"
+        for i in range(len(fn_type.args)):
+            arg = args[i]
+            expected = fn_type.args[i]
+            arg_type = arg.get_type()
+            assert arg_type == expected, f"argument type mismatch at {i}-th arg: {arg_type} != {expected}"
         self.type = fn_type.return_type
 
     @override
@@ -1152,6 +1292,92 @@ class Br(Inst):
     @override
     def get_type(self) -> Type:
         return VoidType()
+
+@gen_get_children
+class BrDirect(Inst):
+    target: BasicBlock
+
+    @override
+    def __init__(self, target: BasicBlock) -> None:
+        self.target = target
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f"br {self.target.stringify(name_context, local_counter)}"
+
+    @override
+    def get_type(self) -> Type:
+        return VoidType()
+
+@gen_get_children
+class Phi(Inst):
+    type: Type
+    incomings: list[tuple[Value, BasicBlock]]
+
+    @override
+    def __init__(self, incoming: tuple[Value, BasicBlock]) -> None:
+        self.type = incoming[0].get_type()
+        self.incomings = [incoming]
+
+    def add_incoming(self, value: Value, block: BasicBlock):
+        type = value.get_type()
+        assert self.type == type, f"types mismatch: {self.type} and {type}"
+        self.incomings.append((value, block))
+
+    @override
+    def get_type(self) -> Type:
+        return self.type
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        type = self.type.stringify(name_context)
+        labels = (f"[{v.stringify_value(name_context, local_counter)}, {b.stringify_value(name_context, local_counter)}]" for v, b in self.incomings)
+        return f"phi {type} {', '.join(labels)}"
+
+class IcmpOp(Enum):
+    EQ = "eq"
+    NE = "ne"
+    GT = "gt"
+    GE = "ge"
+    LT = "lt"
+    LE = "le"
+
+@gen_get_children
+class Icmp(Inst):
+    type: IntType
+    signed: bool
+    op: IcmpOp
+    lhs: Value
+    rhs: Value
+
+    @override
+    def __init__(self, op: IcmpOp, signed: bool, lhs: Value, rhs: Value) -> None:
+        lhs_type = lhs.get_type()
+        rhs_type = rhs.get_type()
+        assert isinstance(lhs_type, IntType), f"int type expected, got {lhs_type}"
+        assert lhs_type == rhs_type, f"types mismatch: {lhs_type} and {rhs_type}"
+        self.type = lhs_type
+        self.signed = signed
+        self.op = op
+        self.lhs = lhs
+        self.rhs = rhs
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        op: str = ''
+        match self.op:
+            case IcmpOp.EQ | IcmpOp.NE:
+                op = self.op.name
+            case _:
+                op = ('s' if self.signed else 'u') + self.op.name
+        type = self.type.stringify(name_context)
+        lhs = self.lhs.stringify_value(name_context, local_counter)
+        rhs = self.rhs.stringify_value(name_context, local_counter)
+        return f"icmp {op} {type} {lhs}, {rhs}"
+
+    @override
+    def get_type(self) -> Type:
+        return BOOL_TYPE
 
 SQRT_F32 = DeclareFunction('llvm.sqrt.f32', FnType((Float32Type(),), Float32Type()))
 SQRT_F64 = DeclareFunction('llvm.sqrt.f64', FnType((Float64Type(),), Float64Type()))

@@ -1,99 +1,87 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import override, Callable
+from typing import Any, override, Callable
 
-from .expr import AssignExpr, ComplexType, Cos, Exp, Expr, Float, Int, IntegerType, Ln, Plus, Power, Rational, RealType, Roll, Sin, Slice, Symbol, Times
-from .llvm import AggregateValue, ArgValue, BasicBlock, Float64Type, FloatType, FloatValue, Function, IntType, IntValue, PointerType, StructType, Type, Value, VoidType
+from .backend import Backend, CompiledBackendFunction
+
+from ..expr import AssignExpr, ComplexType, Cos, Exp, Expr, Float, Int, IntegerType, Ln, Plus, Power, Rational, RealType, Roll, Sin, Slice, Symbol, Times
+from .llvm import I64, AggregateValue, ArgValue, BasicBlock, Float64Type, FloatType, FloatValue, Function, FunctionArgs, IFunction, IntType, IntValue, PointerType, StructType, Type, Value, VoidType
+from ..scope import ArrayArgInfo, ScalarArgInfo, ArgInfo, SymbolScope
+
+_TYPE_ORDER: list[type[Expr]] = [ComplexType, RealType, IntegerType]
+
+def combine_types(type1: Expr, type2: Expr):
+    for t in _TYPE_ORDER:
+        if isinstance(type1, t) or isinstance(type2, t):
+            return t()
+    raise TypeError(f"cannot combine incompatible types {type1} and {type2} (or some of them is not type)")
+
+def _check_and_get_total_size(exprs: list[AssignExpr]):
+    first_size = exprs[0].total_size()
+    for expr in exprs[1:]:
+        expr_size = expr.total_size()
+        assert first_size == expr_size, f"incompatible expressions {exprs[0]} and {expr}, with incompatible total sizes {first_size} and {expr_size}"
+
+    assert first_size is not None, "cannot compile expression with unspecified shapes"
+
+    return first_size
 
 class StandardLayoutMode(Enum):
     NONE = "none"
     COLUMN_MAJOR = "column"
     ROW_MAJOR = "row"
 
-class ArgInfo:
-    @abstractmethod
-    def map_arg(self, op: Callable[[int], int]) -> 'ArgInfo':
-        raise NotImplementedError
-
-@dataclass
-class ScalarArgInfo(ArgInfo):
-    value: int
-    is_ref: bool
-
-    @override
-    def __str__(self) -> str:
-        return f"%{self.value}: {'&' if self.is_ref else ''}Scalar"
-
-    @override
-    def map_arg(self, op: Callable[[int], int]) -> ArgInfo:
-        return ScalarArgInfo(op(self.value), self.is_ref)
-
-@dataclass
-class ArrayArgInfo(ArgInfo):
-    ptr: int
-    strides: tuple[int, ...]
-
-    def __str__(self) -> str:
-        return f"%{self.ptr}: Array(strides=({", ".join(str(i) for i in self.strides)}))"
-
-    @override
-    def map_arg(self, op: Callable[[int], int]) -> 'ArgInfo':
-        return ArrayArgInfo(op(self.ptr), tuple(op(i) for i in self.strides))
-
-class FunctionCompiler:
+class _FunctionCompiler:
     parent: 'JitCompiler'
+    _helper: '_CompileHelper'
     _expr_cache: dict[tuple[Expr, tuple[Value, ...]], Value]
     _subscript_cache: dict[tuple[tuple[Value, ...], tuple[Value, ...]], Value]
-    _fn: Function
+    _fn: IFunction
     _block: BasicBlock
-    _symbol_values: dict[Symbol, ArgInfo]
-    _tid: ArgValue | None
     _finished: bool
     _layout_mode: StandardLayoutMode
-    _array_symbol_shapes: dict[Symbol, tuple[Value, ...]]
 
     def __init__(
         self,
         parent: 'JitCompiler',
-        fn_name: str | None = None,
+        fn: IFunction,
+        block: BasicBlock,
+        symbol_scope: SymbolScope,
         standard_layout: StandardLayoutMode = StandardLayoutMode.NONE,
     ) -> None:
         self.parent = parent
-        self._fn = Function(fn_name)
-        self._block = self._fn.entry
+        self._fn = fn
+        self._block = block
+        self._symbol_scope = symbol_scope
+        self._helper = _CompileHelper(parent)
         self._expr_cache = {}
         self._subscript_cache = {}
-        self._symbol_values = {}
-        self._array_symbol_shapes = {}
-        self._tid = None
         self._finished = False
         self._standard_layout = standard_layout
 
     def _compile_add(self, left: Value, left_type: Expr, right: Value, right_type: Expr) -> Value:
-        # TODO: complex
         result_type = combine_types(left_type, right_type)
-        left = self.parent.coerce(self._block, left, left_type, result_type)
-        right = self.parent.coerce(self._block, right, right_type, result_type)
+        left = self._helper.coerce(self._block, left, left_type, result_type)
+        right = self._helper.coerce(self._block, right, right_type, result_type)
         if isinstance(result_type, ComplexType):
-            return self.parent.complex_add(self._block, left, right)
+            return self._helper.complex_add(self._block, left, right)
         return self._block.add(left, right)
 
     def _compile_mul(self, left: Value, left_type: Expr, right: Value, right_type: Expr) -> Value:
-        # TODO: ditto
         result_type = combine_types(left_type, right_type)
-        left = self.parent.coerce(self._block, left, left_type, result_type)
-        right = self.parent.coerce(self._block, right, right_type, result_type)
+        left = self._helper.coerce(self._block, left, left_type, result_type)
+        right = self._helper.coerce(self._block, right, right_type, result_type)
         if isinstance(result_type, ComplexType):
-            return self.parent.complex_mul(self._block, left, right)
+            return self._helper.complex_mul(self._block, left, right)
         return self._block.mul(left, right)
 
     def _compile_div(self, left: Value, left_type: Expr, right: Value, right_type: Expr) -> Value:
         result_type = combine_types(left_type, right_type)
-        left = self.parent.coerce(self._block, left, left_type, result_type)
-        right = self.parent.coerce(self._block, right, right_type, result_type)
+        left = self._helper.coerce(self._block, left, left_type, result_type)
+        right = self._helper.coerce(self._block, right, right_type, result_type)
         if isinstance(result_type, ComplexType):
-            return self.parent.complex_div(self._block, left, right)
+            return self._helper.complex_div(self._block, left, right)
         return self._block.div(left, right)
 
     def _compile_unpack_subscripts(self, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
@@ -122,7 +110,7 @@ class FunctionCompiler:
         return index
 
     def _compile_array_symbol_access(self, info: ArrayArgInfo, subscripts: tuple[Value, ...]) -> Value:
-        return self._block.get_array_element_ptr(
+        return self._block.get_element_ptr(
             self._fn.get_arg(info.ptr),
             self._compile_subscript(tuple(self._fn.get_arg(i) for i in info.strides), subscripts),
         )
@@ -138,9 +126,9 @@ class FunctionCompiler:
             case Float(value):
                 return FloatValue(value, self.parent.real_type)
             case Symbol():
-                if expr not in self._symbol_values:
+                sym = self._symbol_scope.get_symbol(expr)
+                if sym is None:
                     sym = self._add_symbol(expr, False)
-                sym = self._symbol_values[expr]
                 match sym:
                     case ScalarArgInfo():
                         if sym.is_ref:
@@ -154,33 +142,33 @@ class FunctionCompiler:
                 assert not self._standard_layout, "cannot compile Roll in standard layout mode"
                 expr_shape = expr.expr.get_shape()
                 assert expr_shape is not None, "cannot compile unspecified shape"
-                len = self._compile_expr(expr_shape[expr.axis], ())
+                len = self.compile_expr(expr_shape[expr.axis], ())
                 new_index = subscripts[expr.axis]
                 new_index = self._block.add(new_index, IntValue(-expr.amount, jc.index_type))
                 new_index = self._block.rem(new_index, len)
                 subscripts = subscripts[:expr.axis] + (new_index,) + subscripts[expr.axis + 1:]
-                return self._compile_expr(expr.expr, subscripts)
+                return self.compile_expr(expr.expr, subscripts)
             case Slice():
-                return self._compile_expr(expr.expr, subscripts[:expr.axis] + (IntValue(expr.index, jc.index_type),) + subscripts[expr.axis + 1:])
+                return self.compile_expr(expr.expr, subscripts[:expr.axis] + (IntValue(expr.index, jc.index_type),) + subscripts[expr.axis + 1:])
             case Plus(children):
                 ret_type = children[0].get_type()
-                ret = self._compile_expr(children[0], subscripts)
+                ret = self.compile_expr(children[0], subscripts)
                 for child in children[1:]:
                     child_type = child.get_type()
-                    ret = self._compile_add(ret, ret_type, self._compile_expr(child, subscripts), child_type)
+                    ret = self._compile_add(ret, ret_type, self.compile_expr(child, subscripts), child_type)
                     ret_type = child_type
                 return ret
             case Times(children):
                 ret_type = children[0].get_type()
-                ret = self._compile_expr(children[0], subscripts)
+                ret = self.compile_expr(children[0], subscripts)
                 for child in children[1:]:
                     child_type = child.get_type()
-                    ret = self._compile_mul(ret, ret_type, self._compile_expr(child, subscripts), child_type)
+                    ret = self._compile_mul(ret, ret_type, self.compile_expr(child, subscripts), child_type)
                     ret_type = child_type
                 return ret
             case Power(_, exponent):
                 base_type = expr.base.get_type()
-                base = self._compile_expr(expr.base, subscripts)
+                base = self.compile_expr(expr.base, subscripts)
                 match exponent:
                     case Int(exp_value):
                         neg = False
@@ -194,61 +182,60 @@ class FunctionCompiler:
                             ret = self._compile_div(self.parent.real_type.from_int(1), base_type, ret, base_type)
                         return ret
                     case Rational(1, 2):
-                        return self._block.sqrt(self._compile_expr(expr.base, subscripts))
+                        return self._block.sqrt(self.compile_expr(expr.base, subscripts))
                     case Rational(-1, 2):
-                        return self._compile_div(self.parent.real_type.from_int(1), base_type, self._block.sqrt(self._compile_expr(expr.base, subscripts)), base_type)
+                        return self._compile_div(self.parent.real_type.from_int(1), base_type, self._block.sqrt(self.compile_expr(expr.base, subscripts)), base_type)
                     case _:
-                        exp_value = self._compile_expr(exponent, ())
-                        return self._block.pow(self._compile_expr(expr.base, subscripts), exp_value)
+                        exp_value = self.compile_expr(exponent, ())
+                        return self._block.pow(self.compile_expr(expr.base, subscripts), exp_value)
             case Sin(expr):
-                return self._block.sin(self._compile_expr(expr, subscripts))
+                return self._block.sin(self.compile_expr(expr, subscripts))
             case Cos(expr):
-                return self._block.cos(self._compile_expr(expr, subscripts))
+                return self._block.cos(self.compile_expr(expr, subscripts))
             case Ln(expr):
-                return self._block.ln(self._compile_expr(expr, subscripts))
+                return self._block.ln(self.compile_expr(expr, subscripts))
             case Exp(expr):
-                return self._block.exp(self._compile_expr(expr, subscripts))
+                return self._block.exp(self.compile_expr(expr, subscripts))
 
         raise TypeError(f'unsupported expression: {expr}')
 
     def _add_symbol(self, expr: Symbol, is_ref: bool) -> ArgInfo:
         jc = self.parent
-        assert expr not in self._symbol_values
+        assert self._symbol_scope.get_symbol(expr) is None
         type = expr.type
         shape = expr.shape
         assert shape is not None, f"cannot compile symbol {expr} with unspecified shape"
         if len(shape) == 0:
-            llvm_type = self.parent.convert_type(type)
+            llvm_type = self._helper.convert_type(type)
             if is_ref:
                 ret = ScalarArgInfo(
-                    self._fn.add_arg(PointerType(llvm_type)).index,
+                    self._fn.add_arg(PointerType(llvm_type)),
                     True,
                 )
-                self._symbol_values[expr] = ret
+                self._symbol_scope.add_symbol(expr, ret)
                 return ret
             else:
                 ret = ScalarArgInfo(
-                    self._fn.add_arg(llvm_type).index,
+                    self._fn.add_arg(llvm_type),
                     False,
                 )
-                self._symbol_values[expr] = ret
+                self._symbol_scope.add_symbol(expr, ret)
                 return ret
         else:
             for i in shape:
                 t = i.get_type()
                 assert t == IntegerType(), f"integer type expected for shape, got {t}"
             ret = ArrayArgInfo(
-                self._fn.add_arg(PointerType(jc.convert_type(type))).index,
-                tuple(self._fn.add_arg(jc.index_type).index for _ in range(len(shape))),
+                self._fn.add_arg(PointerType(self._helper.convert_type(type))),
+                tuple(self._fn.add_arg(jc.index_type) for _ in range(len(shape))),
             )
-            self._symbol_values[expr] = ret
-            self._array_symbol_shapes[expr] = tuple(self._compile_expr(i, ()) for i in shape)
+            self._symbol_scope.add_symbol(expr, ret)
             return ret
 
     def _compile_lvalue(self, expr: Expr, subscripts: tuple[Value, ...]) -> Value:
         match expr:
             case Symbol():
-                sym = self._symbol_values[expr]
+                sym = self._symbol_scope.get_symbol(expr)
                 assert sym is not None
                 match sym:
                     case ScalarArgInfo():
@@ -269,7 +256,7 @@ class FunctionCompiler:
             case Slice():
                 self.scan_lvalue_symbols(expr.expr)
 
-    def _compile_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> Value:
+    def compile_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> Value:
         cache_key = (expr, subscripts)
         if cache_key in self._expr_cache:
             return self._expr_cache[cache_key]
@@ -277,18 +264,13 @@ class FunctionCompiler:
         self._expr_cache[cache_key] = result
         return result
 
-    def _prepare_tid(self) -> ArgValue:
-        if self._tid is None:
-            self._tid = self._fn.add_arg(self.parent.index_type, "tid")
-        return self._tid
-
-    def _compile_assignment(self, expr: AssignExpr):
+    def _compile_assignment(self, expr: AssignExpr, tid: Value):
         shape = expr.shape
         assert shape is not None, f"cannot compile expression {expr} with unspecified shape"
-        shape = tuple(self._compile_expr(i, ()) for i in shape)
-        indices = self._compile_unpack_subscripts(shape, self._prepare_tid())
+        shape = tuple(self.compile_expr(i, ()) for i in shape)
+        indices = self._compile_unpack_subscripts(shape, tid)
         lhs_ptr = self._compile_lvalue(expr.lhs, indices)
-        rhs_value = self._compile_expr(expr.rhs, indices)
+        rhs_value = self.compile_expr(expr.rhs, indices)
         match expr.op:
             case '':
                 self._block.store(lhs_ptr, rhs_value)
@@ -303,68 +285,32 @@ class FunctionCompiler:
             case _:
                 raise ValueError(f"unknown op {expr.op}")
 
-    def compile_assignments(self, exprs: list[AssignExpr]):
+    def compile_assignments(self, exprs: list[AssignExpr], tid: Value):
         assert not self._finished
         self._finished = True
-
-        # check total size
-        first_size = exprs[0].total_size()
-        for expr in exprs[1:]:
-            expr_size = expr.total_size()
-            assert first_size == expr_size, f"incompatible expressions {exprs[0]} and {expr}, with incompatible total sizes {first_size} and {expr_size}"
 
         for expr in exprs:
             self.scan_lvalue_symbols(expr.lhs)
 
-        assert first_size is not None, "cannot compile expression with unspecified shape"
-        total_size_value = self._compile_expr(first_size, ())
-
         for expr in exprs:
-            self._compile_assignment(expr)
-        self._block.ret()
-        self._fn.set_return_type(VoidType())
-        return KernelFunctionIR(self._fn, self._symbol_values, self._tid)
+            self._compile_assignment(expr, tid)
 
-@dataclass
-class KernelFunctionIR:
-    fn: Function
-    args: dict[Symbol, ArgInfo]
-    tid: ArgValue | None
+        return self._block
 
-    def print(self):
-        ret = stringify_symbol_args(self.args)
-        if self.tid is not None:
-            ret.append(f"tid(%{self.tid.index})")
-        return ret
+class _CompileHelper:
+    parent: 'JitCompiler'
+    complex_type: Type
 
-def stringify_symbol_args(args: dict[Symbol, ArgInfo]):
-    elems: list[str] = []
-    for sym, info in args.items():
-        match info:
-            case ScalarArgInfo():
-                elems.append(('&' if info.is_ref else '') + f"{sym}(%{info.value})")
-            case ArrayArgInfo():
-                strides = ', '.join(f"%{s}" for s in info.strides)
-                elems.append(f"{sym}(%{info.ptr}): Array(strides=({strides}))")
-    return elems
-
-class JitCompiler:
-    real_type: FloatType
-    index_type: IntType
-
-    complex_type: StructType
-
-    def __init__(self, real_type: FloatType = Float64Type(), index_type: IntType = IntType(64, True)):
-        self.real_type = real_type
-        self.index_type = index_type
-        self.complex_type = StructType(real_type, real_type)
+    def __init__(self, parent: 'JitCompiler') -> None:
+        self.parent = parent
+        self.complex_type = StructType(parent.real_type, parent.real_type)
 
     def convert_type(self, type: Expr) -> Type:
         match type:
             case IntegerType():
-                return self.index_type
+                return self.parent.index_type
             case RealType():
-                return self.real_type
+                return self.parent.real_type
             case ComplexType():
                 return self.complex_type
             case _:
@@ -416,9 +362,9 @@ class JitCompiler:
             case ComplexType():
                 return value
             case RealType():
-                return AggregateValue(self.complex_type, (value, FloatValue(0, self.real_type)))
+                return AggregateValue(self.complex_type, (value, FloatValue(0, self.parent.real_type)))
             case IntegerType():
-                return AggregateValue(self.complex_type, (block.int_to_float(value, self.real_type), FloatValue(0, self.real_type)))
+                return AggregateValue(self.complex_type, (block.int_to_float(value, self.parent.real_type), FloatValue(0, self.parent.real_type)))
             case _:
                 raise TypeError(f"cannot coerce type {value_type} to complex")
 
@@ -427,7 +373,7 @@ class JitCompiler:
             case RealType():
                 return value
             case IntegerType():
-                return block.int_to_float(value, self.real_type)
+                return block.int_to_float(value, self.parent.real_type)
             case _:
                 raise TypeError(f"cannot coerce type {value_type} to real")
 
@@ -444,10 +390,52 @@ class JitCompiler:
             case _:
                 raise TypeError("????")
 
-_TYPE_ORDER: list[type[Expr]] = [ComplexType, RealType, IntegerType]
+class CompiledWrapper:
+    _symbols: SymbolScope
+    _inner: CompiledBackendFunction
 
-def combine_types(type1: Expr, type2: Expr):
-    for t in _TYPE_ORDER:
-        if isinstance(type1, t) or isinstance(type2, t):
-            return t()
-    raise TypeError(f"cannot combine incompatible types {type1} and {type2} (or some of them is not type)")
+    @override
+    def __init__(self, symbols: SymbolScope, inner: CompiledBackendFunction) -> None:
+        self._symbols = symbols
+        self._inner = inner
+
+    def call(self, arg: dict[Symbol, Any]) -> None:
+        pass
+
+    @override
+    def __str__(self) -> str:
+        return f"CompiledWrapper(symbols={self._symbols}, inner={self._inner})"
+
+    def print_all(self):
+        return self._inner.print_all()
+
+
+class JitCompiler:
+    _backend: Backend
+    real_type: FloatType
+    index_type: IntType
+
+    def __init__(self, backend: Backend, real_type: FloatType = Float64Type(), index_type: IntType = I64):
+        self._backend = backend
+        self.real_type = real_type
+        self.index_type = index_type
+
+    def compile_one_kernel(self, exprs: list[AssignExpr]) -> CompiledWrapper:
+        total_size = _check_and_get_total_size(exprs)
+        if total_size.is_one():
+            # No backend needed
+            raise NotImplementedError
+
+        symbol_scope = SymbolScope()
+
+        loop_provider = self._backend.get_for_loop_provider()
+        block = loop_provider.begin_prologue()
+        size_compiler = _FunctionCompiler(self, loop_provider, block, symbol_scope)
+        total_size_value = size_compiler.compile_expr(total_size, ())
+
+        new_block, tid = loop_provider.begin_loop(self.index_type, block, total_size_value)
+        expr_compiler = _FunctionCompiler(self, loop_provider, new_block, symbol_scope)
+        final_block = expr_compiler.compile_assignments(exprs, tid)
+        compiled = loop_provider.end(final_block)
+
+        return CompiledWrapper(symbol_scope, compiled)

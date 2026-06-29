@@ -142,3 +142,11 @@ class SubExprFnBuilder:
 def resize[T](arr: list[T], value: T, length: int):
     while len(arr) < length:
         arr.append(value)
+
+def add_line_numbers(lines: list[str]):
+    max_num_len = len(str(len(lines) + 1))
+    ret: list[str] = []
+    for i, line in enumerate(lines):
+        n = str(i + 1)
+        ret.append(n + (' ' * (max_num_len - len(n))) + '|' + line)
+    return ret

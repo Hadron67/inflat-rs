@@ -1,7 +1,9 @@
 from unittest import TestCase
 
-from .llvm import Module
-from .compile import FunctionCompiler, JitCompiler
+from pylat.jit.openmp import OpenMPBackend
+
+from .jit.llvm import Module
+from .jit.compile import JitCompiler
 from .expr import AssignExpr, ComplexType, Int, IntegerType, Plus, Rational, RealType, Symbol, Times, symbol, S
 
 class TestExpr(TestCase):
@@ -31,18 +33,13 @@ class JitTest(TestCase):
         phi = Symbol(('phi',), type=ComplexType(), shape=(nz, ny, nx))
         mom_phi = Symbol(('mom_phi',), type=ComplexType(), shape=(nz, ny, nx))
 
-        compiler = JitCompiler()
-        builder = FunctionCompiler(compiler)
-        fn = builder.compile_assignments([
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_one_kernel([
             AssignExpr(phi, mom_phi * dt)
         ])
-        mod = Module()
-        mod.add_recursively(values=[fn.fn])
 
         print()
-        for line in fn.print():
-            print(line)
-        for line in mod.write():
+        for line in fn.print_all():
             print(line)
 
 all_tests = [TestExpr, JitTest]

@@ -845,9 +845,6 @@ class Times(Expr):
             new_factors.insert(0, constant_factor)
         new_factors.sort(key=lambda x: x)
 
-        if len(new_factors) == 1:
-            return new_factors[0]
-
         new_factors2 = tuple(new_factors)
 
         return Times.make(new_factors2) if new_factors2 != self.children else self
@@ -1009,7 +1006,7 @@ class AssignExpr:
 
     def total_size(self):
         if self.shape is not None:
-            return Times(self.shape).evaluate()
+            return Times.make(self.shape).evaluate()
         else:
             return None
 
