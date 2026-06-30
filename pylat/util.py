@@ -1,5 +1,5 @@
 from inspect import isclass
-from typing import get_args, get_origin
+from typing import get_args, get_origin, override
 from weakref import WeakKeyDictionary
 
 def next_unique_name(prefix: str, used_names: set[str]) -> str:
@@ -72,7 +72,16 @@ class StrBiMap[V]:
     def values(self):
         return self._k2v.values()
 
-class SourceBuilder:
+class PtrObject:
+    @override
+    def __eq__(self, value: object, /) -> bool:
+        return self is value
+
+    @override
+    def __hash__(self) -> int:
+        return object.__hash__(self)
+
+class _SourceBuilder:
     lines: list[str]
     _indents: int
 
@@ -148,3 +157,22 @@ def add_line_numbers(lines: list[str]):
         n = str(i + 1)
         ret.append(n + (' ' * (max_num_len - len(n))) + '|' + line)
     return ret
+
+def gen_get_children(cls: type | None = None, base: type | None = None, excludes: set[str] | None = None, method_name: str = 'get_children'):
+    def wrapper[T](cls: type[T]) -> type[T]:
+        base0 = base
+        if base0 is None:
+            base0 = cls.mro()[-2]
+
+        children_builder = SubExprFnBuilder(base0)
+        get_children = 'get_children'
+        globals = {}
+        source = '\n'.join(children_builder.generate_get_children(cls, get_children, excludes))
+        exec(source, globals=globals)
+        setattr(cls, method_name, globals[get_children])
+        return cls
+
+    if cls is not None:
+        return wrapper(cls)
+
+    return wrapper

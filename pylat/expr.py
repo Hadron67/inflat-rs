@@ -243,7 +243,6 @@ def exprclass(cls=None, **kwargs):
 
 TMP_SYMBOL_ROOT = "tmp"
 
-
 @exprclass
 class Universe(Expr):
     level: int

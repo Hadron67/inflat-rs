@@ -1,12 +1,11 @@
-from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, override, Callable
-
-from .backend import Backend, CompiledBackendFunction, LoopKernel
+from typing import Any, TypeAlias, override
 
 from ..expr import AssignExpr, ComplexType, Cos, Exp, Expr, Float, Int, IntegerType, Ln, Plus, Power, Rational, RealType, Roll, Sin, Slice, Symbol, Times
-from .llvm import I64, BasicBlock, Float64Type, FloatType, FloatValue, Function, FunctionArgs, IFunction, IntType, IntValue, PointerType, StructType, Type, Value, VoidType
+from .argpass import ArrayArgInfo, ScalarArgInfo, SymbolArgInfo, TypesConfig
+from .backend import Backend, CompiledBackendFunction, LoopKernel
+from .llvm import I64, BasicBlock, Float64Type, FloatType, FloatValue, IntType, IntValue, PointerType, StructType, Type, Value
 
 _TYPE_ORDER: list[type[Expr]] = [ComplexType, RealType, IntegerType]
 
@@ -30,37 +29,6 @@ class StandardLayoutMode(Enum):
     NONE = "none"
     COLUMN_MAJOR = "column"
     ROW_MAJOR = "row"
-
-class SymbolArgInfo:
-    @abstractmethod
-    def map_arg(self, op: Callable[[int], int]) -> 'SymbolArgInfo':
-        raise NotImplementedError
-
-@dataclass
-class ScalarArgInfo(SymbolArgInfo):
-    value: int
-    is_ref: bool
-
-    @override
-    def __str__(self) -> str:
-        return f"%{self.value}: {'&' if self.is_ref else ''}Scalar"
-
-    @override
-    def map_arg(self, op: Callable[[int], int]) -> SymbolArgInfo:
-        return ScalarArgInfo(op(self.value), self.is_ref)
-
-@dataclass
-class ArrayArgInfo(SymbolArgInfo):
-    ptr: int
-    strides: tuple[int, ...]
-
-    @override
-    def __str__(self) -> str:
-        return f"%{self.ptr}: Array(strides=({", ".join(str(i) for i in self.strides)}))"
-
-    @override
-    def map_arg(self, op: Callable[[int], int]) -> 'SymbolArgInfo':
-        return ArrayArgInfo(op(self.ptr), tuple(op(i) for i in self.strides))
 
 class _SymbolScope:
     _parent: 'JitCompiler'
@@ -171,7 +139,7 @@ class _ComplexValue:
     re: Value
     im: Value
 
-_MaybeComplexValue = _ComplexValue | Value
+_MaybeComplexValue: TypeAlias = _ComplexValue | Value
 
 class _FunctionCompiler:
     parent: 'JitCompiler'
@@ -595,10 +563,8 @@ class _AssignmentsKernel(LoopKernel):
         cp.compile_assignments(self._exprs, loop_var)
         return begin
 
-class JitCompiler:
+class JitCompiler(TypesConfig):
     _backend: Backend
-    real_type: FloatType
-    index_type: IntType
 
     def __init__(self, backend: Backend, real_type: FloatType = Float64Type(), index_type: IntType = I64):
         self._backend = backend

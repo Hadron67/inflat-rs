@@ -4,7 +4,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import final, override
 
-from ..util import ObjectCounter, StrBiMap, SubExprFnBuilder
+from ..util import ObjectCounter, StrBiMap, gen_get_children
 
 class NameContext:
     @abstractmethod
@@ -47,19 +47,14 @@ class Value:
     def get_children(self) -> 'list[Value]':
         return []
 
-def gen_get_children(cls=None, excludes: set[str] | None = None):
-    def wrapper(cls):
-        children_builder = SubExprFnBuilder(Value if issubclass(cls, Value) else Type)
-        get_children = 'get_children'
-        globals = {}
-        source = '\n'.join(children_builder.generate_get_children(cls, get_children, excludes))
-        exec(source, globals=globals)
-        setattr(cls, get_children, globals[get_children])
-        return cls
+# def gen_get_children(cls=None, excludes: set[str] | None = None):
+#     def wrapper(cls):
+#         gen_get_children0(cls, Value if issubclass(cls, Value) else Type, excludes)
+#         return cls
 
-    if cls is not None:
-        return wrapper(cls)
-    return wrapper
+#     if cls is not None:
+#         return wrapper(cls)
+#     return wrapper
 
 class FloatType(Type):
     @abstractmethod
@@ -184,13 +179,21 @@ class FnType(Type):
     varargs: bool = False
 
     def __str__(self) -> str:
-        return f'fn({",".join(str(arg) for arg in self.args)}) -> {self.return_type}'
+        return f'fn({", ".join(str(arg) for arg in self.args)}) -> {self.return_type}'
 
     @override
     def get_children(self) -> 'list[Type]':
         ret = list(self.args)
         ret.append(self.return_type)
         return ret
+
+    @override
+    def stringify(self, name_context: 'NameContext | None' = None) -> str:
+        ret = self.return_type.stringify(name_context)
+        args = list(i.stringify(name_context) for i in self.args)
+        if self.varargs:
+            args.append('...')
+        return f"{ret} ({' '.join(args)})"
 
 @dataclass
 class VoidType(Type):
@@ -709,6 +712,7 @@ class BasicBlock(LocalValue):
 
     _finished: bool
 
+    @override
     def __init__(self) -> None:
         self.insts = []
         self._finished = False

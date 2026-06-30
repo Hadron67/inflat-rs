@@ -43,11 +43,11 @@ class ForLoopBuilder:
         return self._body_entry
 
 class TypeConverter:
-    _struct_type_cache: WeakKeyDictionary[StructType, type]
+    _struct_type_cache: WeakKeyDictionary[StructType, type[ctypes.Structure]]
     def __init__(self) -> None:
         self._struct_type_cache = WeakKeyDictionary()
 
-    def llvm_to_ctype(self, type: Type):
+    def llvm_to_ctype(self, type: Type) -> type[ctypes._CDataType]:
         match type:
             case IntType(bits):
                 match bits:
@@ -68,17 +68,20 @@ class TypeConverter:
             case StructType():
                 if type in self._struct_type_cache:
                     return self._struct_type_cache[type]
-                s: Any = ctypes.Structure
-                class _Ret(s):
-                    _fields_ = tuple(self.llvm_to_ctype(a) for a in type.fields)
+                class _Ret(ctypes.Structure):
+                    _fields_ = tuple((f'field{i}', self.llvm_to_ctype(a)) for i, a in enumerate(type.fields))
                 self._struct_type_cache[type] = _Ret
                 return _Ret
             case ArrayType():
                 return self.llvm_to_ctype(type.child) * type.length
             case PointerType(child):
-                fn: Any = ctypes.POINTER
-                return fn(self.llvm_to_ctype(child))
-            case FnType():
-                return ctypes.CFUNCTYPE(self.llvm_to_ctype(type.return_type), *(self.llvm_to_ctype(a) for a in type.args))
+                if isinstance(child, FnType):
+                    if not child.varargs:
+                        return ctypes.CFUNCTYPE(self.llvm_to_ctype(child.return_type), *(self.llvm_to_ctype(a) for a in child.args))
+                    else:
+                        ret = ctypes.CFUNCTYPE(self.llvm_to_ctype(child.return_type))
+                        ret.argtypes = None # pyright: ignore
+                        return ret
+                return ctypes.POINTER(self.llvm_to_ctype(child))
             case _:
                 raise TypeError(f"cannot convert to ctype: {type}")

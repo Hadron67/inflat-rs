@@ -6,8 +6,8 @@ from typing import override
 from llvmlite import binding as llvm
 
 from .util import ForLoopBuilder, TypeConverter
-from .llvm import I32, I64, I8, BasicBlock, FnType, Function, GlobalAggregateValue, GlobalScalarValue, GlobalStringValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Value, VoidType, VoidValue
-from .backend import Backend, CompiledBackendFunction, LoopKernel, ParallelForLoopProvider
+from .llvm import I32, I64, I8, BasicBlock, FnType, Function, GlobalAggregateValue, GlobalStringValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Value, VoidType, VoidValue
+from .backend import Backend, CompiledBackendFunction, LoopKernel
 
 class _Types:
     IDENT_T = StructType(I32, I32, I32, I32, PointerType(I8))
