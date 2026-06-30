@@ -41,20 +41,8 @@ class Expr:
         pass
 
     @abstractmethod
-    def get_type(self) -> 'Expr':
-        raise NotImplementedError
-
-    @abstractmethod
     def compare(self, other: 'Expr') -> int:
         raise NotImplementedError
-
-    @abstractmethod
-    def get_shape(self) -> 'tuple[Expr, ...] | None':
-        """
-            Get the shape of an expression.
-            `None` means unspecified
-        """
-        return None
 
     def is_subtype(self, other: 'Expr') -> bool:
         return False
@@ -247,44 +235,10 @@ TMP_SYMBOL_ROOT = "tmp"
 class Universe(Expr):
     level: int
 
-    @override
-    def get_type(self) -> Expr:
-        return Universe(self.level + 1)
-
 @exprclass
 class Type0(Expr):
     def get_type(self) -> Expr:
         return Universe(0)
-
-@exprclass
-class IntegerType(Type0):
-    @override
-    def is_subtype(self, other: Expr) -> bool:
-        match other:
-            case IntegerType():
-                return True
-            case _:
-                return False
-
-@exprclass
-class RealType(Type0):
-    @override
-    def is_subtype(self, other: Expr) -> bool:
-        match other:
-            case IntegerType() | RealType():
-                return True
-            case _:
-                return False
-
-@exprclass
-class ComplexType(Type0):
-    @override
-    def is_subtype(self, other: Expr) -> bool:
-        match other:
-            case IntegerType() | RealType() | ComplexType():
-                return True
-            case _:
-                return False
 
 def merge_shape(shape1: tuple[Expr, ...] | None, shape2: tuple[Expr, ...] | None) -> tuple[Expr, ...] | None:
     if shape1 is None:
@@ -431,10 +385,6 @@ class Int(PrimitiveConstant):
                 return other.const_mul(self)
         return super().const_mul(other)
 
-    @override
-    def get_type(self) -> Expr:
-        return IntegerType()
-
 @exprclass
 class Float(PrimitiveConstant):
     value: float
@@ -488,10 +438,6 @@ class Float(PrimitiveConstant):
             case Complex():
                 return other.const_mul(self)
         return super().const_mul(other)
-
-    @override
-    def get_type(self) -> Expr:
-        return RealType()
 
     def get_shape(self) -> tuple[Expr, ...] | None:
         return ()
@@ -567,10 +513,6 @@ class Rational(PrimitiveConstant):
                 return other.const_mul(self)
         return super().const_mul(other)
 
-    @override
-    def get_type(self) -> Expr:
-        return RealType()
-
 @exprclass
 class Complex(Constant):
     re: Constant
@@ -634,35 +576,19 @@ def _gcd(a: int, b: int) -> int:
 @exprclass
 class Symbol(Expr):
     fully_qualified_name: tuple[str, ...]
-    type: Expr = field(default=RealType(), compare=False)
-    shape: tuple[Expr, ...] | None = field(default=None, compare=False)
 
     def input_form(self) -> str:
         return ".".join(self.fully_qualified_name)
 
-    @override
-    def get_type(self) -> Expr:
-        return self.type
-
-    def get_shape(self) -> tuple[Expr, ...] | None:
-        return self.shape
-
 def symbol(name: str) -> Symbol:
-    return Symbol(tuple(name.split(".")), ComplexType())
+    return Symbol(tuple(name.split(".")))
+
+def symbols(*names: str) -> tuple[Symbol, ...]:
+    return tuple(symbol(n) for n in names)
 
 @exprclass
 class Plus(Expr):
     children: tuple[Expr, ...]
-    type: Expr = field(init=False, compare=False)
-    shape: tuple[Expr, ...] | None = field(init=False, compare=False)
-
-    def __post_init__(self):
-        object.__setattr__(self, 'type', peer_type(tuple(x.get_type() for x in self.children)))
-        object.__setattr__(self, 'shape', merge_shapes(tuple(i.get_shape() for i in self.children)))
-
-    @abstractmethod
-    def get_type(self) -> 'Expr':
-        return self.type
 
     @staticmethod
     def make(children: tuple[Expr, ...]) -> Expr:
@@ -747,16 +673,6 @@ def peer_type(types: tuple[Expr, ...]) -> Expr:
 @exprclass
 class Times(Expr):
     children: tuple[Expr, ...]
-    type: Expr = field(init=False, compare=False)
-    shape: tuple[Expr, ...] | None = field(init=False, compare=False)
-
-    def __post_init__(self):
-        object.__setattr__(self, "type", peer_type(tuple(i.get_type() for i in self.children)))
-        object.__setattr__(self, "shape", merge_shapes(tuple(i.get_shape() for i in self.children)))
-
-    @override
-    def get_type(self) -> Expr:
-        return self.type
 
     @staticmethod
     def make(children: tuple[Expr, ...]) -> Expr:
@@ -853,13 +769,6 @@ class Power(Expr):
     base: Expr
     exponent: Expr
 
-    @override
-    def get_type(self) -> Expr:
-        return self.base.get_type()
-
-    def get_shape(self) -> tuple[Expr, ...] | None:
-        return self.base.get_shape()
-
     @staticmethod
     def make(base: Expr, exponent: Expr) -> Expr:
         if exponent.is_zero():
@@ -908,16 +817,6 @@ class Apply(Expr):
 class UnaryNumericFunction(Expr):
     expr: Expr
 
-    @override
-    def get_type(self) -> Expr:
-        type = self.expr.get_type()
-        if isinstance(type, ComplexType):
-            return type
-        return RealType()
-
-    def get_shape(self) -> tuple[Expr, ...] | None:
-        return self.expr.get_shape()
-
 class Sin(UnaryNumericFunction):
     @override
     def input_form(self) -> str:
@@ -944,35 +843,11 @@ class Roll(Expr):
     axis: int
     amount: int
 
-    @override
-    def get_type(self) -> Expr:
-        return self.expr.get_type()
-
-    def get_shape(self) -> tuple[Expr, ...] | None:
-        return self.expr.get_shape()
-
 @exprclass
 class Slice(Expr):
     expr: Expr
     axis: int
     index: int
-    shape: tuple[Expr, ...] | None = field(init=False, compare=False)
-
-    def __post_init__(self) -> None:
-        shape = self.expr.get_shape()
-        if shape is None:
-            object.__setattr__(self, 'shape', None)
-            return
-        if self.axis >= len(shape):
-            raise IndexError(f"Axis {self.axis} is out of bounds for shape {shape}")
-        object.__setattr__(self, 'shape', shape[:self.axis] + shape[self.axis + 1:])
-
-    @override
-    def get_type(self) -> 'Expr':
-        return self.expr.get_type()
-
-    def get_shape(self) -> tuple[Expr, ...] | None:
-        return self.shape
 
     @override
     def input_form(self) -> str:
@@ -981,33 +856,15 @@ class Slice(Expr):
 class AssignExpr:
     lhs: Expr
     rhs: Expr
-    type: Expr
-    shape: tuple[Expr, ...] | None
     op: str
 
     def __init__(self, lhs: Expr, rhs: Expr, op: str = '') -> None:
         self.lhs = lhs
         self.rhs = rhs
         self.op = op
-        lhs_type = lhs.get_type()
-        rhs_type = rhs.get_type()
-        assert lhs_type.is_subtype(rhs_type), f"cannot assign type {rhs_type} to {lhs_type}"
-        self.type = lhs_type
-
-        lhs_shape = lhs.get_shape()
-        rhs_shape = rhs.get_shape()
-        shape = merge_shape(lhs_shape, rhs_shape)
-        assert shape == lhs_shape, "incompatible shape"
-        self.shape = shape
 
     def __str__(self) -> str:
         return f"{self.lhs} {self.op}= {self.rhs}"
-
-    def total_size(self):
-        if self.shape is not None:
-            return Times.make(self.shape).evaluate()
-        else:
-            return None
 
 def derivative(expr: Expr, var: Expr, default_case_handler: Callable[[Expr, Expr], Expr] | None = None) -> Expr:
     match expr:

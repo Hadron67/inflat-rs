@@ -56,52 +56,27 @@ class Value:
 #         return wrapper(cls)
 #     return wrapper
 
+@dataclass(frozen=True)
 class FloatType(Type):
-    @abstractmethod
-    def bits(self) -> int:
-        pass
-
-@dataclass(frozen=True)
-class HalfFloatType(FloatType):
-    @override
-    def from_float(self, value: float) -> 'Value':
-        # TODO: check range
-        return FloatValue(value, self)
+    bits: int
 
     def __str__(self) -> str:
-        return 'half'
-
-    @override
-    def bits(self) -> int:
-        return 16
-
-@dataclass(frozen=True)
-class Float32Type(FloatType):
-    def __str__(self) -> str:
-        return 'float'
-
-    @override
-    def bits(self) -> int:
-        return 32
+        match self.bits:
+            case 16:
+                return 'half'
+            case 32:
+                return 'float'
+            case 64:
+                return 'double'
+            case _:
+                raise ValueError(f"invalid float bits {self.bits}")
 
     @override
     def from_float(self, value: float) -> 'Value':
-        # TODO: check range
         return FloatValue(value, self)
 
-@dataclass(frozen=True)
-class Float64Type(FloatType):
-    def __str__(self) -> str:
-        return 'double'
-
-    @override
-    def bits(self) -> int:
-        return 64
-
-    @override
-    def from_float(self, value: float) -> 'Value':
-        # TODO: check range
-        return FloatValue(value, self)
+F32 = FloatType(32)
+F64 = FloatType(64)
 
 @dataclass(frozen=True)
 class IntType(Type):
@@ -848,6 +823,12 @@ class BasicBlock(LocalValue):
     def int_to_float(self, value: Value, float_type: FloatType):
         return self.emit(IntToFloat(value, float_type))
 
+    def float_trunc(self, value: Value, type: FloatType):
+        return self.emit(FloatTrunc(value, type))
+
+    def float_ext(self, value: Value, type: FloatType):
+        return self.emit(FloatExt(value, type))
+
     def get_element_ptr(self, array: Value, *indices: Value | int) -> Value:
         return self.emit(GetElementPtr(array, indices))
 
@@ -868,62 +849,34 @@ class BasicBlock(LocalValue):
     def call(self, fn: Value, *args: Value):
         return self.emit(Call(fn, args))
 
-    def sqrt(self, value: Value, reg_name: str | None = None) -> Value:
-        match value:
-            case FloatValue(fv, type):
-                return FloatValue(math.sqrt(fv), type)
-        match value.get_type():
-            case Float32Type():
-                return self.call(SQRT_F32, value)
-            case Float64Type():
-                return self.call(SQRT_F64, value)
+    def float_func(self, value: Value, f32_fn: Value, f64_fn: Value):
+        type = value.get_type()
+        assert isinstance(type, FloatType)
+        match type.bits:
+            case 32:
+                return self.call(f32_fn, value)
+            case 64:
+                return self.call(f64_fn, value)
             case _:
-                raise TypeError(f"Cannot take sqrt of {value.get_type()}")
+                raise TypeError(f"Cannot take {f32_fn} or {f64_fn} of {value.get_type()}")
+
+    def sqrt(self, value: Value, reg_name: str | None = None) -> Value:
+        return self.float_func(value, SQRT_F32, SQRT_F64)
 
     def pow(self, value: Value, exponent: Value) -> Value:
-        match value.get_type():
-            case Float32Type():
-                return self.call(POW_F32, value, exponent)
-            case Float64Type():
-                return self.call(POW_F64, value, exponent)
-            case _:
-                raise TypeError(f"Cannot take pow of {value.get_type()}")
+        return self.float_func(value, POW_F32, POW_F64)
 
     def exp(self, value: Value) -> Value:
-        match value.get_type():
-            case Float32Type():
-                return self.call(EXP_F32, value)
-            case Float64Type():
-                return self.call(EXP_F64, value)
-            case _:
-                raise TypeError(f"Cannot take exp of {value.get_type()}")
+        return self.float_func(value, EXP_F32, EXP_F64)
 
     def sin(self, value: Value) -> Value:
-        match value.get_type():
-            case Float32Type():
-                return self.call(SIN_F32, value)
-            case Float64Type():
-                return self.call(SIN_F64, value)
-            case _:
-                raise TypeError(f"Cannot take sin of {value.get_type()}")
+        return self.float_func(value, SIN_F32, SIN_F64)
 
     def cos(self, value: Value) -> Value:
-        match value.get_type():
-            case Float32Type():
-                return self.call(COS_F32, value)
-            case Float64Type():
-                return self.call(COS_F64, value)
-            case _:
-                raise TypeError(f"Cannot take cos of {value.get_type()}")
+        return self.float_func(value, COS_F32, COS_F64)
 
     def ln(self, value: Value) -> Value:
-        match value.get_type():
-            case Float32Type():
-                return self.call(LN_F32, value)
-            case Float64Type():
-                return self.call(LN_F64, value)
-            case _:
-                raise TypeError(f"Cannot take ln of {value.get_type()}")
+        return self.float_func(value, LN_F32, LN_F64)
 
 @gen_get_children
 class Unary(Inst):
@@ -1548,15 +1501,15 @@ class Icmp(Inst):
     def get_type(self) -> Type:
         return BOOL_TYPE
 
-SQRT_F32 = DeclareFunction('llvm.sqrt.f32', FnType((Float32Type(),), Float32Type()))
-SQRT_F64 = DeclareFunction('llvm.sqrt.f64', FnType((Float64Type(),), Float64Type()))
-POW_F32 = DeclareFunction('llvm.pow.f32', FnType((Float32Type(), Float32Type()), Float32Type()))
-POW_F64 = DeclareFunction('llvm.pow.f64', FnType((Float64Type(), Float64Type()), Float64Type()))
-EXP_F32 = DeclareFunction('llvm.exp.f32', FnType((Float32Type(),), Float32Type()))
-EXP_F64 = DeclareFunction('llvm.exp.f64', FnType((Float64Type(),), Float64Type()))
-LN_F32 = DeclareFunction('llvm.log.f32', FnType((Float32Type(),), Float32Type()))
-LN_F64 = DeclareFunction('llvm.log.f64', FnType((Float64Type(),), Float64Type()))
-SIN_F32 = DeclareFunction('llvm.sin.f32', FnType((Float32Type(),), Float32Type()))
-SIN_F64 = DeclareFunction('llvm.sin.f64', FnType((Float64Type(),), Float64Type()))
-COS_F32 = DeclareFunction('llvm.cos.f32', FnType((Float32Type(),), Float32Type()))
-COS_F64 = DeclareFunction('llvm.cos.f64', FnType((Float64Type(),), Float64Type()))
+SQRT_F32 = DeclareFunction('llvm.sqrt.f32', FnType((F32,), F32))
+SQRT_F64 = DeclareFunction('llvm.sqrt.f64', FnType((F64,), F64))
+POW_F32 = DeclareFunction('llvm.pow.f32', FnType((F32, F32), F32))
+POW_F64 = DeclareFunction('llvm.pow.f64', FnType((F64, F64), F64))
+EXP_F32 = DeclareFunction('llvm.exp.f32', FnType((F32,), F32))
+EXP_F64 = DeclareFunction('llvm.exp.f64', FnType((F64,), F64))
+LN_F32 = DeclareFunction('llvm.log.f32', FnType((F32,), F32))
+LN_F64 = DeclareFunction('llvm.log.f64', FnType((F64,), F64))
+SIN_F32 = DeclareFunction('llvm.sin.f32', FnType((F32,), F64))
+SIN_F64 = DeclareFunction('llvm.sin.f64', FnType((F64,), F64))
+COS_F32 = DeclareFunction('llvm.cos.f32', FnType((F32,), F32))
+COS_F64 = DeclareFunction('llvm.cos.f64', FnType((F64,), F64))

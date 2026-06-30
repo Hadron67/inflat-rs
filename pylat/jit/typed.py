@@ -2,12 +2,13 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import override
 
-from ..expr import Expr, Plus, Power, Roll, Slice, Symbol, Times, UnaryNumericFunction
+from ..expr import AssignExpr, Expr, Plus, Power, Roll, Slice, Symbol, Times, UnaryNumericFunction
 
 class Type:
     def is_subtype(self, other: 'Type') -> bool:
         return False
 
+@dataclass
 class IntegerType(Type):
     @override
     def is_subtype(self, other: Type) -> bool:
@@ -17,6 +18,7 @@ class IntegerType(Type):
             case _:
                 return False
 
+@dataclass
 class RealType(Type):
     @override
     def is_subtype(self, other: Type) -> bool:
@@ -26,6 +28,7 @@ class RealType(Type):
             case _:
                 return False
 
+@dataclass
 class ComplexType(Type):
     @override
     def is_subtype(self, other: Type) -> bool:
@@ -45,6 +48,7 @@ class IntType(LowerType):
     bits: int
     signed: bool
 
+    @override
     def as_type(self) -> Type:
         return IntegerType()
 
@@ -52,6 +56,7 @@ class IntType(LowerType):
 class FloatType(LowerType):
     bits: int
 
+    @override
     def as_type(self) -> Type:
         return RealType()
 
@@ -59,6 +64,7 @@ class FloatType(LowerType):
 class ComplexFloatType(LowerType):
     bits: int
 
+    @override
     def as_type(self) -> Type:
         return ComplexType()
 
@@ -99,14 +105,14 @@ def peer_type(types: tuple[Type, ...]) -> Type:
     return ret
 
 class TypeContext:
-    _symbol_types: dict[Symbol, LowerType]
+    _symbol_types: dict[Symbol, tuple[Type, LowerType]]
     _symbol_shapes: dict[Symbol, tuple[Expr, ...]]
 
     def __init__(self) -> None:
         self._symbol_types = {}
         self._symbol_shapes = {}
 
-    def set_symbol(self, expr: Symbol, type: LowerType | None = None, shape: tuple[Expr, ...] | None = None):
+    def set_symbol(self, expr: Symbol, type: tuple[Type, LowerType] | None = None, shape: tuple[Expr, ...] | None = None):
         if type is not None:
             assert expr not in self._symbol_types
             self._symbol_types[expr] = type
@@ -127,10 +133,18 @@ class TypeCache:
 
     def __init__(self, ctx: TypeContext) -> None:
         self._ctx = ctx
+        self._type_cache = {}
+        self._shape_cache = {}
+
+    def get_symbol_type(self, expr: Symbol):
+        return self._ctx.get_type(expr)
+
+    def get_symbol_shape(self, expr: Symbol):
+        return self._ctx.get_shape(expr)
 
     def get_type(self, expr: Expr) -> Type:
         if isinstance(expr, Symbol):
-            return self._ctx.get_type(expr).as_type()
+            return self._ctx.get_type(expr)[0]
 
         if expr in self._type_cache:
             return self._type_cache[expr]
@@ -181,3 +195,24 @@ class TypeCache:
                 return shape[:expr.axis] + shape[expr.axis + 1:]
             case _:
                 raise TypeError(f"cannot get shape from {expr}")
+
+class TypedAssignExpr:
+    expr: AssignExpr
+    type: Type
+    shape: tuple[Expr, ...]
+
+    def __init__(self, expr: AssignExpr, ctx: TypeCache) -> None:
+        self.expr = expr
+        lhs_type = ctx.get_type(expr.lhs)
+        rhs_type = ctx.get_type(expr.rhs)
+        assert lhs_type.is_subtype(rhs_type), f"cannot assign type {rhs_type} to {lhs_type}"
+        self.type = lhs_type
+
+        lhs_shape = ctx.get_shape(expr.lhs)
+        rhs_shape = ctx.get_shape(expr.rhs)
+        shape = merge_shape(lhs_shape, rhs_shape)
+        assert shape == lhs_shape, "incompatible shape"
+        self.shape = shape
+
+    def total_size(self):
+        return Times.make(self.shape).evaluate()

@@ -1,10 +1,12 @@
 from unittest import TestCase
 
+from pylat.jit import typed
 from pylat.jit.openmp import OpenMPBackend
+from pylat.jit.typed import ComplexFloatType, IntType, TypeContext, FloatType
 from pylat.util import add_line_numbers
 
 from .jit.compile import JitCompiler
-from .expr import AssignExpr, ComplexType, Int, IntegerType, Plus, Rational, Symbol, Times, symbol, S
+from .expr import AssignExpr, Int, Plus, Rational, Symbol, Times, symbol, S, symbols
 
 from llvmlite import binding as llvm
 
@@ -31,17 +33,22 @@ class JitTest(TestCase):
         super().__init__(methodName)
 
     def test_jit(self):
-        nx = Symbol(('nx',), type=IntegerType(), shape=())
-        ny = Symbol(('ny',), type=IntegerType(), shape=())
-        nz = Symbol(('nz',), type=IntegerType(), shape=())
-        dt = Symbol(('dt',), shape=())
-        phi = Symbol(('phi',), type=ComplexType(), shape=(nz, ny, nx))
-        mom_phi = Symbol(('mom_phi',), type=ComplexType(), shape=(nz, ny, nx))
+        nx, ny, nz, dt = symbols('nx', 'ny', 'nz', 'dt')
+        phi, mom_phi = symbols('phi', 'mom_phi')
+        # phi = Symbol(('phi',), type=ComplexType(), shape=(nz, ny, nx))
+        # mom_phi = Symbol(('mom_phi',), type=ComplexType(), shape=(nz, ny, nx))
+        context = TypeContext()
+        context.set_symbol(nx, (typed.IntegerType(), IntType(64, False)), ())
+        context.set_symbol(ny, (typed.IntegerType(), IntType(64, False)), ())
+        context.set_symbol(nz, (typed.IntegerType(), IntType(64, False)), ())
+        context.set_symbol(dt, (typed.RealType(), FloatType(64)), ())
+        context.set_symbol(phi, (typed.ComplexType(), ComplexFloatType(64)), (nz, ny, nx))
+        context.set_symbol(mom_phi, (typed.ComplexType(), ComplexFloatType(64)), (nz, ny, nx))
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_one_kernel([
             AssignExpr(phi, mom_phi * dt)
-        ])
+        ], context)
 
         lines = fn.print_all()
 

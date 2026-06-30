@@ -1,9 +1,8 @@
-from typing import Any
 from weakref import WeakKeyDictionary
 
 from llvmlite.binding.orcjit import ctypes
 
-from .llvm import ArrayType, BasicBlock, Float32Type, Float64Type, FnType, IcmpOp, IntType, Phi, PointerType, StructType, Type, Value
+from .llvm import ArrayType, BasicBlock, FloatType, FnType, IcmpOp, IntType, Phi, PointerType, StructType, Type, Value
 
 class ForLoopBuilder:
     _entry: BasicBlock
@@ -61,10 +60,14 @@ class TypeConverter:
                         return ctypes.c_int64
                     case _:
                         raise TypeError(f"cannot convert to ctype: {type}")
-            case Float32Type():
-                return ctypes.c_float
-            case Float64Type():
-                return ctypes.c_double
+            case FloatType(bits):
+                match bits:
+                    case 32:
+                        return ctypes.c_float
+                    case 64:
+                        return ctypes.c_double
+                    case _:
+                        raise ValueError(f"cannot convert to ctype: {type}")
             case StructType():
                 if type in self._struct_type_cache:
                     return self._struct_type_cache[type]

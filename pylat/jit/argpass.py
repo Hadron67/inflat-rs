@@ -3,8 +3,7 @@ import ctypes
 from dataclasses import dataclass
 from typing import Any, Callable, override
 
-from ..expr import Expr
-from .llvm import FloatType, IntType
+from .typed import FloatType, IntType
 
 @dataclass
 class TypesConfig:

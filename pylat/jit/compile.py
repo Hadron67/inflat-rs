@@ -2,20 +2,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, TypeAlias, override
 
-from ..expr import AssignExpr, ComplexType, Cos, Exp, Expr, Float, Int, IntegerType, Ln, Plus, Power, Rational, RealType, Roll, Sin, Slice, Symbol, Times
+from . import typed
+from .typed import ComplexFloatType, ComplexType, IntegerType, LowerType, RealType, TypeCache, TypeContext, TypedAssignExpr
+
+from ..expr import AssignExpr, Cos, Exp, Expr, Float, Int, Ln, Plus, Power, Rational, Roll, Sin, Slice, Symbol, Times
 from .argpass import ArrayArgInfo, ScalarArgInfo, SymbolArgInfo, TypesConfig
 from .backend import Backend, CompiledBackendFunction, LoopKernel
-from .llvm import I64, BasicBlock, Float64Type, FloatType, FloatValue, IntType, IntValue, PointerType, StructType, Type, Value
+from .llvm import BasicBlock, FloatType, FloatValue, IntType, IntValue, PointerType, StructType, Type, Value
 
-_TYPE_ORDER: list[type[Expr]] = [ComplexType, RealType, IntegerType]
-
-def combine_types(type1: Expr, type2: Expr):
-    for t in _TYPE_ORDER:
-        if isinstance(type1, t) or isinstance(type2, t):
-            return t()
-    raise TypeError(f"cannot combine incompatible types {type1} and {type2} (or some of them is not type)")
-
-def _check_and_get_total_size(exprs: list[AssignExpr]):
+def _check_and_get_total_size(exprs: list[TypedAssignExpr]):
     first_size = exprs[0].total_size()
     for expr in exprs[1:]:
         expr_size = expr.total_size()
@@ -32,15 +27,17 @@ class StandardLayoutMode(Enum):
 
 class _SymbolScope:
     _parent: 'JitCompiler'
+    type_cache: TypeCache
     _symbol_values: dict[Symbol, SymbolArgInfo]
     _args: list[Type]
     _helper: '_CompileHelper'
 
-    def __init__(self, parent: 'JitCompiler', helper: '_CompileHelper') -> None:
+    def __init__(self, parent: 'JitCompiler', helper: '_CompileHelper', type_cache: TypeCache) -> None:
         self._parent = parent
         self._symbol_values = {}
         self._args = []
         self._helper = helper
+        self.type_cache = type_cache
 
     def get_symbol(self, symbol: Symbol):
         return self._symbol_values[symbol]
@@ -63,10 +60,10 @@ class _SymbolScope:
     def _add_symbol(self, expr: Symbol, is_ref: bool):
         if expr in self._symbol_values:
             return
-        type = expr.type
-        shape = expr.shape
+        type, lower_type = self.type_cache.get_symbol_type(expr)
+        shape = self.type_cache.get_symbol_shape(expr)
         assert shape is not None, f"cannot compile symbol {expr} with unspecified shape"
-        llvm_type = self._helper.convert_type(type)
+        llvm_type = self._helper.lower_type_to_llvm_type(lower_type)
         if len(shape) == 0:
             if is_ref:
                 ret = ScalarArgInfo(
@@ -82,11 +79,11 @@ class _SymbolScope:
                 self._symbol_values[expr] = ret
         else:
             for i in shape:
-                t = i.get_type()
-                assert t == IntegerType(), f"integer type expected for shape, got {t}"
+                t = self.type_cache.get_type(i)
+                assert isinstance(t, typed.IntegerType), f"integer type expected for shape, got {t}"
             ret = ArrayArgInfo(
-                self._add_arg(PointerType(self._helper.convert_type(type))),
-                tuple(self._add_arg(self._parent.index_type) for _ in range(len(shape))),
+                self._add_arg(PointerType(llvm_type)),
+                tuple(self._add_arg(self._helper.llvm_index_type) for _ in range(len(shape))),
             )
             self._symbol_values[expr] = ret
 
@@ -110,15 +107,16 @@ class _SymbolScope:
                 children.reverse()
                 todo.extend(children)
 
-    def scan_assignment(self, expr: AssignExpr):
+    def scan_assignment(self, typed_expr: TypedAssignExpr):
+        expr = typed_expr.expr
         self.scan_lvalue_symbols(expr.lhs)
         self.scan_symbols(expr.lhs)
         self.scan_symbols(expr.rhs)
-        assert expr.shape is not None
-        for e in expr.shape:
+
+        for e in typed_expr.shape:
             self.scan_symbols(e)
 
-    def scan_assignments(self, exprs: list[AssignExpr]):
+    def scan_assignments(self, exprs: list[TypedAssignExpr]):
         for expr in exprs:
             self.scan_assignment(expr)
 
@@ -151,6 +149,7 @@ class _FunctionCompiler:
     _layout_mode: StandardLayoutMode
     _symbol_scope: _SymbolScope
     _args: tuple[Value, ...]
+    _type_cache: TypeCache
 
     def __init__(
         self,
@@ -169,10 +168,10 @@ class _FunctionCompiler:
         self._expr_cache = {}
         self._subscript_cache = {}
         self._finished = False
+        self._type_cache = symbol_scope.type_cache
         self._standard_layout = standard_layout
 
-    def _add(self, left: _MaybeComplexValue, left_type: Expr, right: _MaybeComplexValue, right_type: Expr) -> _MaybeComplexValue:
-        result_type = combine_types(left_type, right_type)
+    def _add(self, left: _MaybeComplexValue, left_type: typed.Type, right: _MaybeComplexValue, right_type: typed.Type, result_type: typed.Type) -> _MaybeComplexValue:
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
         if isinstance(result_type, ComplexType):
@@ -180,8 +179,7 @@ class _FunctionCompiler:
         assert not isinstance(left, _ComplexValue) and not isinstance(right, _ComplexValue)
         return self._block.add(left, right)
 
-    def _sub(self, left: _MaybeComplexValue, left_type: Expr, right: _MaybeComplexValue, right_type: Expr) -> _MaybeComplexValue:
-        result_type = combine_types(left_type, right_type)
+    def _sub(self, left: _MaybeComplexValue, left_type: typed.Type, right: _MaybeComplexValue, right_type: typed.Type, result_type: typed.Type) -> _MaybeComplexValue:
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
         if isinstance(result_type, ComplexType):
@@ -189,8 +187,7 @@ class _FunctionCompiler:
         assert not isinstance(left, _ComplexValue) and not isinstance(right, _ComplexValue)
         return self._block.sub(left, right)
 
-    def _mul(self, left: _MaybeComplexValue, left_type: Expr, right: _MaybeComplexValue, right_type: Expr) -> _MaybeComplexValue:
-        result_type = combine_types(left_type, right_type)
+    def _mul(self, left: _MaybeComplexValue, left_type: typed.Type, right: _MaybeComplexValue, right_type: typed.Type, result_type: typed.Type) -> _MaybeComplexValue:
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
         if isinstance(result_type, ComplexType):
@@ -198,8 +195,7 @@ class _FunctionCompiler:
         assert not isinstance(left, _ComplexValue) and not isinstance(right, _ComplexValue)
         return self._block.mul(left, right)
 
-    def _div(self, left: _MaybeComplexValue, left_type: Expr, right: _MaybeComplexValue, right_type: Expr) -> _MaybeComplexValue:
-        result_type = combine_types(left_type, right_type)
+    def _div(self, left: _MaybeComplexValue, left_type: typed.Type, right: _MaybeComplexValue, right_type: typed.Type, result_type: typed.Type) -> _MaybeComplexValue:
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
         if isinstance(result_type, ComplexType):
@@ -207,14 +203,13 @@ class _FunctionCompiler:
         assert not isinstance(left, _ComplexValue) and not isinstance(right, _ComplexValue)
         return self._block.div(left, right, True)
 
-    def _sqrt(self, expr: _MaybeComplexValue, type: Expr):
+    def _sqrt(self, expr: _MaybeComplexValue, type: typed.Type):
         if isinstance(type, ComplexType):
             raise NotImplementedError
         assert not isinstance(expr, _ComplexValue)
         return self._block.sqrt(expr)
 
-    def _pow(self, base: _MaybeComplexValue, base_type: Expr, exp: _MaybeComplexValue, exp_type: Expr):
-        result_type = combine_types(base_type, exp_type)
+    def _pow(self, base: _MaybeComplexValue, base_type: typed.Type, exp: _MaybeComplexValue, exp_type: typed.Type, result_type: typed.Type):
         base = self._helper.coerce(self._block, base, result_type, result_type)
         exp = self._helper.coerce(self._block, exp, result_type, result_type)
         if isinstance(result_type, ComplexType):
@@ -262,58 +257,63 @@ class _FunctionCompiler:
             self._compile_subscript(tuple(self._args[i] for i in info.strides), subscripts),
         )
 
-    def _compile_expr_no_cache(self, expr: Expr, subscripts: tuple[Value, ...]) -> _MaybeComplexValue:
-        jc = self.parent
+    def _from_lower_real_value(self, value: Value, lower_type: LowerType):
+        return self._helper.coerce_lower_type(self._block, value, lower_type, self.parent.real_type)
 
+    def _compile_expr_no_cache(self, expr: Expr, subscripts: tuple[Value, ...]) -> _MaybeComplexValue:
+        h = self._helper
+
+        expr_type = self._type_cache.get_type(expr)
         match expr:
             case Int(value):
-                return IntValue(value, self.parent.index_type)
+                return IntValue(value, h.llvm_index_type)
             case Rational(numerator, denominator):
-                return FloatValue(numerator / denominator, self.parent.real_type)
+                return FloatValue(numerator / denominator, h.llvm_real_type)
             case Float(value):
-                return FloatValue(value, self.parent.real_type)
+                return FloatValue(value, h.llvm_real_type)
             case Symbol():
                 sym = self._symbol_scope.get_symbol(expr)
-                assert sym is not None
+                type, lower_type = self._type_cache.get_symbol_type(expr)
+                lower_target_type = self._helper.type_to_lower_type(type)
+                ret = None
                 match sym:
                     case ScalarArgInfo():
-                        if sym.is_ref:
-                            return self._block.load(self._args[sym.value])
-                        else:
-                            return self._args[sym.value]
+                        ret = self._block.load(self._args[sym.value]) if sym.is_ref else self._args[sym.value]
                     case ArrayArgInfo():
                         ret = self._block.load(self._compile_array_symbol_access(sym, subscripts))
-                        return ret
+                    case _:
+                        raise NotImplementedError
+                return self._helper.coerce_lower_type(self._block, ret, lower_type, lower_target_type)
             case Roll():
                 assert not self._standard_layout, "cannot compile Roll in standard layout mode"
-                expr_shape = expr.expr.get_shape()
+                expr_shape = self._type_cache.get_shape(expr.expr)
                 assert expr_shape is not None, "cannot compile unspecified shape"
                 len = self.compile_non_complex_expr(expr_shape[expr.axis], ())
                 new_index = subscripts[expr.axis]
-                new_index = self._block.add(new_index, IntValue(-expr.amount, jc.index_type))
+                new_index = self._block.add(new_index, IntValue(-expr.amount, h.llvm_index_type))
                 new_index = self._block.rem(new_index, len, False)
                 subscripts = subscripts[:expr.axis] + (new_index,) + subscripts[expr.axis + 1:]
                 return self.compile_expr(expr.expr, subscripts)
             case Slice():
-                return self.compile_expr(expr.expr, subscripts[:expr.axis] + (IntValue(expr.index, jc.index_type),) + subscripts[expr.axis + 1:])
+                return self.compile_expr(expr.expr, subscripts[:expr.axis] + (IntValue(expr.index, h.llvm_index_type),) + subscripts[expr.axis + 1:])
             case Plus(children):
-                ret_type = children[0].get_type()
+                ret_type = self._type_cache.get_type(children[0])
                 ret = self.compile_expr(children[0], subscripts)
                 for child in children[1:]:
-                    child_type = child.get_type()
-                    ret = self._add(ret, ret_type, self.compile_expr(child, subscripts), child_type)
+                    child_type = self._type_cache.get_type(child)
+                    ret = self._add(ret, ret_type, self.compile_expr(child, subscripts), child_type, expr_type)
                     ret_type = child_type
                 return ret
             case Times(children):
-                ret_type = children[0].get_type()
+                ret_type = self._type_cache.get_type(children[0])
                 ret = self.compile_expr(children[0], subscripts)
                 for child in children[1:]:
-                    child_type = child.get_type()
-                    ret = self._mul(ret, ret_type, self.compile_expr(child, subscripts), child_type)
+                    child_type = self._type_cache.get_type(child)
+                    ret = self._mul(ret, ret_type, self.compile_expr(child, subscripts), child_type, expr_type)
                     ret_type = child_type
                 return ret
             case Power(_, exponent):
-                base_type = expr.base.get_type()
+                base_type = self._type_cache.get_type(expr.base)
                 base = self.compile_expr(expr.base, subscripts)
                 match exponent:
                     case Int(exp_value):
@@ -323,45 +323,47 @@ class _FunctionCompiler:
                             neg = True
                         ret = base
                         for _ in range(exp_value - 1):
-                            ret = self._mul(ret, base_type, base, base_type)
+                            ret = self._mul(ret, base_type, base, base_type, expr_type)
                         if neg:
-                            ret = self._div(self.parent.real_type.from_int(1), base_type, ret, base_type)
+                            ret = self._div(h.llvm_real_type.from_int(1), base_type, ret, base_type, expr_type)
                         return ret
                     case Rational(1, 2):
                         return self._sqrt(self.compile_expr(expr.base, subscripts), base_type)
                     case Rational(-1, 2):
-                        return self._div(self.parent.real_type.from_int(1), base_type, self._sqrt(self.compile_expr(expr.base, subscripts), base_type), base_type)
+                        return self._div(h.llvm_real_type.from_int(1), base_type, self._sqrt(self.compile_expr(expr.base, subscripts), base_type), base_type, expr_type)
                     case _:
                         exp_value = self.compile_expr(exponent, ())
-                        return self._pow(self.compile_expr(expr.base, subscripts), base_type, exp_value, exponent.get_type())
+                        exp_type = self._type_cache.get_type(exponent)
+                        return self._pow(self.compile_expr(expr.base, subscripts), base_type, exp_value, exp_type, expr_type)
             case Sin(expr):
-                assert isinstance(expr.get_type(), RealType), "sin currently only supports real types"
+                assert isinstance(expr_type, RealType), "sin currently only supports real types"
                 return self._block.sin(self.compile_non_complex_expr(expr, subscripts))
             case Cos(expr):
-                assert isinstance(expr.get_type(), RealType), "cos currently only supports real types"
+                assert isinstance(expr_type, RealType), "cos currently only supports real types"
                 return self._block.cos(self.compile_non_complex_expr(expr, subscripts))
             case Ln(expr):
-                assert isinstance(expr.get_type(), RealType), "ln currently only supports real types"
+                assert isinstance(expr_type, RealType), "ln currently only supports real types"
                 return self._block.ln(self.compile_non_complex_expr(expr, subscripts))
             case Exp(expr):
-                assert isinstance(expr.get_type(), RealType), "exp currently only supports real types"
+                assert isinstance(expr_type, RealType), "exp currently only supports real types"
                 return self._block.exp(self.compile_non_complex_expr(expr, subscripts))
 
         raise TypeError(f'unsupported expression: {expr}')
 
-    def _compile_lvalue(self, expr: Expr, subscripts: tuple[Value, ...]) -> Value:
+    def _compile_lvalue(self, expr: Expr, subscripts: tuple[Value, ...]) -> tuple[Value, LowerType]:
         match expr:
             case Symbol():
                 sym = self._symbol_scope.get_symbol(expr)
+                type, lower_type = self._type_cache.get_symbol_type(expr)
                 assert sym is not None
                 match sym:
                     case ScalarArgInfo():
                         if sym.is_ref:
-                            return self._args[sym.value]
+                            return self._args[sym.value], lower_type
                         else:
                             raise TypeError(f"cannot use {expr} as left-value")
                     case ArrayArgInfo():
-                        return self._compile_array_symbol_access(sym, subscripts)
+                        return self._compile_array_symbol_access(sym, subscripts), lower_type
         raise ValueError(f"cannot use {expr} as left-value")
 
     def compile_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> _MaybeComplexValue:
@@ -377,28 +379,36 @@ class _FunctionCompiler:
         assert not isinstance(ret, _ComplexValue)
         return ret
 
-    def _compile_assignment(self, expr: AssignExpr, tid: Value):
-        shape = expr.shape
+    def _compile_assignment(self, typed_expr: TypedAssignExpr, tid: Value):
+        type = typed_expr.type
+        shape = typed_expr.shape
+        expr = typed_expr.expr
         assert shape is not None, f"cannot compile expression {expr} with unspecified shape"
         shape = tuple(self.compile_non_complex_expr(i, ()) for i in shape)
         indices = self._compile_unpack_subscripts(shape, tid)
-        lhs_ptr = self._compile_lvalue(expr.lhs, indices)
+        lhs_ptr, lhs_lower_type = self._compile_lvalue(expr.lhs, indices)
+
+        rhs_lower_type = self._helper.type_to_lower_type(type)
         rhs_value = self.compile_expr(expr.rhs, indices)
+
+        result_value = None
         match expr.op:
             case '':
-                self._store(lhs_ptr, rhs_value)
+                result_value = rhs_value
             case '+':
-                self._store(lhs_ptr, self._add(self._block.load(lhs_ptr), expr.type, rhs_value, expr.type))
+                result_value = self._add(self._block.load(lhs_ptr), type, rhs_value, type, type)
             case '-':
-                self._store(lhs_ptr, self._sub(self._block.load(lhs_ptr), expr.type, rhs_value, expr.type))
+                result_value = self._sub(self._block.load(lhs_ptr), type, rhs_value, type, type)
             case '*':
-                self._store(lhs_ptr, self._mul(self._block.load(lhs_ptr), expr.type, rhs_value, expr.type))
+                result_value = self._mul(self._block.load(lhs_ptr), type, rhs_value, type, type)
             case '/':
-                self._store(lhs_ptr, self._div(self._block.load(lhs_ptr), expr.type, rhs_value, expr.type))
+                result_value = self._div(self._block.load(lhs_ptr), type, rhs_value, type, type)
             case _:
                 raise ValueError(f"unknown op {expr.op}")
+        result_value = self._helper.coerce_lower_type(self._block, result_value, rhs_lower_type, lhs_lower_type)
+        self._store(lhs_ptr, rhs_value)
 
-    def compile_assignments(self, exprs: list[AssignExpr], tid: Value):
+    def compile_assignments(self, exprs: list[TypedAssignExpr], tid: Value):
         assert not self._finished
         self._finished = True
 
@@ -409,22 +419,53 @@ class _FunctionCompiler:
 
 class _CompileHelper:
     parent: 'JitCompiler'
-    complex_type: Type
+    llvm_index_type: IntType
+    llvm_real_type: FloatType
+    complex_types: dict[Type, StructType]
 
     def __init__(self, parent: 'JitCompiler') -> None:
         self.parent = parent
-        self.complex_type = StructType(parent.real_type, parent.real_type)
+        self.complex_types = {}
+        self.llvm_index_type = IntType(parent.index_type.bits)
+        self.llvm_real_type = FloatType(parent.real_type.bits)
 
-    def convert_type(self, type: Expr) -> Type:
+    def get_complex_type(self, type: Type):
+        if type in self.complex_types:
+            return self.complex_types[type]
+        ret = StructType(type, type)
+        self.complex_types[type] = ret
+        return ret
+
+    def lower_type_to_llvm_type(self, type: LowerType):
         match type:
-            case IntegerType():
-                return self.parent.index_type
-            case RealType():
-                return self.parent.real_type
-            case ComplexType():
-                return self.complex_type
+            case typed.IntType():
+                return IntType(type.bits)
+            case typed.FloatType(bits):
+                return FloatType(bits)
+            case typed.ComplexFloatType(bits):
+                return self.get_complex_type(FloatType(bits))
             case _:
                 raise ValueError(f"cannot convert type {type}")
+
+    def type_to_lower_type(self, type: typed.Type) -> LowerType:
+        match type:
+            case typed.IntegerType():
+                return self.parent.index_type
+            case typed.RealType():
+                return self.parent.real_type
+            case typed.ComplexType():
+                return ComplexFloatType(self.parent.real_type.bits)
+            case _:
+                raise TypeError(f"cannot convert to lower type: {type}")
+
+    def lower_type_to_type(self, type: LowerType) -> typed.Type:
+        match type:
+            case typed.IntType() | typed.FloatType():
+                return RealType()
+            case typed.ComplexFloatType():
+                return ComplexType()
+            case _:
+                raise TypeError(f"unsupported type {type}")
 
     def expand_complex_value(self, b: BasicBlock, value: _MaybeComplexValue) -> tuple[Value, Value]:
         match value:
@@ -473,29 +514,29 @@ class _CompileHelper:
         b_im = block.fneg(block.div(b_im, den, True))
         return self.complex_mul(block, a, _ComplexValue(b_re, b_im))
 
-    def coerce_to_complex_type(self, block: BasicBlock, value: _MaybeComplexValue, value_type: Expr) -> _MaybeComplexValue:
+    def coerce_to_complex_type(self, block: BasicBlock, value: _MaybeComplexValue, value_type: typed.Type) -> _MaybeComplexValue:
         match value_type:
             case ComplexType():
                 return value
             case RealType():
                 assert not isinstance(value, _ComplexValue)
-                return _ComplexValue(value, FloatValue(0, self.parent.real_type))
+                return _ComplexValue(value, FloatValue(0, self.llvm_real_type))
             case IntegerType():
                 assert not isinstance(value, _ComplexValue)
-                return _ComplexValue(block.int_to_float(value, self.parent.real_type), FloatValue(0, self.parent.real_type))
+                return _ComplexValue(block.int_to_float(value, self.llvm_real_type), FloatValue(0, self.llvm_real_type))
             case _:
                 raise TypeError(f"cannot coerce type {value_type} to complex")
 
-    def coerce_to_real_type(self, block: BasicBlock, value: Value, value_type: Expr):
+    def coerce_to_real_type(self, block: BasicBlock, value: Value, value_type: typed.Type):
         match value_type:
             case RealType():
                 return value
             case IntegerType():
-                return block.int_to_float(value, self.parent.real_type)
+                return block.int_to_float(value, self.llvm_real_type)
             case _:
                 raise TypeError(f"cannot coerce type {value_type} to real")
 
-    def coerce(self, block: BasicBlock, value: _MaybeComplexValue, value_type: Expr, target_type: Expr) -> _MaybeComplexValue:
+    def coerce(self, block: BasicBlock, value: _MaybeComplexValue, value_type: typed.Type, target_type: typed.Type) -> _MaybeComplexValue:
         match target_type:
             case ComplexType():
                 return self.coerce_to_complex_type(block, value, value_type)
@@ -508,6 +549,35 @@ class _CompileHelper:
                 return value
             case _:
                 raise TypeError("????")
+
+    def coerce_lower_type(self, block: BasicBlock, value: _MaybeComplexValue, value_type: LowerType, target_type: LowerType) -> _MaybeComplexValue:
+        match target_type:
+            case ComplexFloatType():
+                assert isinstance(value_type, ComplexFloatType)
+                if target_type.bits > value_type.bits:
+                    re, im = self.expand_complex_value(block, value)
+                    re = block.float_ext(re, FloatType(target_type.bits))
+                    im = block.float_ext(im, FloatType(target_type.bits))
+                    return _ComplexValue(re, im)
+                if target_type.bits < value_type.bits:
+                    re, im = self.expand_complex_value(block, value)
+                    re = block.float_ext(re, FloatType(target_type.bits))
+                    im = block.float_ext(im, FloatType(target_type.bits))
+                    return _ComplexValue(re, im)
+                return value
+            case typed.FloatType():
+                assert not isinstance(value, _ComplexValue)
+                assert isinstance(value_type, typed.FloatType)
+                if target_type.bits > value_type.bits:
+                    return block.float_ext(value, FloatType(value_type.bits))
+                if target_type.bits < value_type.bits:
+                    return block.float_trunc(value, FloatType(value_type.bits))
+                return value
+            case typed.IntType():
+                assert isinstance(value_type, typed.IntType)
+                assert target_type == value_type
+                return value
+        raise NotImplementedError
 
 class CompiledWrapper:
     _symbols: _SymbolScope
@@ -530,23 +600,24 @@ class CompiledWrapper:
 
 class _AssignmentsKernel(LoopKernel):
     _parent: 'JitCompiler'
-    _exprs: list[AssignExpr]
+    _exprs: list[TypedAssignExpr]
     _symbol_scope: _SymbolScope
     _total_size: Expr
     _helper: _CompileHelper
 
     @override
-    def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr]) -> None:
+    def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext) -> None:
+        type_cache = TypeCache(type_context)
         self._parent = parent
-        self._exprs = exprs
-        self._total_size = _check_and_get_total_size(exprs)
+        self._exprs = list(TypedAssignExpr(a, type_cache) for a in exprs)
+        self._total_size = _check_and_get_total_size(self._exprs)
         self._helper = _CompileHelper(parent)
-        self._symbol_scope = _SymbolScope(parent, self._helper)
-        self._symbol_scope.scan_assignments(exprs)
+        self._symbol_scope = _SymbolScope(parent, self._helper, type_cache)
+        self._symbol_scope.scan_assignments(self._exprs)
 
     @override
     def get_index_type(self) -> IntType:
-        return self._parent.index_type
+        return IntType(self._parent.index_type.bits)
 
     @override
     def get_args(self) -> tuple[Type, ...]:
@@ -566,18 +637,13 @@ class _AssignmentsKernel(LoopKernel):
 class JitCompiler(TypesConfig):
     _backend: Backend
 
-    def __init__(self, backend: Backend, real_type: FloatType = Float64Type(), index_type: IntType = I64):
+    def __init__(self, backend: Backend, real_type: typed.FloatType = typed.FloatType(64), index_type: typed.IntType = typed.IntType(64, False)):
         self._backend = backend
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_one_kernel(self, exprs: list[AssignExpr]) -> CompiledWrapper:
-        total_size = _check_and_get_total_size(exprs)
-        if total_size.is_one():
-            # No backend needed
-            raise NotImplementedError
-
-        kernel = _AssignmentsKernel(self, exprs)
+    def compile_one_kernel(self, exprs: list[AssignExpr], type_context: TypeContext) -> CompiledWrapper:
+        kernel = _AssignmentsKernel(self, exprs, type_context)
         compiled = self._backend.compile_paralell_loop(kernel)
 
         return CompiledWrapper(kernel._symbol_scope, compiled)
