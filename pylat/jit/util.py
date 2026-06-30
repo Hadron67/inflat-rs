@@ -1,4 +1,9 @@
-from .llvm import BasicBlock, IcmpOp, Phi, Value
+from typing import Any
+from weakref import WeakKeyDictionary
+
+from llvmlite.binding.orcjit import ctypes
+
+from .llvm import ArrayType, BasicBlock, Float32Type, Float64Type, FnType, IcmpOp, IntType, Phi, PointerType, StructType, Type, Value
 
 class ForLoopBuilder:
     _entry: BasicBlock
@@ -36,3 +41,44 @@ class ForLoopBuilder:
     @property
     def body_entry(self):
         return self._body_entry
+
+class TypeConverter:
+    _struct_type_cache: WeakKeyDictionary[StructType, type]
+    def __init__(self) -> None:
+        self._struct_type_cache = WeakKeyDictionary()
+
+    def llvm_to_ctype(self, type: Type):
+        match type:
+            case IntType(bits):
+                match bits:
+                    case 8:
+                        return ctypes.c_int8
+                    case 16:
+                        return ctypes.c_int16
+                    case 32:
+                        return ctypes.c_int32
+                    case 64:
+                        return ctypes.c_int64
+                    case _:
+                        raise TypeError(f"cannot convert to ctype: {type}")
+            case Float32Type():
+                return ctypes.c_float
+            case Float64Type():
+                return ctypes.c_double
+            case StructType():
+                if type in self._struct_type_cache:
+                    return self._struct_type_cache[type]
+                s: Any = ctypes.Structure
+                class _Ret(s):
+                    _fields_ = tuple(self.llvm_to_ctype(a) for a in type.fields)
+                self._struct_type_cache[type] = _Ret
+                return _Ret
+            case ArrayType():
+                return self.llvm_to_ctype(type.child) * type.length
+            case PointerType(child):
+                fn: Any = ctypes.POINTER
+                return fn(self.llvm_to_ctype(child))
+            case FnType():
+                return ctypes.CFUNCTYPE(self.llvm_to_ctype(type.return_type), *(self.llvm_to_ctype(a) for a in type.args))
+            case _:
+                raise TypeError(f"cannot convert to ctype: {type}")

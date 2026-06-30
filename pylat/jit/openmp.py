@@ -2,11 +2,11 @@ from ctypes import CDLL
 import ctypes
 from os import environ
 
-from typing_extensions import override
+from typing import override
+from llvmlite import binding as llvm
 
-from pylat.jit.util import ForLoopBuilder
-
-from .llvm import I32, I64, I8, AggregateValue, BasicBlock, FnType, Function, GlobalDefineValue, IcmpOp, IntType, IntValue, Module, PointerType, StringLiteralValue, StructType, Type, Value, VoidType, VoidValue
+from .util import ForLoopBuilder, TypeConverter
+from .llvm import I32, I64, I8, BasicBlock, FnType, Function, GlobalAggregateValue, GlobalScalarValue, GlobalStringValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Value, VoidType, VoidValue
 from .backend import Backend, CompiledBackendFunction, LoopKernel, ParallelForLoopProvider
 
 class _Types:
@@ -46,6 +46,9 @@ def _try_open_libomp(try_paths: list[str]) -> CDLL:
     raise RuntimeError(f"failed to load libomp, tries paths: {', '.join(try_paths)}")
 
 class OpenMPBackend(Backend):
+    _libomp: CDLL
+    _type_converter: TypeConverter
+
     def __init__(self, libomp: str | CDLL | None = None) -> None:
         match libomp:
             case str():
@@ -57,18 +60,19 @@ class OpenMPBackend(Backend):
                     "/usr/lib/libomp.so",
                     "/opt/homebrew/opt/llvm/lib/libomp.dylib",
                 ])
+        self._type_converter = TypeConverter()
 
     @override
     def compile_paralell_loop(self, kernel: LoopKernel) -> CompiledBackendFunction:
         index_type = kernel.get_index_type()
         arg_types = kernel.get_args()
-        ident = GlobalDefineValue(AggregateValue(_Types.IDENT_T,
+        ident = GlobalAggregateValue(_Types.IDENT_T,
             IntValue(0, I32),
             IntValue(0, I32),
             IntValue(0, I32),
             IntValue(0, I32),
-            GlobalDefineValue(StringLiteralValue(b';unknown;unknown;0;0;;\00')),
-        ))
+            GlobalStringValue(b';unknown;unknown;0;0;;\00'),
+        )
         init_fn_name, init_fn_type = _create_kmpc_for_static_init(index_type, True)
         api_table_type = StructType(
             PointerType(_Types.KMPC_FORK_CALL),
@@ -159,16 +163,26 @@ class OpenMPBackend(Backend):
         mod = Module()
         mod.add_recursively(values=[outer_fn])
 
-        return _Compiled(self, mod)
+        assert outer_fn.name is not None
+        return _Compiled(self, mod, outer_fn.name)
 
 class _Compiled(CompiledBackendFunction):
     _parent: OpenMPBackend
     _mod: Module
 
     @override
-    def __init__(self, parent: OpenMPBackend, mod: Module) -> None:
+    def __init__(self, parent: OpenMPBackend, mod: Module, entry_name: str) -> None:
         self._parent = parent
         self._mod = mod
+
+        target = llvm.Target.from_default_triple()
+        tm = target.create_target_machine()
+
+        llvm_mod = llvm.parse_assembly('\n'.join(mod.write()))
+        llvm_mod.verify()
+
+        engine = llvm.create_mcjit_compiler(llvm_mod, tm)
+        engine.finalize_object()
 
     @override
     def call(self, *args):

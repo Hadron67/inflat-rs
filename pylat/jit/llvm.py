@@ -298,58 +298,38 @@ class FloatValue(Value):
     def get_type(self) -> Type:
         return self.type
 
-@dataclass
-@gen_get_children
-class AggregateValue(Value):
-    type: Type
-    values: tuple[Value, ...]
+# @dataclass
+# @gen_get_children
+# class AggregateValue(Value):
+#     type: Type
+#     values: tuple[Value, ...]
 
-    @override
-    def __init__(self, type: Type, *values: Value) -> None:
-        match type:
-            case StructType():
-                for field, value in zip(type.fields, values):
-                    value_type = value.get_type()
-                    assert field.is_compatible(value_type), f"incompatible types {field} and {value_type}"
-            case ArrayType():
-                assert len(values) == type.length, f"wrong length {type.length} != {len(values)}"
-                for value in values:
-                    value_type = value.get_type()
-                    assert type.child.is_compatible(value_type), f"incompatible types {type.child} and {value_type}"
-        self.type = type
-        self.values = values
+#     @override
+#     def __init__(self, type: Type, *values: Value) -> None:
+#         match type:
+#             case StructType():
+#                 for field, value in zip(type.fields, values):
+#                     value_type = value.get_type()
+#                     assert field.is_compatible(value_type), f"incompatible types {field} and {value_type}"
+#             case ArrayType():
+#                 assert len(values) == type.length, f"wrong length {type.length} != {len(values)}"
+#                 for value in values:
+#                     value_type = value.get_type()
+#                     assert type.child.is_compatible(value_type), f"incompatible types {type.child} and {value_type}"
+#         self.type = type
+#         self.values = values
 
-    @override
-    def get_type(self) -> Type:
-        return self.type
+#     @override
+#     def get_type(self) -> Type:
+#         return self.type
 
-    @override
-    def stringify_value(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
-        return f"{{{", ".join(v.stringify(name_context, local_counter) for v in self.values)}}}"
+#     @override
+#     def stringify_value(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
+#         return f"{{{", ".join(v.stringify(name_context, local_counter) for v in self.values)}}}"
 
 _CHAR_CODES = [
 
 ]
-
-@dataclass
-class StringLiteralValue(Value):
-    data: bytes
-
-    @override
-    def get_type(self) -> Type:
-        return ArrayType(I8, len(self.data))
-
-    @override
-    def __str__(self) -> str:
-        ret = 'c"'
-        for d in self.data:
-            # TODO: escape all unprintable chars
-            if d == 0:
-                ret += '\\00'
-            else:
-                ret += bytes([d]).decode()
-        ret += '"'
-        return ret
 
 @dataclass
 class Undef(Value):
@@ -445,31 +425,118 @@ class GlobalValue(Value):
     def get_default_name_prefix(self) -> str:
         raise NotImplementedError
 
-@gen_get_children
-class GlobalDefineValue(GlobalValue):
-    value: Value
-    is_const: bool = True
-    is_private: bool = True
-    is_unnamed_addr: bool = True
+class GlobalValueFlags:
+    IS_CONST = 1
+    IS_PRIVATE = 2
+    IS_UNNAMED_ADDR = 4
 
-    def __init__(self, value: Value, is_const: bool = True, is_private: bool= True, is_unnamed_addr: bool = True) -> None:
+    ALL = 7
+
+    @staticmethod
+    def str(flags: int):
+        ret = ''
+        if flags & GlobalValueFlags.IS_CONST:
+            ret += 'private '
+        if flags & GlobalValueFlags.IS_PRIVATE:
+            ret += 'unnamed_addr '
+        if flags & GlobalValueFlags.IS_UNNAMED_ADDR:
+            ret += 'constant '
+        return ret
+
+@gen_get_children
+class GlobalScalarValue(GlobalValue):
+    value: Value
+    flags: int
+
+    @override
+    def __init__(self, value: Value, flags: int = GlobalValueFlags.ALL) -> None:
         self.value = value
-        super().__init__()
+        self.flags = flags
 
     @override
     def write_definition(self, name_context: NameContext) -> list[str]:
-        flags: str = ''
-        if self.is_private:
-            flags += 'private '
-        if self.is_unnamed_addr:
-            flags += 'unnamed_addr '
-        if self.is_const:
-            flags += 'constant '
+        flags = GlobalValueFlags.str(self.flags)
         return [f'@{name_context.get_global_name(self)} = {flags}{self.value.stringify(name_context)}']
 
     @override
     def get_type(self) -> Type:
         return PointerType(self.value.get_type())
+
+    @override
+    def get_default_name_prefix(self):
+        return "global"
+
+@gen_get_children
+class GlobalAggregateValue(GlobalValue):
+    values: list[Value]
+    flags: int
+    type: Type
+
+    @override
+    def __init__(self, type: Type, *values: Value, flags: int = GlobalValueFlags.ALL) -> None:
+        self.values = list(values)
+        self.flags = flags
+        self.type = type
+        match type:
+            case StructType():
+                assert len(values) == len(type.fields), f"length mismatch: {len(values)} != {len(type.fields)}"
+                for value, type in zip(values, type.fields):
+                    value_type = value.get_type()
+                    assert type.is_compatible(value_type), f"incompatible types {type} and {value_type}"
+            case ArrayType():
+                assert len(values) == type.length, f"length mismatch: {len(values)} != {type.length}"
+                for value in values:
+                    value_type = value.get_type()
+                    assert type.child.is_compatible(value_type), f"incompatible types {type.child} and {value_type}"
+            case _:
+                raise TypeError(f"{type} is not an aggregate type")
+
+    @override
+    def write_definition(self, name_context: NameContext) -> list[str]:
+        flags = GlobalValueFlags.str(self.flags)
+        type = self.type.stringify(name_context)
+        values = ', '.join(v.stringify(name_context) for v in self.values)
+        return [f'@{name_context.get_global_name(self)} = {flags}{type} {{{values}}}']
+
+    @override
+    def get_type(self) -> Type:
+        return PointerType(self.type)
+
+    @override
+    def get_default_name_prefix(self):
+        return "global"
+
+def escape_byte(b: int) -> str:
+    # 可打印 ASCII 且不特殊的字符直接输出
+    if 32 <= b <= 126 and chr(b) not in ['\\', '"']:
+        return chr(b)
+    # 特殊字符转义
+    if b == 0:
+        return r"\00"
+    if b == ord('"'):
+        return r"\""
+    if b == ord('\\'):
+        return r"\\"
+    # 其他非打印字符用 \xx 十六进制
+    return f"\\{b:02x}"
+
+class GlobalStringValue(GlobalValue):
+    value: bytes
+    flags: int
+
+    @override
+    def __init__(self, value: bytes, flags: int = GlobalValueFlags.ALL) -> None:
+        self.value = value
+        self.flags = flags
+
+    @override
+    def write_definition(self, name_context: NameContext) -> list[str]:
+        flags = GlobalValueFlags.str(self.flags)
+        return [f'@{name_context.get_global_name(self)} = {flags}[{len(self.value)} x i8] c"{''.join(escape_byte(b) for b in self.value)}"']
+
+    @override
+    def get_type(self) -> Type:
+        return PointerType(I8)
 
     @override
     def get_default_name_prefix(self):
@@ -1315,15 +1382,6 @@ class ExtractValue(Inst):
     @override
     def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
         return f"extractvalue {self.value.stringify(name_context, local_counter)}, {', '.join(str(i) for i in self.indices)}"
-
-    @override
-    def try_evaluate(self) -> Value | None:
-        value = self.value
-        for i in self.indices:
-            if not isinstance(value, AggregateValue):
-                return None
-            value = value.values[i]
-        return value
 
 @gen_get_children
 class InsertValue(Inst):

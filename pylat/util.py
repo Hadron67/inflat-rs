@@ -2,8 +2,6 @@ from inspect import isclass
 from typing import get_args, get_origin
 from weakref import WeakKeyDictionary
 
-from ast import AST, Assign, Call, Attribute, Constant, Expr, For, FunctionDef, List, Name, Load, Return, Store, Subscript, arguments, expr, stmt, arg
-
 def next_unique_name(prefix: str, used_names: set[str]) -> str:
     i = 0
     while True:

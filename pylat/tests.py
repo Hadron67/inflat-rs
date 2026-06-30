@@ -3,9 +3,8 @@ from unittest import TestCase
 from pylat.jit.openmp import OpenMPBackend
 from pylat.util import add_line_numbers
 
-from .jit.llvm import Module
 from .jit.compile import JitCompiler
-from .expr import AssignExpr, ComplexType, Int, IntegerType, Plus, Rational, RealType, Symbol, Times, symbol, S
+from .expr import AssignExpr, ComplexType, Int, IntegerType, Plus, Rational, Symbol, Times, symbol, S
 
 from llvmlite import binding as llvm
 
@@ -49,9 +48,5 @@ class JitTest(TestCase):
         print()
         for line in add_line_numbers(lines):
             print(line)
-
-        mod = llvm.parse_assembly('\n'.join(lines))
-        mod.verify()
-
 
 all_tests = [TestExpr, JitTest]

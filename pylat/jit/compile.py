@@ -6,7 +6,7 @@ from typing import Any, override, Callable
 from .backend import Backend, CompiledBackendFunction, LoopKernel
 
 from ..expr import AssignExpr, ComplexType, Cos, Exp, Expr, Float, Int, IntegerType, Ln, Plus, Power, Rational, RealType, Roll, Sin, Slice, Symbol, Times
-from .llvm import I64, AggregateValue, ArgValue, BasicBlock, Float64Type, FloatType, FloatValue, Function, FunctionArgs, IFunction, IntType, IntValue, PointerType, StructType, Type, Value, VoidType
+from .llvm import I64, BasicBlock, Float64Type, FloatType, FloatValue, Function, FunctionArgs, IFunction, IntType, IntValue, PointerType, StructType, Type, Value, VoidType
 
 _TYPE_ORDER: list[type[Expr]] = [ComplexType, RealType, IntegerType]
 
@@ -245,6 +245,15 @@ class _FunctionCompiler:
         assert not isinstance(expr, _ComplexValue)
         return self._block.sqrt(expr)
 
+    def _pow(self, base: _MaybeComplexValue, base_type: Expr, exp: _MaybeComplexValue, exp_type: Expr):
+        result_type = combine_types(base_type, exp_type)
+        base = self._helper.coerce(self._block, base, result_type, result_type)
+        exp = self._helper.coerce(self._block, exp, result_type, result_type)
+        if isinstance(result_type, ComplexType):
+            raise NotImplementedError
+        assert not isinstance(base, _ComplexValue) and not isinstance(exp, _ComplexValue)
+        return self._block.pow(base, exp)
+
     def _store(self, ptr: Value, value: _MaybeComplexValue):
         b = self._block
         match value:
@@ -356,15 +365,19 @@ class _FunctionCompiler:
                         return self._div(self.parent.real_type.from_int(1), base_type, self._sqrt(self.compile_expr(expr.base, subscripts), base_type), base_type)
                     case _:
                         exp_value = self.compile_expr(exponent, ())
-                        return self._block.pow(self.compile_expr(expr.base, subscripts), exp_value)
+                        return self._pow(self.compile_expr(expr.base, subscripts), base_type, exp_value, exponent.get_type())
             case Sin(expr):
-                return self._block.sin(self.compile_expr(expr, subscripts))
+                assert isinstance(expr.get_type(), RealType), "sin currently only supports real types"
+                return self._block.sin(self.compile_non_complex_expr(expr, subscripts))
             case Cos(expr):
-                return self._block.cos(self.compile_expr(expr, subscripts))
+                assert isinstance(expr.get_type(), RealType), "cos currently only supports real types"
+                return self._block.cos(self.compile_non_complex_expr(expr, subscripts))
             case Ln(expr):
-                return self._block.ln(self.compile_expr(expr, subscripts))
+                assert isinstance(expr.get_type(), RealType), "ln currently only supports real types"
+                return self._block.ln(self.compile_non_complex_expr(expr, subscripts))
             case Exp(expr):
-                return self._block.exp(self.compile_expr(expr, subscripts))
+                assert isinstance(expr.get_type(), RealType), "exp currently only supports real types"
+                return self._block.exp(self.compile_non_complex_expr(expr, subscripts))
 
         raise TypeError(f'unsupported expression: {expr}')
 
@@ -483,7 +496,6 @@ class _CompileHelper:
         )
 
     def complex_div(self, block: BasicBlock, a: _MaybeComplexValue, b: _MaybeComplexValue):
-        a_re, a_im = self.expand_complex_value(block, a)
         b_re, b_im = self.expand_complex_value(block, b)
         den = block.add(
             block.mul(b_re, b_re),
