@@ -1,14 +1,15 @@
 from unittest import TestCase
 
-from pylat.jit import typed
 from pylat.jit.openmp import OpenMPBackend
-from pylat.jit.typed import ComplexFloatType, IntType, TypeContext, FloatType
+from pylat.jit.argpass import ComplexFloatType, IntType, TypeContext, FloatType
+import pylat.jit.argpass as ap
 from pylat.util import add_line_numbers
 
 from .jit.compile import JitCompiler
 from .expr import AssignExpr, Int, Plus, Rational, Symbol, Times, symbol, S, symbols
 
 from llvmlite import binding as llvm
+import numpy as np
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
@@ -35,15 +36,13 @@ class JitTest(TestCase):
     def test_jit(self):
         nx, ny, nz, dt = symbols('nx', 'ny', 'nz', 'dt')
         phi, mom_phi = symbols('phi', 'mom_phi')
-        # phi = Symbol(('phi',), type=ComplexType(), shape=(nz, ny, nx))
-        # mom_phi = Symbol(('mom_phi',), type=ComplexType(), shape=(nz, ny, nx))
         context = TypeContext()
-        context.set_symbol(nx, (typed.IntegerType(), IntType(64, False)), ())
-        context.set_symbol(ny, (typed.IntegerType(), IntType(64, False)), ())
-        context.set_symbol(nz, (typed.IntegerType(), IntType(64, False)), ())
-        context.set_symbol(dt, (typed.RealType(), FloatType(64)), ())
-        context.set_symbol(phi, (typed.ComplexType(), ComplexFloatType(64)), (nz, ny, nx))
-        context.set_symbol(mom_phi, (typed.ComplexType(), ComplexFloatType(64)), (nz, ny, nx))
+        context.set_symbol(nx, (ap.IntegerType(), IntType(64, False)), ())
+        context.set_symbol(ny, (ap.IntegerType(), IntType(64, False)), ())
+        context.set_symbol(nz, (ap.IntegerType(), IntType(64, False)), ())
+        context.set_symbol(dt, (ap.RealType(), FloatType(64)), ())
+        context.set_symbol(phi, (ap.ComplexType(), ComplexFloatType(FloatType(64))), (nz, ny, nx))
+        context.set_symbol(mom_phi, (ap.ComplexType(), ComplexFloatType(FloatType(64))), (nz, ny, nx))
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_one_kernel([
@@ -55,5 +54,10 @@ class JitTest(TestCase):
         print()
         for line in add_line_numbers(lines):
             print(line)
+
+        phi0 = np.zeros((10, 10, 10), dtype=np.complex128)
+        mom_phi0 = np.random.randn(10, 10, 10) + np.random.randn(10, 10, 10) * 1j
+
+        fn.call({nz: phi0.shape[2], ny: phi0.shape[1], nx: phi0.shape[0], phi: phi0, mom_phi: mom_phi0, dt: 2})
 
 all_tests = [TestExpr, JitTest]

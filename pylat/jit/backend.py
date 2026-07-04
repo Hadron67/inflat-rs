@@ -2,6 +2,8 @@
 
 from abc import abstractmethod
 
+from pylat.jit.argpass import LowerType
+
 from .llvm import BasicBlock, IFunction, IntType, Type, Value
 
 class CompiledBackendFunction:
@@ -49,7 +51,7 @@ class LoopKernel:
         raise NotImplementedError
 
     @abstractmethod
-    def get_args(self) -> tuple[Type, ...]:
+    def get_args(self) -> tuple[LowerType, ...]:
         raise NotImplementedError
 
     @abstractmethod

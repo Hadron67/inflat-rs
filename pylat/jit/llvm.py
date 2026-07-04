@@ -1277,7 +1277,7 @@ class Call(Inst):
             arg = args[i]
             expected = fn_type.args[i]
             arg_type = arg.get_type()
-            assert expected.is_compatible(arg_type), f"argument type mismatch at {i}-th arg: {arg_type} != {expected}"
+            assert expected.is_compatible(arg_type), f"argument type mismatch at {i}-th arg, expected {expected}, got {arg_type}"
         self.type = fn_type.return_type
 
     @override
