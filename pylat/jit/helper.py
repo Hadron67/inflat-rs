@@ -1,8 +1,9 @@
+import ctypes
 from dataclasses import dataclass
 from typing import TypeAlias
 
 from .argpass import ComplexType, IntegerType, RealType, TypesConfig, LowerType, ComplexFloatType
-from .llvm import BasicBlock, FloatType, FloatValue, IntType, Value
+from .llvm import BOOL_TYPE, I32, I64, I8, BasicBlock, DeclareFunction, FloatType, FloatValue, FnType, GlobalStringValue, IntType, PointerType, Value
 from . import argpass as ap
 
 @dataclass
@@ -144,3 +145,72 @@ class CompileHelper:
                 assert target_type == value_type
                 return value
         raise NotImplementedError
+
+def echo(block: BasicBlock, *values: Value | str):
+    for value in values:
+        if isinstance(value, str):
+            block.call(_ECHO_STR, GlobalStringValue(value.encode() + b'\0'))
+            continue
+        type = value.get_type()
+        match type:
+            case IntType(bits):
+                match bits:
+                    case 64:
+                        block.call(_ECHO_I64, value)
+                    case 32:
+                        block.call(_ECHO_I32, value)
+                    case _:
+                        raise NotImplementedError
+            case PointerType():
+                block.call(_ECHO_PTR, value)
+            case _:
+                raise NotImplementedError(f"TODO: type {type}")
+    block.call(_ECHO_STR, GlobalStringValue(b'\n\0'))
+
+_ECHO_STR = DeclareFunction('echo_str', FnType((PointerType(I8), ), I64))
+_ECHO_I64 = DeclareFunction('echo_i64', FnType((I64, ), I64))
+_ECHO_I32 = DeclareFunction('echo_i32', FnType((I32, ), I64))
+_ECHO_PTR = DeclareFunction('echo_ptr', FnType((PointerType(I8), ), I64))
+
+_echo_buf = ''
+@ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)
+def _echo_str(ptr):
+    global _echo_buf
+    _echo_buf += ctypes.string_at(ptr).decode()
+    if _echo_buf.endswith('\n'):
+        print(_echo_buf.rstrip())
+        _echo_buf = ''
+    return 0
+
+@ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int64)
+def _echo_i64(value):
+    global _echo_buf
+    _echo_buf += str(value)
+    if _echo_buf.endswith('\n'):
+        print(_echo_buf.rstrip())
+        _echo_buf = ''
+    return 0
+
+@ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int32)
+def _echo_i32(value):
+    global _echo_buf
+    _echo_buf += str(value)
+    if _echo_buf.endswith('\n'):
+        print(_echo_buf.rstrip())
+        _echo_buf = ''
+    return 0
+
+@ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+def _echo_ptr(ptr):
+    global _echo_buf
+    _echo_buf += f'{ptr}'
+    if _echo_buf.endswith('\n'):
+        print(_echo_buf.rstrip())
+        _echo_buf = ''
+    return 0
+
+_GLOBAL_HELPERS = (
+    (_ECHO_STR.name, ctypes.cast(_echo_str, ctypes.c_void_p)),
+    (_ECHO_I64.name, ctypes.cast(_echo_i64, ctypes.c_void_p)),
+    (_ECHO_PTR.name, ctypes.cast(_echo_ptr, ctypes.c_void_p)),
+)

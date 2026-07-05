@@ -453,7 +453,9 @@ class CompiledWrapper:
         for symbol in self._symbols._symbol_values:
             if symbol not in seen_symbols:
                 raise ValueError(f"Symbol {symbol} not found in arg")
-        self._inner.call(*converted_args)
+        for a in converted_args:
+            assert a is not None
+        self._inner.call(*converted_args) # type: ignore
 
     @override
     def __str__(self) -> str:

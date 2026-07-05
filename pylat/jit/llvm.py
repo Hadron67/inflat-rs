@@ -125,26 +125,7 @@ class PointerType(Type):
 
     @override
     def is_compatible(self, other: Type):
-        if not isinstance(other, PointerType):
-            return False
-        if self.child == other.child:
-            return True
-        if isinstance(other.child, ArrayType) and self.child == other.child.child:
-            return True
-        return False
-
-@dataclass(frozen=True)
-@gen_get_children
-class ArrayType(Type):
-    child: Type
-    length: int
-
-    def __str__(self) -> str:
-        return f"[{self.length} x {self.child}]"
-
-    @override
-    def stringify(self, name_context: 'NameContext | None' = None) -> str:
-        return f"[{self.length} x {self.child.stringify(name_context)}]"
+        return isinstance(other, PointerType)
 
 @dataclass(frozen=True)
 @gen_get_children
@@ -175,8 +156,11 @@ class VoidType(Type):
     def __str__(self) -> str:
         return 'void'
 
+class AggregateType(Type):
+    pass
+
 @gen_get_children
-class StructType(Type):
+class StructType(AggregateType):
     fields: list[Type]
 
     @override
@@ -207,6 +191,19 @@ class StructType(Type):
             return '%' + name_context.get_struct_type_name(self)
         else:
             return str(self)
+
+@dataclass(frozen=True)
+@gen_get_children
+class ArrayType(AggregateType):
+    child: Type
+    length: int
+
+    def __str__(self) -> str:
+        return f"[{self.length} x {self.child}]"
+
+    @override
+    def stringify(self, name_context: 'NameContext | None' = None) -> str:
+        return f"[{self.length} x {self.child.stringify(name_context)}]"
 
 class LocalValue(Value):
     def __eq__(self, other) -> bool:
@@ -319,11 +316,13 @@ class Undef(Value):
 
 class Module(NameContext):
     _globals: 'StrBiMap[GlobalValue]'
+    _global_constants: 'dict[Value, GlobalValue]'
     _struct_types: 'StrBiMap[StructType]'
 
     def __init__(self) -> None:
         self._globals = StrBiMap()
         self._struct_types = StrBiMap()
+        self._global_constants = {}
 
     def add_recursively(self, types: list[Type] | None = None, values: 'list[Value] | None' = None):
         todo_values: list[Value] = []
@@ -407,12 +406,18 @@ class GlobalValueFlags:
     IS_CONST = 1
     IS_PRIVATE = 2
     IS_UNNAMED_ADDR = 4
+    COMMON = 8
+    GLOBAL = 16
 
-    ALL = 7
+    DEFAULT = 7
 
     @staticmethod
     def str(flags: int):
         ret = ''
+        if flags & GlobalValueFlags.COMMON:
+            ret += 'common '
+        if flags & GlobalValueFlags.GLOBAL:
+            ret += 'global '
         if flags & GlobalValueFlags.IS_CONST:
             ret += 'private '
         if flags & GlobalValueFlags.IS_PRIVATE:
@@ -427,7 +432,7 @@ class GlobalScalarValue(GlobalValue):
     flags: int
 
     @override
-    def __init__(self, value: Value, flags: int = GlobalValueFlags.ALL) -> None:
+    def __init__(self, value: Value, flags: int = GlobalValueFlags.DEFAULT) -> None:
         self.value = value
         self.flags = flags
 
@@ -451,7 +456,7 @@ class GlobalAggregateValue(GlobalValue):
     type: Type
 
     @override
-    def __init__(self, type: Type, *values: Value, flags: int = GlobalValueFlags.ALL) -> None:
+    def __init__(self, type: Type, *values: Value, flags: int = GlobalValueFlags.DEFAULT) -> None:
         self.values = list(values)
         self.flags = flags
         self.type = type
@@ -484,6 +489,30 @@ class GlobalAggregateValue(GlobalValue):
     def get_default_name_prefix(self):
         return "global"
 
+@gen_get_children
+class GlobalZeroAggregateValue(GlobalValue):
+    type: Type
+    flags: int
+
+    def __init__(self, type: Type, flags: int = GlobalValueFlags.DEFAULT) -> None:
+        self.type = type
+        self.flags = flags
+        assert isinstance(type, AggregateType), "type must be an aggregate type"
+
+    @override
+    def write_definition(self, name_context: NameContext) -> list[str]:
+        flags = GlobalValueFlags.str(self.flags)
+        type = self.type.stringify(name_context)
+        return [f'@{name_context.get_global_name(self)} = {flags}{type} zeroinitializer']
+
+    @override
+    def get_type(self) -> Type:
+        return PointerType(self.type)
+
+    @override
+    def get_default_name_prefix(self) -> str:
+        return 'global'
+
 def escape_byte(b: int) -> str:
     # 可打印 ASCII 且不特殊的字符直接输出
     if 32 <= b <= 126 and chr(b) not in ['\\', '"']:
@@ -503,7 +532,7 @@ class GlobalStringValue(GlobalValue):
     flags: int
 
     @override
-    def __init__(self, value: bytes, flags: int = GlobalValueFlags.ALL) -> None:
+    def __init__(self, value: bytes, flags: int = GlobalValueFlags.DEFAULT) -> None:
         self.value = value
         self.flags = flags
 
@@ -1260,7 +1289,7 @@ class GetElementPtr(Inst):
 class Call(Inst):
     fn: Value
     args: tuple[Value, ...]
-    type: Type
+    fn_type: FnType
 
     def __init__(self, fn: Value, args: tuple[Value, ...]):
         self.fn = fn
@@ -1278,15 +1307,22 @@ class Call(Inst):
             expected = fn_type.args[i]
             arg_type = arg.get_type()
             assert expected.is_compatible(arg_type), f"argument type mismatch at {i}-th arg, expected {expected}, got {arg_type}"
-        self.type = fn_type.return_type
+        self.fn_type = fn_type
 
     @override
     def get_type(self) -> Type:
-        return self.type
+        return self.fn_type.return_type
 
     @override
     def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
-        return f'call {self.type.stringify(name_context)} {self.fn.stringify_value(name_context, local_counter)}({', '.join(arg.stringify(name_context, local_counter) for arg in self.args)})'
+        ret_type = self.fn_type.return_type.stringify(name_context)
+        fn = self.fn.stringify_value(name_context, local_counter)
+        args_type = ''
+        if self.fn_type.varargs:
+            args_type = f" ({', '.join(arg.stringify(name_context) for arg in self.fn_type.args)}, ...)"
+
+        args = [arg.stringify(name_context, local_counter) for arg in self.args]
+        return f'call {ret_type}{args_type} {fn}({', '.join(args)})'
 
 @gen_get_children
 class Store(Inst):

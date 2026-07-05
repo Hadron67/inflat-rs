@@ -1,48 +1,19 @@
 
 
 from abc import abstractmethod
+import ctypes
 
 from pylat.jit.argpass import LowerType
 
-from .llvm import BasicBlock, IFunction, IntType, Type, Value
+from .llvm import BasicBlock, IntType, Value
 
 class CompiledBackendFunction:
     @abstractmethod
-    def call(self, *args):
+    def call(self, *args: ctypes._CDataType):
         raise NotImplementedError
 
     @abstractmethod
     def print_all(self) -> list[str]:
-        raise NotImplementedError
-
-class ParallelForLoopProvider(IFunction):
-    """
-        An abstract for loop provider. It builds a function roughly like
-
-        fn run_loop(...) {
-            ... <prologue> ...
-            #pragma parallel for
-            for (i = 0; i <= size; i += 1) {
-                ... <body> ...
-            }
-        }
-
-    """
-    @abstractmethod
-    def begin_prologue(self) -> BasicBlock:
-        raise NotImplementedError
-
-    @abstractmethod
-    def begin_loop(self, prologue_end: BasicBlock, total_size: Value) -> tuple[BasicBlock, Value]:
-        """
-            To be called before compiling the kernel.
-
-            Returns the loop variable
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def end(self, block: BasicBlock) -> CompiledBackendFunction:
         raise NotImplementedError
 
 class LoopKernel:

@@ -1,3 +1,4 @@
+import ctypes
 from unittest import TestCase
 
 from pylat.jit.openmp import OpenMPBackend
@@ -58,6 +59,6 @@ class JitTest(TestCase):
         phi0 = np.zeros((10, 10, 10), dtype=np.complex128)
         mom_phi0 = np.random.randn(10, 10, 10) + np.random.randn(10, 10, 10) * 1j
 
-        fn.call({nz: phi0.shape[2], ny: phi0.shape[1], nx: phi0.shape[0], phi: phi0, mom_phi: mom_phi0, dt: 2})
+        fn.call({nz: phi0.shape[2], ny: phi0.shape[1], nx: phi0.shape[0], phi: phi0, mom_phi: mom_phi0, dt: 2})  # type: ignore
 
 all_tests = [TestExpr, JitTest]
