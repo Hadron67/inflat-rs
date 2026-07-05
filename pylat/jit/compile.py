@@ -252,8 +252,6 @@ class _FunctionCompiler:
 
     def _compile_array_symbol_access(self, info: ArrayArgInfo, subscripts: tuple[Value, ...]) -> Value:
         index = self._compile_subscript(tuple(self._args[i] for i in info.strides), subscripts)
-        if self._debug is not None:
-            self._debug.echo(self._block, "index = ", index)
         return self._block.get_element_ptr(
             self._args[info.ptr],
             index,
@@ -403,18 +401,10 @@ class _FunctionCompiler:
         assert shape is not None, f"cannot compile expression {expr} with unspecified shape"
         shape = tuple(self.compile_non_complex_expr(i, ()) for i in shape)
         indices = self._compile_unpack_subscripts(shape, tid)
-        if self._debug is not None:
-            ind: list[Value | str] = []
-            for i in indices:
-                ind.append(i)
-                ind.append(',')
-            self._debug.echo(self._block, "indices = (", *ind, ")")
         lhs_ptr, lhs_lower_type = self._compile_lvalue(expr.lhs, indices)
 
         rhs_lower_type = self._helper.type_to_lower_type(type)
         rhs_value = self.compile_expr(expr.rhs, indices)
-
-        self._echo("rhs_value = ", (rhs_value, type))
 
         result_value = None
         match expr.op:

@@ -7,7 +7,7 @@ from llvmlite import binding as llvm
 from .helper import echo, _GLOBAL_HELPERS
 
 from .util import ForLoopBuilder
-from .llvm import I32, I64, I8, ArrayType, BasicBlock, DeclareFunction, FnType, Function, GlobalAggregateValue, GlobalStringValue, GlobalValueFlags, GlobalZeroAggregateValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Type, Value, VoidType, VoidValue
+from .llvm import I32, I8, ArrayType, BasicBlock, DeclareFunction, FnType, Function, GlobalAggregateValue, GlobalStringValue, GlobalValueFlags, GlobalZeroAggregateValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Value, VoidType, VoidValue
 from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel
 
 class ident_t(ctypes.Structure):
@@ -126,7 +126,6 @@ class OpenMPBackend(Backend):
         def compile_inner():
             b = inner_fn.entry
             gtid = b.load(inner_fn.get_arg(0))
-            btid = b.load(inner_fn.get_arg(1))
             closure_ptr = inner_fn.get_arg(2)
 
             chunk = b.alloca(I32)
@@ -139,15 +138,11 @@ class OpenMPBackend(Backend):
                 args.append(b.load(b.get_element_ptr(closure_ptr, 0, i)))
             inner_total_size = b.load(b.get_element_ptr(closure_ptr, 0, len(arg_lower_types)))
 
-            _echo_sync(b, gtid, "total = ", inner_total_size)
-
             b.store(chunk, 0)
             b.store(lb, 0)
             max_ub = b.sub(inner_total_size, IntValue(1, index_type))
             b.store(ub, max_ub)
             b.store(step, 1)
-
-            # echo(b, "gtid = ", gtid)
 
             b.call(
                 kmpc_for_static_init,
@@ -172,7 +167,6 @@ class OpenMPBackend(Backend):
 
             loop_builder = ForLoopBuilder(b, True, b.load(lb), b.load(ub), IntValue(1, index_type))
             b = loop_builder.body_entry
-            _echo_sync(b, gtid, "gtid = ", gtid, ", lb = ", b.load(lb), ", ub = ", b.load(ub), ", index = ", loop_builder.loop_var)
             b = kernel.compile_body(b, tuple(args), loop_builder.loop_var, _DebugInterface(gtid))
             b = loop_builder.end(b)
 
