@@ -8,7 +8,7 @@ from . import argpass as ap
 from .helper import CompileHelper, ComplexValue, MaybeComplexValue
 from ..expr import AssignExpr, Cos, Exp, Expr, Float, Int, Ln, Plus, Power, Rational, Roll, Sin, Slice, Symbol, Times
 from .argpass import ArrayArgInfo, ScalarArgInfo, SymbolArgInfo, TypesConfig, ComplexType, LowerType, RealType, TypeCache, TypeContext, TypedAssignExpr
-from .backend import Backend, CompiledBackendFunction, LoopKernel
+from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel
 from .llvm import BasicBlock, FloatValue, IntType, IntValue, Value
 
 def _check_and_get_total_size(exprs: list[TypedAssignExpr]):
@@ -146,6 +146,7 @@ class _FunctionCompiler:
     _symbol_scope: _SymbolScope
     _args: tuple[Value, ...]
     _type_cache: TypeCache
+    _debug: DebugInterface | None
 
     def __init__(
         self,
@@ -154,6 +155,7 @@ class _FunctionCompiler:
         args: tuple[Value, ...],
         block: BasicBlock,
         symbol_scope: _SymbolScope,
+        debug: DebugInterface | None = None,
         standard_layout: StandardLayoutMode = StandardLayoutMode.NONE,
     ) -> None:
         self.parent = parent
@@ -166,6 +168,7 @@ class _FunctionCompiler:
         self._finished = False
         self._type_cache = symbol_scope.type_cache
         self._standard_layout = standard_layout
+        self._debug = debug
 
     def _add(self, left: MaybeComplexValue, left_type: ap.Type, right: MaybeComplexValue, right_type: ap.Type, result_type: ap.Type) -> MaybeComplexValue:
         left = self._helper.coerce(self._block, left, left_type, result_type)
@@ -248,13 +251,31 @@ class _FunctionCompiler:
         return index
 
     def _compile_array_symbol_access(self, info: ArrayArgInfo, subscripts: tuple[Value, ...]) -> Value:
+        index = self._compile_subscript(tuple(self._args[i] for i in info.strides), subscripts)
+        if self._debug is not None:
+            self._debug.echo(self._block, "index = ", index)
         return self._block.get_element_ptr(
             self._args[info.ptr],
-            self._compile_subscript(tuple(self._args[i] for i in info.strides), subscripts),
+            index,
         )
 
     def _from_lower_real_value(self, value: Value, lower_type: LowerType):
         return self._helper.coerce_lower_type(self._block, value, lower_type, self.parent.real_type)
+
+    def _echo(self, *args: tuple[MaybeComplexValue, ap.Type] | str):
+        if self._debug is not None:
+            converted_args: list[Value | str] = []
+            for arg in args:
+                if isinstance(arg, tuple):
+                    if arg[1] == ap.ComplexType():
+                        re, im = self._helper.expand_complex_value(self._block, arg[0])
+                        converted_args.extend(['complex(', re, ', ', im, ')'])
+                    else:
+                        assert not isinstance(arg[0], ComplexValue)
+                        converted_args.append(arg[0])
+                else:
+                    converted_args.append(arg)
+            self._debug.echo(self._block, *converted_args)
 
     def _compile_expr_no_cache(self, expr: Expr, subscripts: tuple[Value, ...]) -> MaybeComplexValue:
         h = self._helper
@@ -382,10 +403,18 @@ class _FunctionCompiler:
         assert shape is not None, f"cannot compile expression {expr} with unspecified shape"
         shape = tuple(self.compile_non_complex_expr(i, ()) for i in shape)
         indices = self._compile_unpack_subscripts(shape, tid)
+        if self._debug is not None:
+            ind: list[Value | str] = []
+            for i in indices:
+                ind.append(i)
+                ind.append(',')
+            self._debug.echo(self._block, "indices = (", *ind, ")")
         lhs_ptr, lhs_lower_type = self._compile_lvalue(expr.lhs, indices)
 
         rhs_lower_type = self._helper.type_to_lower_type(type)
         rhs_value = self.compile_expr(expr.rhs, indices)
+
+        self._echo("rhs_value = ", (rhs_value, type))
 
         result_value = None
         match expr.op:
@@ -402,7 +431,7 @@ class _FunctionCompiler:
             case _:
                 raise ValueError(f"unknown op {expr.op}")
         result_value = self._helper.coerce_lower_type(self._block, result_value, rhs_lower_type, lhs_lower_type)
-        self._store(lhs_ptr, rhs_value)
+        self._store(lhs_ptr, result_value)
 
     def compile_assignments(self, exprs: list[TypedAssignExpr], tid: Value):
         assert not self._finished
@@ -442,10 +471,8 @@ class CompiledWrapper:
                 case ArrayArgInfo():
                     ptr_type = ctypes.POINTER(lower_type_ctype)
                     # np.ndarray
-                    value_cdata = value.ctypes
-                    value_cdata = value_cdata.data
                     value_strides = value.strides
-                    converted_args[info.ptr] = ptr_type.from_address(value_cdata)
+                    converted_args[info.ptr] = ctypes.cast(value.ctypes.data, ptr_type)
                     assert len(value_strides) == len(info.strides)
                     for index, stride in zip(info.strides, value_strides):
                         converted_args[index] = index_type(stride // ctypes.sizeof(lower_type_ctype))
@@ -495,8 +522,8 @@ class _AssignmentsKernel(LoopKernel):
         return begin, cp.compile_non_complex_expr(self._total_size, ())
 
     @override
-    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value) -> BasicBlock:
-        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self._symbol_scope)
+    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> BasicBlock:
+        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self._symbol_scope, debug=debug)
         cp.compile_assignments(self._exprs, loop_var)
         return begin
 

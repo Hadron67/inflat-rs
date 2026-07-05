@@ -16,6 +16,11 @@ class CompiledBackendFunction:
     def print_all(self) -> list[str]:
         raise NotImplementedError
 
+class DebugInterface:
+    @abstractmethod
+    def echo(self, block: BasicBlock, *args: Value | str):
+        raise NotImplementedError
+
 class LoopKernel:
     @abstractmethod
     def get_index_type(self) -> IntType:
@@ -30,7 +35,7 @@ class LoopKernel:
         raise NotImplementedError
 
     @abstractmethod
-    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value) -> BasicBlock:
+    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> BasicBlock:
         raise NotImplementedError
 
 class Backend:

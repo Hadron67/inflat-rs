@@ -7,8 +7,8 @@ from llvmlite import binding as llvm
 from .helper import echo, _GLOBAL_HELPERS
 
 from .util import ForLoopBuilder
-from .llvm import I32, I64, I8, ArrayType, BasicBlock, DeclareFunction, FnType, Function, GlobalAggregateValue, GlobalStringValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Type, Value, VoidType, VoidValue
-from .backend import Backend, CompiledBackendFunction, LoopKernel
+from .llvm import I32, I64, I8, ArrayType, BasicBlock, DeclareFunction, FnType, Function, GlobalAggregateValue, GlobalStringValue, GlobalValueFlags, GlobalZeroAggregateValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Type, Value, VoidType, VoidValue
+from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel
 
 class ident_t(ctypes.Structure):
     _fields_ = [
@@ -69,6 +69,18 @@ _KMPC_FORK_CALL = DeclareFunction('__kmpc_fork_call', _KMPC_FORK_CALL_TYPE)
 _KMPC_FOR_STATIC_FINI = DeclareFunction('__kmpc_for_static_fini', FnType((PointerType(_LLVM_IDEN_T), I32), VoidType()))
 _KMPC_CRITIAL = DeclareFunction('__kmpc_critical', FnType((PointerType(_LLVM_IDEN_T), I32, PointerType(ArrayType(I32, 8))), VoidType()))
 _KMPC_END_CRITICAL = DeclareFunction('__kmpc_end_critical', FnType((PointerType(_LLVM_IDEN_T), I32, PointerType(ArrayType(I32, 8))), VoidType()))
+_KMPC_BARRIER = DeclareFunction('__kmpc_barrier', FnType((PointerType(_LLVM_IDEN_T), I32), VoidType()))
+
+class _DebugInterface(DebugInterface):
+    gtid: Value
+
+    @override
+    def __init__(self, gtid: Value) -> None:
+        self.gtid = gtid
+
+    @override
+    def echo(self, block: BasicBlock, *args: Value | str):
+        _echo_sync(block, self.gtid, "[gtid = ", self.gtid, "]", *args)
 
 class OpenMPBackend(Backend):
     def __init__(self, libomp: str | CDLL | None = None) -> None:
@@ -102,6 +114,7 @@ class OpenMPBackend(Backend):
         # separate outer and inner function subroutines so that we won't accidentally use a variable across functions
         def compile_outer():
             b = outer_fn.entry
+            echo(b, "start")
             closure_ptr = b.alloca(closure_type)
             args = outer_fn.get_args()
             b, total_size = kernel.compile_total_size(b, args)
@@ -112,8 +125,8 @@ class OpenMPBackend(Backend):
 
         def compile_inner():
             b = inner_fn.entry
-            gtid = inner_fn.get_arg(0)
-            btid = inner_fn.get_arg(1)
+            gtid = b.load(inner_fn.get_arg(0))
+            btid = b.load(inner_fn.get_arg(1))
             closure_ptr = inner_fn.get_arg(2)
 
             chunk = b.alloca(I32)
@@ -126,16 +139,20 @@ class OpenMPBackend(Backend):
                 args.append(b.load(b.get_element_ptr(closure_ptr, 0, i)))
             inner_total_size = b.load(b.get_element_ptr(closure_ptr, 0, len(arg_lower_types)))
 
+            _echo_sync(b, gtid, "total = ", inner_total_size)
+
             b.store(chunk, 0)
             b.store(lb, 0)
             max_ub = b.sub(inner_total_size, IntValue(1, index_type))
             b.store(ub, max_ub)
             b.store(step, 1)
 
+            # echo(b, "gtid = ", gtid)
+
             b.call(
                 kmpc_for_static_init,
                 ident,
-                b.load(inner_fn.get_arg(0)),
+                gtid,
                 IntValue(34, I32),
                 chunk,
                 lb,
@@ -154,7 +171,9 @@ class OpenMPBackend(Backend):
             b = new_b
 
             loop_builder = ForLoopBuilder(b, True, b.load(lb), b.load(ub), IntValue(1, index_type))
-            b = kernel.compile_body(loop_builder.body_entry, tuple(args), loop_builder.loop_var)
+            b = loop_builder.body_entry
+            _echo_sync(b, gtid, "gtid = ", gtid, ", lb = ", b.load(lb), ", ub = ", b.load(ub), ", index = ", loop_builder.loop_var)
+            b = kernel.compile_body(b, tuple(args), loop_builder.loop_var, _DebugInterface(gtid))
             b = loop_builder.end(b)
 
             b.call(
@@ -199,9 +218,14 @@ class _Compiled(CompiledBackendFunction):
         engine.add_module(llvm_mod)
 
         libc = ctypes.CDLL(None)
-        for name in [_KMPC_FORK_CALL.name, _KMPC_FOR_STATIC_FINI.name, '__kmpc_for_static_init_8']:
+        for name in [_KMPC_FORK_CALL.name, _KMPC_FOR_STATIC_FINI.name, _KMPC_CRITIAL.name, _KMPC_END_CRITICAL.name, '__kmpc_for_static_init_8']:
+            value = None
+            try:
+                value = llvm_mod.get_function(name)
+            except NameError:
+                continue
             engine.add_global_mapping(
-                llvm_mod.get_function(name),
+                value,
                 ctypes.cast(getattr(libc, name), ctypes.c_void_p).value,
             )
         for name, addr in _GLOBAL_HELPERS:
@@ -210,7 +234,7 @@ class _Compiled(CompiledBackendFunction):
                     llvm_mod.get_function(name),
                     addr,
                 )
-            except:
+            except NameError:
                 pass
         engine.finalize_object()
         engine.run_static_constructors()
@@ -226,3 +250,27 @@ class _Compiled(CompiledBackendFunction):
     @override
     def print_all(self) -> list[str]:
         return self._mod.write()
+
+def _echo_sync(b: BasicBlock, gtid: Value, *values: Value | str):
+    gomp_critical = GlobalZeroAggregateValue(ArrayType(I32, 8), flags=GlobalValueFlags.COMMON | GlobalValueFlags.GLOBAL)
+    ident = GlobalAggregateValue(_LLVM_IDEN_T,
+        IntValue(0, I32),
+        IntValue(0, I32),
+        IntValue(0, I32),
+        IntValue(0, I32),
+        GlobalStringValue(b';unknown;unknown;0;0;;\00'),
+    )
+    b.call(_KMPC_CRITIAL, ident, gtid, gomp_critical)
+    echo(b, *values)
+    b.call(_KMPC_END_CRITICAL, ident, gtid, gomp_critical)
+    _barrier(b, gtid)
+
+def _barrier(b: BasicBlock, gtid: Value):
+    ident = GlobalAggregateValue(_LLVM_IDEN_T,
+        IntValue(0, I32),
+        IntValue(0, I32),
+        IntValue(0, I32),
+        IntValue(0, I32),
+        GlobalStringValue(b';unknown;unknown;0;0;;\00'),
+    )
+    b.call(_KMPC_BARRIER, ident, gtid)

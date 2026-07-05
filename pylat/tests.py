@@ -1,6 +1,8 @@
 import ctypes
 from unittest import TestCase
 
+from numpy.testing import assert_almost_equal
+
 from pylat.jit.openmp import OpenMPBackend
 from pylat.jit.argpass import ComplexFloatType, IntType, TypeContext, FloatType
 import pylat.jit.argpass as ap
@@ -47,7 +49,7 @@ class JitTest(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_one_kernel([
-            AssignExpr(phi, mom_phi * dt)
+            AssignExpr(phi, mom_phi * mom_phi * dt)
         ], context)
 
         lines = fn.print_all()
@@ -56,9 +58,13 @@ class JitTest(TestCase):
         for line in add_line_numbers(lines):
             print(line)
 
-        phi0 = np.zeros((10, 10, 10), dtype=np.complex128)
-        mom_phi0 = np.random.randn(10, 10, 10) + np.random.randn(10, 10, 10) * 1j
+        np.random.seed(114514)
+        phi0 = np.zeros((2, 2, 2), dtype=np.complex128)
+        mom_phi0 = np.random.randn(2, 2, 2) + np.random.randn(2, 2, 2) * 1j
+        dt0 = 2.0
 
-        fn.call({nz: phi0.shape[2], ny: phi0.shape[1], nx: phi0.shape[0], phi: phi0, mom_phi: mom_phi0, dt: 2})  # type: ignore
+        fn.call({nz: phi0.shape[2], ny: phi0.shape[1], nx: phi0.shape[0], phi: phi0, mom_phi: mom_phi0, dt: dt0})  # type: ignore
+
+        assert_almost_equal(phi0, mom_phi0 * mom_phi0 * dt0)
 
 all_tests = [TestExpr, JitTest]

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 from .argpass import ComplexType, IntegerType, RealType, TypesConfig, LowerType, ComplexFloatType
-from .llvm import BOOL_TYPE, I32, I64, I8, BasicBlock, DeclareFunction, FloatType, FloatValue, FnType, GlobalStringValue, IntType, PointerType, Value
+from .llvm import BOOL_TYPE, F64, I32, I64, I8, BasicBlock, DeclareFunction, FloatType, FloatValue, FnType, GlobalStringValue, IntType, PointerType, Value
 from . import argpass as ap
 
 @dataclass
@@ -163,6 +163,8 @@ def echo(block: BasicBlock, *values: Value | str):
                         raise NotImplementedError
             case PointerType():
                 block.call(_ECHO_PTR, value)
+            case FloatType(64):
+                block.call(_ECHO_F64, value)
             case _:
                 raise NotImplementedError(f"TODO: type {type}")
     block.call(_ECHO_STR, GlobalStringValue(b'\n\0'))
@@ -171,6 +173,8 @@ _ECHO_STR = DeclareFunction('echo_str', FnType((PointerType(I8), ), I64))
 _ECHO_I64 = DeclareFunction('echo_i64', FnType((I64, ), I64))
 _ECHO_I32 = DeclareFunction('echo_i32', FnType((I32, ), I64))
 _ECHO_PTR = DeclareFunction('echo_ptr', FnType((PointerType(I8), ), I64))
+_ECHO_F64 = DeclareFunction('echo_f64', FnType((F64, ), I64))
+
 
 _echo_buf = ''
 @ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_char_p)
@@ -200,6 +204,15 @@ def _echo_i32(value):
         _echo_buf = ''
     return 0
 
+@ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_double)
+def _echo_f64(value):
+    global _echo_buf
+    _echo_buf += str(value)
+    if _echo_buf.endswith('\n'):
+        print(_echo_buf.rstrip())
+        _echo_buf = ''
+    return 0
+
 @ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
 def _echo_ptr(ptr):
     global _echo_buf
@@ -213,4 +226,6 @@ _GLOBAL_HELPERS = (
     (_ECHO_STR.name, ctypes.cast(_echo_str, ctypes.c_void_p)),
     (_ECHO_I64.name, ctypes.cast(_echo_i64, ctypes.c_void_p)),
     (_ECHO_PTR.name, ctypes.cast(_echo_ptr, ctypes.c_void_p)),
+    (_ECHO_I32.name, ctypes.cast(_echo_i32, ctypes.c_void_p)),
+    (_ECHO_F64.name, ctypes.cast(_echo_f64, ctypes.c_void_p)),
 )
