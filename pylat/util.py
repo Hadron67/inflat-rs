@@ -1,3 +1,4 @@
+from abc import abstractmethod
 from inspect import isclass
 from typing import get_args, get_origin, override
 from weakref import WeakKeyDictionary
@@ -81,16 +82,21 @@ class PtrObject:
     def __hash__(self) -> int:
         return object.__hash__(self)
 
-class _SourceBuilder:
+class SourceBuilder:
     lines: list[str]
-    _indents: int
+    indents: int
 
     def __init__(self, indents: int = 0) -> None:
         self.lines = []
-        self._indents = indents
+        self.indents = indents
 
     def emit(self, line: str):
-        self.lines.append(('    ' * self._indents) + line)
+        self.lines.append(('    ' * self.indents) + line)
+
+class ClassVisitorCodeGen:
+    @abstractmethod
+    def gen_leaf(self, type: type) -> str:
+        raise NotImplementedError
 
 class SubExprFnBuilder:
     _base_cls: type
@@ -108,14 +114,14 @@ class SubExprFnBuilder:
     def _check_type(self, type: type):
         return isclass(type) and issubclass(type, self._base_cls)
 
-    def _process_one(self, var_name: str, type: type) -> list[str]:
+    def _process_get_child(self, var_name: str, type: type) -> list[str]:
         if self._check_type(type):
             return [f'ret.append({var_name})']
         head = get_origin(type)
         if head is list:
             args = get_args(type)
             v = self._var()
-            body = self._process_one(v, args[0])
+            body = self._process_get_child(v, args[0])
             if len(body) == 0:
                 return []
             return [f"for {v} in {var_name}:", *('    ' + line for line in body)]
@@ -123,16 +129,55 @@ class SubExprFnBuilder:
             args = get_args(type)
             if len(args) == 2 and args[1] == Ellipsis and self._check_type(args[0]):
                 v = self._var()
-                body = self._process_one(v, args[0])
+                body = self._process_get_child(v, args[0])
                 if len(body) == 0:
                     return []
                 return [f"for {v} in {var_name}:", *('    ' + line for line in body)]
             else:
                 lines: list[str] = []
                 for i, arg in enumerate(args):
-                    lines.extend(self._process_one(f"{var_name}[{i}]", arg))
+                    lines.extend(self._process_get_child(f"{var_name}[{i}]", arg))
                 return lines
         return []
+
+    def _process_map(self, op: str, var_name: str, type: type) -> str:
+        if self._check_type(type):
+            return f"{op}({var_name})"
+        head = get_origin(type)
+        args = get_args(type)
+        if head is list or head is tuple and args[1] is Ellipsis:
+            v = self._var()
+            head_fn = 'tuple' if head is tuple else 'list'
+            return f"{head_fn}({self._process_map(op, v, args[0])} for {v} in {var_name})"
+        if head is tuple:
+            return f"tuple({', '.join(self._process_map(op, f"{var_name}[{i}]", arg) for i, arg in enumerate(args))})"
+        return var_name
+
+    def _process_compare(self, self_arg: str, other_arg: str, type: type, compare_fn: str) -> list[str]:
+        if self._check_type(type):
+            v = self._var()
+            return [f"{v} = {self_arg}.{compare_fn}({other_arg})", f"if {v} != 0:", f"    return {v}"]
+        head = get_origin(type)
+        args = get_args(type)
+        if head is list or head is tuple and args[1] is Ellipsis:
+            v1 = self._var()
+            v2 = self._var()
+            body = self._process_compare(v1, v2, args[0], compare_fn)
+            if len(body) == 0:
+                return []
+            return [f"for {v1}, {v2} in zip({self_arg}, {other_arg}):", *('    ' + a for a in body)]
+        if head is tuple:
+            ret: list[str] = []
+            for i, arg in enumerate(args):
+                ret.extend(self._process_compare(f"{self_arg}[{i}]", f"{other_arg}[{i}]", arg, compare_fn))
+            return ret
+
+        return [
+            f'if {self_arg} > {other_arg}:',
+            '    return 1',
+            f'if {self_arg} < {other_arg}:',
+            '    return -1',
+        ]
 
     def generate_get_children(self, cls: type, fn_name: str, excludes: set[str] | None = None):
         body: list[str] = [f'def {fn_name}(self):', "    ret = []"]
@@ -142,8 +187,33 @@ class SubExprFnBuilder:
             for name, type in b.__annotations__.items():
                 if excludes is not None and name in excludes:
                     continue
-                body.extend(('    ' + i) for i in self._process_one(f"self.{name}", type))
+                body.extend(('    ' + i) for i in self._process_get_child(f"self.{name}", type))
         body.append('    return ret')
+        return body
+
+    def generate_map(self, cls: type, fn_name: str, exclude: set[str] | None = None) -> list[str]:
+        op = 'op'
+        body: list[str] = [f'def {fn_name}(self, {op}):', "    ret = {}"]
+        for b in cls.mro()[-1::-1]:
+            if b is object or b is self._base_cls:
+                continue
+            for name, type in b.__annotations__.items():
+                if exclude is not None and name in exclude:
+                    continue
+                body.append('    ' + f'ret["{name}"] = {self._process_map(op, f'self.{name}', type)}')
+        body.append(f'    return op({cls.__name__}(**ret))')
+        return body
+
+    def generate_compare_body(self, cls: type, self_arg: str, other_arg: str, compare_fn: str, exclude: set[str] | None = None):
+        body: list[str] = []
+        for b in cls.mro()[-1::-1]:
+            if b is object or b is self._base_cls:
+                continue
+            for name, type in b.__annotations__.items():
+                if exclude is not None and name in exclude:
+                    continue
+                body.extend(self._process_compare(f"{self_arg}.{name}", f"{other_arg}.{name}", type, compare_fn))
+        body.append('return 0')
         return body
 
 def resize[T](arr: list[T], value: T, length: int):

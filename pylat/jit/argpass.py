@@ -5,7 +5,7 @@ from typing import Any, Callable, override
 
 from . import llvm
 
-from ..expr import AssignExpr, Expr, Plus, Power, Roll, Slice, Symbol, Times, UnaryNumericFunction
+from ..expr import AssignExpr, Expr, Plus, Power, Roll, Slice, Symbol, SymbolShape, Times, UnaryNumericFunction
 
 class LowerType:
     @staticmethod
@@ -231,18 +231,23 @@ def get_peer_types(*types: LowerType) -> LowerType:
 class TypeContext:
     _symbol_types: dict[Symbol, LowerType]
     _symbol_shapes: dict[Symbol, tuple[Expr, ...]]
+    _symbol_dimension: dict[Symbol, int]
 
     def __init__(self) -> None:
         self._symbol_types = {}
         self._symbol_shapes = {}
+        self._symbol_dimension = {}
 
-    def set_symbol(self, expr: Symbol, type: LowerType | None = None, shape: tuple[Expr, ...] | None = None):
+    def set_symbol(self, expr: Symbol, type: LowerType | None = None, shape: tuple[Expr, ...] | None = None, dimension: int | None = None):
         if type is not None:
             assert expr not in self._symbol_types
             self._symbol_types[expr] = type
         if shape is not None:
             assert expr not in self._symbol_shapes
             self._symbol_shapes[expr] = shape
+        if dimension is not None:
+            assert expr not in self._symbol_dimension
+            self._symbol_dimension[expr] = dimension
 
     def get_type(self, expr: Symbol):
         return self._symbol_types[expr]
@@ -250,14 +255,19 @@ class TypeContext:
     def get_shape(self, expr: Symbol):
         return self._symbol_shapes[expr]
 
+    def get_dimension(self, expr: Symbol):
+        return self._symbol_dimension[expr]
+
 class TypeCache:
     _ctx: TypeContext
     _shape_cache: dict[Expr, tuple[Expr, ...]]
+    _resolved_shapes: dict[SymbolShape, Expr]
 
     def __init__(self, ctx: TypeContext) -> None:
         self._ctx = ctx
         self._type_cache = {}
         self._shape_cache = {}
+        self._resolved_shapes = {}
 
     def get_symbol_type(self, expr: Symbol):
         return self._ctx.get_type(expr)
@@ -274,22 +284,6 @@ class TypeCache:
         ret = self._get_shape_no_cache(expr)
         self._shape_cache[expr] = ret
         return ret
-
-    # def _get_type_no_cache(self, expr: Expr) -> Type:
-    #     match expr:
-    #         case Plus(children) | Times(children):
-    #             return peer_type(tuple(self.get_type(a) for a in children))
-    #         case Power(base, exp):
-    #             return self.get_type(base)
-    #         case Roll() | Slice():
-    #             return self.get_type(expr.expr)
-    #         case UnaryNumericFunction():
-    #             type = self.get_type(expr.expr)
-    #             if isinstance(type, ComplexType):
-    #                 return type
-    #             return RealType()
-    #         case _:
-    #             raise TypeError(f"cannot get type from {expr}")
 
     def _get_shape_no_cache(self, expr: Expr) -> tuple[Expr, ...]:
         match expr:

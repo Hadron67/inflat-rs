@@ -1,9 +1,10 @@
 from abc import abstractmethod
-from dataclasses import Field, dataclass
-from inspect import isclass
+from dataclasses import dataclass
 from typing import dataclass_transform, override
 
 from typing_extensions import Callable
+
+from pylat.util import SubExprFnBuilder
 
 class Expr:
     @staticmethod
@@ -28,16 +29,12 @@ class Expr:
     def subexpressions(self) -> 'list[Expr]':
         return []
 
-    @abstractmethod
-    def with_subexpressions(self, children: 'list[Expr]') -> 'Expr':
-        raise NotImplementedError
+
+    def map(self, op: 'Callable[[Expr], Expr]') -> 'Expr':
+        return op(self)
 
     @abstractmethod
     def head_sort_token(self) -> int:
-        pass
-
-    @abstractmethod
-    def sort_key(self) -> list[object]:
         pass
 
     @abstractmethod
@@ -135,92 +132,34 @@ def S(expr) -> Expr:
 def exprclass(cls=None, **kwargs):
     dataclass_wrapper = dataclass(repr=False, frozen=True, **kwargs)
     def wrapper(cls):
-        other_fields: list[str] = []
-        expr_fields: list[str] = []
-        expr_list_field: str | None = None
-        for base_expr_class in cls.mro()[-1::-1]:
-            if base_expr_class is object or base_expr_class is Expr:
-                continue
-            for name, type in base_expr_class.__annotations__.items():
-                field_data = getattr(base_expr_class, name, None)
-                if field_data is not None and isinstance(field_data, Field) and not field_data.init:
-                    continue
-                if isclass(type) and issubclass(type, Expr):
-                    expr_fields.append(name)
-                elif type == tuple[Expr, ...]:
-                    if expr_list_field is None:
-                        expr_list_field = name
-                    else:
-                        raise ValueError(f"Multiple tuple[Expr, ...] fields found: {expr_list_field} and {name}")
-                else:
-                    other_fields.append(name)
+        compare_name = 'compare'
+        map_name = 'map'
+        subexpressions_name = 'subexpressions'
+        codegen = SubExprFnBuilder(Expr)
+        compare_code = [
+            f'def {compare_name}(self, other):',
+            f'    if not isinstance(other, {cls.__name__}):',
+             '        token1 = self.HEAD_SORT_TOKEN',
+             '        token2 = other.HEAD_SORT_TOKEN',
+             '        return token1 - token2',
+             '        ',
+            *('    ' + a for a in codegen.generate_compare_body(cls, 'self', 'other', compare_name))
+        ]
+        map_code = codegen.generate_map(cls, map_name)
+        get_subexpressions_code = codegen.generate_get_children(cls, subexpressions_name)
 
-        def subexpressions(self) -> list[Expr]:
-            ret: list[Expr] = []
-            for name in expr_fields:
-                ret.append(getattr(self, name))
-            if expr_list_field is not None:
-                ret.extend(getattr(self, expr_list_field))
-            return ret
-
-        def with_subexpressions(self, children: list[Expr]) -> Expr:
-            ret = self.copy()
-            cursor = 0
-            for name in expr_fields:
-                setattr(ret, name, children[cursor])
-                cursor += 1
-            if expr_list_field is not None:
-                setattr(ret, expr_list_field, children[cursor:])
-            return ret
-
-        def sort_key(self) -> list[object]:
-            ret = [getattr(cls, 'HEAD_SORT_TOKEN')]
-            for name in other_fields:
-                ret.append(getattr(self, name))
-            for name in expr_fields:
-                ret.append(getattr(self, name).sort_key())
-            if expr_list_field is not None:
-                ret.extend([expr.sort_key() for expr in getattr(self, expr_list_field)])
-            return ret
-
-        def cmp(self, other: Expr) -> int:
-            if isinstance(other, cls):
-                for name in other_fields:
-                    field1 = getattr(self, name)
-                    field2 = getattr(other, name)
-                    if field1 > field2:
-                        return 1
-                    if field1 < field2:
-                        return -1
-                for name in expr_fields:
-                    if (c := getattr(self, name).compare(getattr(other, name))) != 0:
-                        return c
-                if expr_list_field is not None:
-                    list1 = getattr(self, expr_list_field)
-                    list2 = getattr(other, expr_list_field)
-                    if len(list1) < len(list2):
-                        return -1
-                    if len(list1) > len(list2):
-                        return 1
-                    for expr1, expr2 in zip(list1, list2):
-                        if (c := expr1.compare(expr2)) != 0:
-                            return c
-                return 0
-            else:
-                token1 = getattr(cls, 'HEAD_SORT_TOKEN')
-                token2 = getattr(other, 'HEAD_SORT_TOKEN')
-                if token1 > token2:
-                    return 1
-                if token1 < token2:
-                    return -1
-                return 0
+        globals = {}
+        globals[cls.__name__] = cls
+        exec('\n'.join(compare_code + map_code + get_subexpressions_code), globals)
 
         Expr._HEAD_SORT_TOKEN_COUNTER += 1
         cls = dataclass_wrapper(cls)
-        setattr(cls, "with_subexpressions", with_subexpressions)
-        setattr(cls, "subexpressions", subexpressions)
-        setattr(cls, "sort_key", sort_key)
-        setattr(cls, "compare", cmp)
+        if getattr(cls, 'compare') is Expr.compare:
+            setattr(cls, "compare", globals[compare_name])
+        if getattr(cls, 'subexpressions') is Expr.subexpressions:
+            setattr(cls, "subexpressions", globals[subexpressions_name])
+        if getattr(cls, 'map') is Expr.map:
+            setattr(cls, "map", globals[map_name])
         setattr(cls, "HEAD_SORT_TOKEN", Expr._HEAD_SORT_TOKEN_COUNTER)
         return cls
 
@@ -852,6 +791,15 @@ class Slice(Expr):
     @override
     def input_form(self) -> str:
         return f"({self.expr.input_form()} [{self.axis}, {self.index}])"
+
+@exprclass
+class SymbolShape(Expr):
+    symbol: Symbol
+    index: int
+
+    @override
+    def input_form(self) -> str:
+        return f"@shapeOf({self.symbol.input_form()}, {self.index})"
 
 class AssignExpr:
     lhs: Expr

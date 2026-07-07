@@ -1,9 +1,8 @@
-from inspect import isclass
 from weakref import WeakKeyDictionary
 
 import ctypes
 
-from .llvm import I8, ArrayType, BasicBlock, FloatType, FnType, IcmpOp, IntType, Phi, PointerType, StructType, Type, Value, VoidType
+from .llvm import ArrayType, BasicBlock, FloatType, FnType, IcmpOp, IntType, Phi, PointerType, StructType, Type, Value, VoidType
 
 class ForLoopBuilder:
     _entry: BasicBlock

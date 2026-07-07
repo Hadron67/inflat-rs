@@ -4,7 +4,6 @@ from numpy.testing import assert_almost_equal
 
 from pylat.jit.openmp import OpenMPBackend
 from pylat.jit.argpass import ComplexFloatType, IntType, TypeContext, FloatType
-import pylat.jit.argpass as ap
 
 from .jit.compile import JitCompiler
 from .expr import AssignExpr, Int, Plus, Rational, Symbol, Times, symbol, S, symbols
