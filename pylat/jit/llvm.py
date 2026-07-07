@@ -852,6 +852,15 @@ class BasicBlock(LocalValue):
     def int_to_float(self, value: Value, float_type: FloatType):
         return self.emit(IntToFloat(value, float_type))
 
+    def uint_to_float(self, value: Value, float_type: FloatType):
+        return self.emit(UIntToFloat(value, float_type))
+
+    def zext(self, value: Value, type: IntType):
+        return self.emit(UIntExt(value, type))
+
+    def sext(self, value: Value, type: IntType):
+        return self.emit(IntExt(value, type))
+
     def float_trunc(self, value: Value, type: FloatType):
         return self.emit(FloatTrunc(value, type))
 

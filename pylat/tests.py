@@ -38,12 +38,12 @@ class JitTest(TestCase):
         nx, ny, nz, dt = symbols('nx', 'ny', 'nz', 'dt')
         phi, mom_phi = symbols('phi', 'mom_phi')
         context = TypeContext()
-        context.set_symbol(nx, (ap.IntegerType(), IntType(64, False)), ())
-        context.set_symbol(ny, (ap.IntegerType(), IntType(64, False)), ())
-        context.set_symbol(nz, (ap.IntegerType(), IntType(64, False)), ())
-        context.set_symbol(dt, (ap.RealType(), FloatType(64)), ())
-        context.set_symbol(phi, (ap.ComplexType(), ComplexFloatType(FloatType(64))), (nz, ny, nx))
-        context.set_symbol(mom_phi, (ap.ComplexType(), ComplexFloatType(FloatType(64))), (nz, ny, nx))
+        context.set_symbol(nx, IntType(64, False), ())
+        context.set_symbol(ny, IntType(64, False), ())
+        context.set_symbol(nz, IntType(64, False), ())
+        context.set_symbol(dt, FloatType(64), ())
+        context.set_symbol(phi, ComplexFloatType(FloatType(64)), (nz, ny, nx))
+        context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), (nz, ny, nx))
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_one_kernel([
@@ -51,8 +51,8 @@ class JitTest(TestCase):
         ], context)
 
         np.random.seed(114514)
-        phi0 = np.zeros((2, 2, 2), dtype=np.complex128)
-        mom_phi0 = np.random.randn(2, 2, 2) + np.random.randn(2, 2, 2) * 1j
+        phi0 = np.zeros((10, 10, 10), dtype=np.complex128)
+        mom_phi0 = np.random.randn(10, 10, 10) + np.random.randn(10, 10, 10) * 1j
         dt0 = 2.0
 
         fn.call({nz: phi0.shape[2], ny: phi0.shape[1], nx: phi0.shape[0], phi: phi0, mom_phi: mom_phi0, dt: dt0})  # type: ignore

@@ -1,46 +1,11 @@
 from abc import abstractmethod
 import ctypes
 from dataclasses import dataclass
-from inspect import ArgInfo
 from typing import Any, Callable, override
 
 from . import llvm
 
 from ..expr import AssignExpr, Expr, Plus, Power, Roll, Slice, Symbol, Times, UnaryNumericFunction
-
-class Type:
-    def is_subtype(self, other: 'Type') -> bool:
-        return False
-
-@dataclass
-class IntegerType(Type):
-    @override
-    def is_subtype(self, other: Type) -> bool:
-        match other:
-            case IntegerType():
-                return True
-            case _:
-                return False
-
-@dataclass
-class RealType(Type):
-    @override
-    def is_subtype(self, other: Type) -> bool:
-        match other:
-            case IntegerType() | RealType():
-                return True
-            case _:
-                return False
-
-@dataclass
-class ComplexType(Type):
-    @override
-    def is_subtype(self, other: Type) -> bool:
-        match other:
-            case IntegerType() | RealType() | ComplexType():
-                return True
-            case _:
-                return False
 
 class LowerType:
     @staticmethod
@@ -86,6 +51,16 @@ class IntType(LowerType):
     bits: int
     signed: bool
 
+    @staticmethod
+    def range_of(bits: int, signed: bool):
+        if signed:
+            return (-2**(bits - 1), 2**(bits - 1) - 1)
+        else:
+            return (0, 2**bits - 1)
+
+    def range(self):
+        return IntType.range_of(self.bits, self.signed)
+
     @override
     def to_ctype(self) -> type[ctypes._CDataType]:
         match self.bits:
@@ -101,7 +76,7 @@ class IntType(LowerType):
                 raise ValueError(f"unsupported bit size: {self.bits}")
 
     @override
-    def to_llvm_type(self) -> llvm.Type:
+    def to_llvm_type(self) -> llvm.IntType:
         match self.bits:
             case 8:
                 return llvm.IntType(8)
@@ -113,6 +88,9 @@ class IntType(LowerType):
                 return llvm.IntType(64)
             case _:
                 raise ValueError(f"unsupported bit size: {self.bits}")
+
+    def to_llvm_value(self, value: int) -> llvm.Value:
+        return llvm.IntValue(value, self.to_llvm_type())
 
 @dataclass(frozen=True)
 class FloatType(LowerType):
@@ -129,7 +107,7 @@ class FloatType(LowerType):
                 raise ValueError(f"unsupported bit size: {self.bits}")
 
     @override
-    def to_llvm_type(self) -> llvm.Type:
+    def to_llvm_type(self) -> llvm.FloatType:
         match self.bits:
             case 32:
                 return llvm.FloatType(32)
@@ -137,6 +115,9 @@ class FloatType(LowerType):
                 return llvm.FloatType(64)
             case _:
                 raise ValueError(f"unsupported bit size: {self.bits}")
+
+    def to_llvm_value(self, value: float) -> llvm.Value:
+        return llvm.FloatValue(value, self.to_llvm_type())
 
 _LLVM_COMPLEX_FLOAT32 = llvm.StructType(llvm.FloatType(32), llvm.FloatType(32))
 _LLVM_COMPLEX_FLOAT64 = llvm.StructType(llvm.FloatType(64), llvm.FloatType(64))
@@ -202,26 +183,60 @@ def merge_shapes(*shapes: tuple[Expr, ...]) -> tuple[Expr, ...]:
         ret = merge_shape(ret, shape)
     return ret
 
-def peer_type(types: tuple[Type, ...]) -> Type:
-    assert len(types) > 0
-    if len(types) == 1:
-        return types[0]
+def _get_complex_peer_type(type: ComplexFloatType, other: LowerType) -> ComplexFloatType:
+    match other:
+        case ComplexFloatType():
+            return ComplexFloatType(_get_float_peer_type(type.type, other.type))
+        case FloatType():
+            return ComplexFloatType(_get_float_peer_type(type.type, other))
+        case IntType():
+            return ComplexFloatType(_get_float_peer_type(type.type, other))
+        case _:
+            raise ValueError(f"unsupported type: {other}")
+
+def _get_float_peer_type(type: FloatType, other: LowerType) -> FloatType:
+    if isinstance(other, FloatType):
+        return FloatType(max(type.bits, other.bits))
+    else:
+        return FloatType(type.bits)
+
+def _get_int_peer_type(type: IntType, other: LowerType) -> IntType:
+    if isinstance(other, IntType):
+        return IntType(max(type.bits, other.bits), other.signed or type.signed)
+    raise ValueError(f"unsupported type: {other}")
+
+def get_peer_type(type: LowerType, other: LowerType) -> LowerType:
+    if isinstance(type, ComplexFloatType):
+        return _get_complex_peer_type(type, other)
+    if isinstance(other, ComplexFloatType):
+        return _get_complex_peer_type(other, type)
+    if isinstance(type, FloatType):
+        return _get_float_peer_type(type, other)
+    if isinstance(other, FloatType):
+        return _get_float_peer_type(other, type)
+    if isinstance(type, IntType):
+        return _get_int_peer_type(type, other)
+    if isinstance(other, IntType):
+        return _get_int_peer_type(other, type)
+    raise ValueError(f"unsupported type: {type} and {other}")
+
+def get_peer_types(*types: LowerType) -> LowerType:
+    if len(types) == 0:
+        raise ValueError("no types provided")
     ret = types[0]
     for t in types[1:]:
-        if not ret.is_subtype(t):
-            assert t.is_subtype(ret), f"incompatible types {t} and {ret}"
-            ret = t
+        ret = get_peer_type(ret, t)
     return ret
 
 class TypeContext:
-    _symbol_types: dict[Symbol, tuple[Type, LowerType]]
+    _symbol_types: dict[Symbol, LowerType]
     _symbol_shapes: dict[Symbol, tuple[Expr, ...]]
 
     def __init__(self) -> None:
         self._symbol_types = {}
         self._symbol_shapes = {}
 
-    def set_symbol(self, expr: Symbol, type: tuple[Type, LowerType] | None = None, shape: tuple[Expr, ...] | None = None):
+    def set_symbol(self, expr: Symbol, type: LowerType | None = None, shape: tuple[Expr, ...] | None = None):
         if type is not None:
             assert expr not in self._symbol_types
             self._symbol_types[expr] = type
@@ -237,7 +252,6 @@ class TypeContext:
 
 class TypeCache:
     _ctx: TypeContext
-    _type_cache: dict[Expr, Type]
     _shape_cache: dict[Expr, tuple[Expr, ...]]
 
     def __init__(self, ctx: TypeContext) -> None:
@@ -251,16 +265,6 @@ class TypeCache:
     def get_symbol_shape(self, expr: Symbol):
         return self._ctx.get_shape(expr)
 
-    def get_type(self, expr: Expr) -> Type:
-        if isinstance(expr, Symbol):
-            return self._ctx.get_type(expr)[0]
-
-        if expr in self._type_cache:
-            return self._type_cache[expr]
-        type = self._get_type_no_cache(expr)
-        self._type_cache[expr] = type
-        return type
-
     def get_shape(self, expr: Expr):
         if isinstance(expr, Symbol):
             return self._ctx.get_shape(expr)
@@ -271,21 +275,21 @@ class TypeCache:
         self._shape_cache[expr] = ret
         return ret
 
-    def _get_type_no_cache(self, expr: Expr) -> Type:
-        match expr:
-            case Plus(children) | Times(children):
-                return peer_type(tuple(self.get_type(a) for a in children))
-            case Power(base, exp):
-                return self.get_type(base)
-            case Roll() | Slice():
-                return self.get_type(expr.expr)
-            case UnaryNumericFunction():
-                type = self.get_type(expr.expr)
-                if isinstance(type, ComplexType):
-                    return type
-                return RealType()
-            case _:
-                raise TypeError(f"cannot get type from {expr}")
+    # def _get_type_no_cache(self, expr: Expr) -> Type:
+    #     match expr:
+    #         case Plus(children) | Times(children):
+    #             return peer_type(tuple(self.get_type(a) for a in children))
+    #         case Power(base, exp):
+    #             return self.get_type(base)
+    #         case Roll() | Slice():
+    #             return self.get_type(expr.expr)
+    #         case UnaryNumericFunction():
+    #             type = self.get_type(expr.expr)
+    #             if isinstance(type, ComplexType):
+    #                 return type
+    #             return RealType()
+    #         case _:
+    #             raise TypeError(f"cannot get type from {expr}")
 
     def _get_shape_no_cache(self, expr: Expr) -> tuple[Expr, ...]:
         match expr:
@@ -307,15 +311,10 @@ class TypeCache:
 
 class TypedAssignExpr:
     expr: AssignExpr
-    type: Type
     shape: tuple[Expr, ...]
 
     def __init__(self, expr: AssignExpr, ctx: TypeCache) -> None:
         self.expr = expr
-        lhs_type = ctx.get_type(expr.lhs)
-        rhs_type = ctx.get_type(expr.rhs)
-        assert lhs_type.is_subtype(rhs_type), f"cannot assign type {rhs_type} to {lhs_type}"
-        self.type = lhs_type
 
         lhs_shape = ctx.get_shape(expr.lhs)
         rhs_shape = ctx.get_shape(expr.rhs)

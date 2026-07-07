@@ -7,7 +7,7 @@ from . import argpass as ap
 
 from .helper import CompileHelper, ComplexValue, MaybeComplexValue
 from ..expr import AssignExpr, Cos, Exp, Expr, Float, Int, Ln, Plus, Power, Rational, Roll, Sin, Slice, Symbol, Times
-from .argpass import ArrayArgInfo, ScalarArgInfo, SymbolArgInfo, TypesConfig, ComplexType, LowerType, RealType, TypeCache, TypeContext, TypedAssignExpr
+from .argpass import ArrayArgInfo, ComplexFloatType, ScalarArgInfo, SymbolArgInfo, TypesConfig, LowerType, TypeCache, TypeContext, TypedAssignExpr, get_peer_type
 from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel
 from .llvm import BasicBlock, FloatValue, IntType, IntValue, Value
 
@@ -64,7 +64,7 @@ class _SymbolScope:
     def _add_symbol(self, expr: Symbol, is_ref: bool):
         if expr in self._symbol_values:
             return
-        type, lower_type = self.type_cache.get_symbol_type(expr)
+        lower_type = self.type_cache.get_symbol_type(expr)
         shape = self.type_cache.get_symbol_shape(expr)
         assert shape is not None, f"cannot compile symbol {expr} with unspecified shape"
         if len(shape) == 0:
@@ -81,9 +81,7 @@ class _SymbolScope:
                 )
                 self._symbol_values[expr] = ret
         else:
-            for i in shape:
-                t = self.type_cache.get_type(i)
-                assert isinstance(t, ap.IntegerType), f"integer type expected for shape, got {t}"
+            # TODO: check indices types
             ret = ArrayArgInfo(
                 self._add_arg(ap.PointerType(lower_type)),
                 tuple(self._add_arg(self._parent.index_type) for _ in range(len(shape))),
@@ -138,7 +136,7 @@ class _SymbolScope:
 class _FunctionCompiler:
     parent: 'JitCompiler'
     _helper: CompileHelper
-    _expr_cache: dict[tuple[Expr, tuple[Value, ...]], MaybeComplexValue]
+    _expr_cache: dict[tuple[Expr, tuple[Value, ...]], tuple[MaybeComplexValue, LowerType]]
     _subscript_cache: dict[tuple[tuple[Value, ...], tuple[Value, ...]], Value]
     _block: BasicBlock
     _finished: bool
@@ -170,51 +168,56 @@ class _FunctionCompiler:
         self._standard_layout = standard_layout
         self._debug = debug
 
-    def _add(self, left: MaybeComplexValue, left_type: ap.Type, right: MaybeComplexValue, right_type: ap.Type, result_type: ap.Type) -> MaybeComplexValue:
+    def _add(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType) -> tuple[MaybeComplexValue, ap.LowerType]:
+        result_type = get_peer_type(left_type, right_type)
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
-        if isinstance(result_type, ComplexType):
-            return self._helper.complex_add(self._block, left, right)
+        if isinstance(result_type, ComplexFloatType):
+            return self._helper.complex_add(self._block, left, right), result_type
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.add(left, right)
+        return self._block.add(left, right), result_type
 
-    def _sub(self, left: MaybeComplexValue, left_type: ap.Type, right: MaybeComplexValue, right_type: ap.Type, result_type: ap.Type) -> MaybeComplexValue:
+    def _sub(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType) -> tuple[MaybeComplexValue, ap.LowerType]:
+        result_type = get_peer_type(left_type, right_type)
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
-        if isinstance(result_type, ComplexType):
-            return self._helper.complex_sub(self._block, left, right)
+        if isinstance(result_type, ComplexFloatType):
+            return self._helper.complex_sub(self._block, left, right), result_type
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.sub(left, right)
+        return self._block.sub(left, right), result_type
 
-    def _mul(self, left: MaybeComplexValue, left_type: ap.Type, right: MaybeComplexValue, right_type: ap.Type, result_type: ap.Type) -> MaybeComplexValue:
+    def _mul(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType) -> tuple[MaybeComplexValue, ap.LowerType]:
+        result_type = get_peer_type(left_type, right_type)
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
-        if isinstance(result_type, ComplexType):
-            return self._helper.complex_mul(self._block, left, right)
+        if isinstance(result_type, ComplexFloatType):
+            return self._helper.complex_mul(self._block, left, right), result_type
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.mul(left, right)
+        return self._block.mul(left, right), result_type
 
-    def _div(self, left: MaybeComplexValue, left_type: ap.Type, right: MaybeComplexValue, right_type: ap.Type, result_type: ap.Type) -> MaybeComplexValue:
+    def _div(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType) -> tuple[MaybeComplexValue, ap.LowerType]:
+        result_type = get_peer_type(left_type, right_type)
         left = self._helper.coerce(self._block, left, left_type, result_type)
         right = self._helper.coerce(self._block, right, right_type, result_type)
-        if isinstance(result_type, ComplexType):
-            return self._helper.complex_div(self._block, left, right)
+        if isinstance(result_type, ComplexFloatType):
+            return self._helper.complex_div(self._block, left, right), result_type
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.div(left, right, True)
+        return self._block.div(left, right, True), result_type
 
-    def _sqrt(self, expr: MaybeComplexValue, type: ap.Type):
-        if isinstance(type, ComplexType):
+    def _sqrt(self, expr: MaybeComplexValue, type: ap.LowerType) -> tuple[MaybeComplexValue, ap.LowerType]:
+        if isinstance(type, ComplexFloatType):
             raise NotImplementedError
         assert not isinstance(expr, ComplexValue)
-        return self._block.sqrt(expr)
+        return self._block.sqrt(expr), type
 
-    def _pow(self, base: MaybeComplexValue, base_type: ap.Type, exp: MaybeComplexValue, exp_type: ap.Type, result_type: ap.Type):
-        base = self._helper.coerce(self._block, base, result_type, result_type)
+    def _pow(self, base: MaybeComplexValue, base_type: ap.LowerType, exp: MaybeComplexValue, exp_type: ap.LowerType) -> tuple[MaybeComplexValue, ap.LowerType]:
+        result_type = get_peer_type(base_type, exp_type)
+        base = self._helper.coerce(self._block, base, base_type, result_type)
         exp = self._helper.coerce(self._block, exp, result_type, result_type)
-        if isinstance(result_type, ComplexType):
+        if isinstance(result_type, ComplexFloatType):
             raise NotImplementedError
         assert not isinstance(base, ComplexValue) and not isinstance(exp, ComplexValue)
-        return self._block.pow(base, exp)
+        return self._block.pow(base, exp), result_type
 
     def _store(self, ptr: Value, value: MaybeComplexValue):
         b = self._block
@@ -260,12 +263,12 @@ class _FunctionCompiler:
     def _from_lower_real_value(self, value: Value, lower_type: LowerType):
         return self._helper.coerce_lower_type(self._block, value, lower_type, self.parent.real_type)
 
-    def _echo(self, *args: tuple[MaybeComplexValue, ap.Type] | str):
+    def _echo(self, *args: tuple[MaybeComplexValue, ap.LowerType] | str):
         if self._debug is not None:
             converted_args: list[Value | str] = []
             for arg in args:
                 if isinstance(arg, tuple):
-                    if arg[1] == ap.ComplexType():
+                    if isinstance(arg[1], ap.ComplexFloatType):
                         re, im = self._helper.expand_complex_value(self._block, arg[0])
                         converted_args.extend(['complex(', re, ', ', im, ')'])
                     else:
@@ -275,21 +278,33 @@ class _FunctionCompiler:
                     converted_args.append(arg)
             self._debug.echo(self._block, *converted_args)
 
-    def _compile_expr_no_cache(self, expr: Expr, subscripts: tuple[Value, ...]) -> MaybeComplexValue:
+    def _promote_type(self, type: LowerType) -> LowerType:
+        match type:
+            case ap.IntType():
+                return self.parent.index_type
+            case ap.FloatType():
+                return self.parent.real_type
+            case ap.ComplexFloatType(type):
+                t = self._promote_type(type)
+                assert isinstance(t, ap.FloatType)
+                return ap.ComplexFloatType(t)
+            case _:
+                raise ValueError(f"unsupported type: {type}")
+
+    def _compile_expr_no_cache(self, expr: Expr, subscripts: tuple[Value, ...]) -> tuple[MaybeComplexValue, LowerType]:
         h = self._helper
 
-        expr_type = self._type_cache.get_type(expr)
         match expr:
             case Int(value):
-                return IntValue(value, h.llvm_index_type)
+                return IntValue(value, h.llvm_index_type), self.parent.index_type
             case Rational(numerator, denominator):
-                return FloatValue(numerator / denominator, h.llvm_real_type)
+                return FloatValue(numerator / denominator, h.llvm_real_type), self.parent.real_type
             case Float(value):
-                return FloatValue(value, h.llvm_real_type)
+                return FloatValue(value, h.llvm_real_type), self.parent.real_type
             case Symbol():
                 sym = self._symbol_scope.get_symbol(expr)
-                type, lower_type = self._type_cache.get_symbol_type(expr)
-                lower_target_type = self._helper.type_to_lower_type(type)
+                lower_type = self._type_cache.get_symbol_type(expr)
+                lower_target_type = self._promote_type(lower_type)
                 ret = None
                 match sym:
                     case ScalarArgInfo():
@@ -298,12 +313,13 @@ class _FunctionCompiler:
                         ret = self._block.load(self._compile_array_symbol_access(sym, subscripts))
                     case _:
                         raise NotImplementedError
-                return self._helper.coerce_lower_type(self._block, ret, lower_type, lower_target_type)
+                return self._helper.coerce(self._block, ret, lower_type, lower_target_type), lower_target_type
             case Roll():
                 assert not self._standard_layout, "cannot compile Roll in standard layout mode"
                 expr_shape = self._type_cache.get_shape(expr.expr)
                 assert expr_shape is not None, "cannot compile unspecified shape"
-                len = self.compile_non_complex_expr(expr_shape[expr.axis], ())
+                len, len_type = self.compile_non_complex_expr(expr_shape[expr.axis], ())
+                assert isinstance(len_type, ap.IntType), "length must be an integer"
                 new_index = subscripts[expr.axis]
                 new_index = self._block.add(new_index, IntValue(-expr.amount, h.llvm_index_type))
                 new_index = self._block.rem(new_index, len, False)
@@ -312,56 +328,66 @@ class _FunctionCompiler:
             case Slice():
                 return self.compile_expr(expr.expr, subscripts[:expr.axis] + (IntValue(expr.index, h.llvm_index_type),) + subscripts[expr.axis + 1:])
             case Plus(children):
-                ret_type = self._type_cache.get_type(children[0])
-                ret = self.compile_expr(children[0], subscripts)
+                ret, ret_type = self.compile_expr(children[0], subscripts)
                 for child in children[1:]:
-                    child_type = self._type_cache.get_type(child)
-                    ret = self._add(ret, ret_type, self.compile_expr(child, subscripts), child_type, expr_type)
-                    ret_type = child_type
-                return ret
+                    child_value, child_type = self.compile_expr(child, subscripts)
+                    ret, ret_type = self._add(ret, ret_type, child_value, child_type)
+                return ret, ret_type
             case Times(children):
-                ret_type = self._type_cache.get_type(children[0])
-                ret = self.compile_expr(children[0], subscripts)
+                ret, ret_type = self.compile_expr(children[0], subscripts)
                 for child in children[1:]:
-                    child_type = self._type_cache.get_type(child)
-                    ret = self._mul(ret, ret_type, self.compile_expr(child, subscripts), child_type, expr_type)
-                    ret_type = child_type
-                return ret
+                    child_value, child_type = self.compile_expr(child, subscripts)
+                    ret, ret_type = self._mul(ret, ret_type, child_value, child_type)
+                return ret, ret_type
             case Power(_, exponent):
-                base_type = self._type_cache.get_type(expr.base)
-                base = self.compile_expr(expr.base, subscripts)
+                base, base_type = self.compile_expr(expr.base, subscripts)
                 match exponent:
                     case Int(exp_value):
                         neg = False
                         if exp_value < 0:
                             exp_value = -exp_value
                             neg = True
+                            base, base_type = h.coerce_int_to_float(self._block, base, base_type, self.parent.real_type)
                         ret = base
                         for _ in range(exp_value - 1):
-                            ret = self._mul(ret, base_type, base, base_type, expr_type)
+                            ret, _ = self._mul(ret, base_type, base, base_type)
                         if neg:
-                            ret = self._div(h.llvm_real_type.from_int(1), base_type, ret, base_type, expr_type)
-                        return ret
+                            ret, _ = self._div(base_type.to_llvm_type().from_int(1), base_type, ret, base_type)
+                        return ret, base_type
                     case Rational(1, 2):
-                        return self._sqrt(self.compile_expr(expr.base, subscripts), base_type)
+                        base, base_type = h.coerce_int_to_float(self._block, base, base_type, self.parent.real_type)
+                        return self._sqrt(base, base_type)
                     case Rational(-1, 2):
-                        return self._div(h.llvm_real_type.from_int(1), base_type, self._sqrt(self.compile_expr(expr.base, subscripts), base_type), base_type, expr_type)
+                        base, base_type = h.coerce_int_to_float(self._block, base, base_type, self.parent.real_type)
+                        base2, base_type = self._sqrt(base, base_type)
+                        return self._div(base_type.to_llvm_type().from_int(1), base_type, base2, base_type)
                     case _:
-                        exp_value = self.compile_expr(exponent, ())
-                        exp_type = self._type_cache.get_type(exponent)
-                        return self._pow(self.compile_expr(expr.base, subscripts), base_type, exp_value, exp_type, expr_type)
+                        exp_value, exp_type = self.compile_expr(exponent, subscripts)
+                        return self._pow(base, base_type, exp_value, exp_type)
             case Sin(expr):
-                assert isinstance(expr_type, RealType), "sin currently only supports real types"
-                return self._block.sin(self.compile_non_complex_expr(expr, subscripts))
+                arg, arg_type = self.compile_expr(expr, subscripts)
+                arg, arg_type = h.coerce_int_to_float(self._block, arg, arg_type, self.parent.real_type)
+                assert not isinstance(arg_type, ComplexFloatType), "sin currently only supports real types"
+                assert not isinstance(arg, MaybeComplexValue), "sin currently only supports real types"
+                return self._block.sin(arg), arg_type
             case Cos(expr):
-                assert isinstance(expr_type, RealType), "cos currently only supports real types"
-                return self._block.cos(self.compile_non_complex_expr(expr, subscripts))
+                arg, arg_type = self.compile_expr(expr, subscripts)
+                arg, arg_type = h.coerce_int_to_float(self._block, arg, arg_type, self.parent.real_type)
+                assert not isinstance(arg_type, ComplexFloatType), "cos currently only supports real types"
+                assert not isinstance(arg, MaybeComplexValue), "cos currently only supports real types"
+                return self._block.cos(arg), arg_type
             case Ln(expr):
-                assert isinstance(expr_type, RealType), "ln currently only supports real types"
-                return self._block.ln(self.compile_non_complex_expr(expr, subscripts))
+                arg, arg_type = self.compile_expr(expr, subscripts)
+                arg, arg_type = h.coerce_int_to_float(self._block, arg, arg_type, self.parent.real_type)
+                assert not isinstance(arg_type, ComplexFloatType), "ln currently only supports real types"
+                assert not isinstance(arg, MaybeComplexValue), "ln currently only supports real types"
+                return self._block.ln(arg), arg_type
             case Exp(expr):
-                assert isinstance(expr_type, RealType), "exp currently only supports real types"
-                return self._block.exp(self.compile_non_complex_expr(expr, subscripts))
+                arg, arg_type = self.compile_expr(expr, subscripts)
+                arg, arg_type = h.coerce_int_to_float(self._block, arg, arg_type, self.parent.real_type)
+                assert not isinstance(arg_type, ComplexFloatType), "exp currently only supports real types"
+                assert not isinstance(arg, MaybeComplexValue), "exp currently only supports real types"
+                return self._block.exp(arg), arg_type
 
         raise TypeError(f'unsupported expression: {expr}')
 
@@ -369,7 +395,7 @@ class _FunctionCompiler:
         match expr:
             case Symbol():
                 sym = self._symbol_scope.get_symbol(expr)
-                type, lower_type = self._type_cache.get_symbol_type(expr)
+                lower_type = self._type_cache.get_symbol_type(expr)
                 assert sym is not None
                 match sym:
                     case ScalarArgInfo():
@@ -381,7 +407,7 @@ class _FunctionCompiler:
                         return self._compile_array_symbol_access(sym, subscripts), lower_type
         raise ValueError(f"cannot use {expr} as left-value")
 
-    def compile_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> MaybeComplexValue:
+    def compile_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> tuple[MaybeComplexValue, LowerType]:
         cache_key = (expr, subscripts)
         if cache_key in self._expr_cache:
             return self._expr_cache[cache_key]
@@ -389,38 +415,39 @@ class _FunctionCompiler:
         self._expr_cache[cache_key] = result
         return result
 
-    def compile_non_complex_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> Value:
-        ret = self.compile_expr(expr, subscripts)
+    def compile_non_complex_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> tuple[Value, LowerType]:
+        ret, type = self.compile_expr(expr, subscripts)
         assert not isinstance(ret, ComplexValue)
-        return ret
+        return ret, type
 
     def _compile_assignment(self, typed_expr: TypedAssignExpr, tid: Value):
-        type = typed_expr.type
-        shape = typed_expr.shape
         expr = typed_expr.expr
-        assert shape is not None, f"cannot compile expression {expr} with unspecified shape"
-        shape = tuple(self.compile_non_complex_expr(i, ()) for i in shape)
-        indices = self._compile_unpack_subscripts(shape, tid)
-        lhs_ptr, lhs_lower_type = self._compile_lvalue(expr.lhs, indices)
 
-        rhs_lower_type = self._helper.type_to_lower_type(type)
-        rhs_value = self.compile_expr(expr.rhs, indices)
+        shape: list[Value] = []
+        for i in typed_expr.shape:
+            value, type = self.compile_non_complex_expr(i, ())
+            assert isinstance(type, ap.IntType), f"integer type expected for shape, got {type}"
+            shape.append(value)
+        indices = self._compile_unpack_subscripts(tuple(shape), tid)
+        lhs_ptr, lhs_type = self._compile_lvalue(expr.lhs, indices)
+
+        rhs_value, rhs_type = self.compile_expr(expr.rhs, indices)
 
         result_value = None
         match expr.op:
             case '':
-                result_value = rhs_value
+                result_value = rhs_value, rhs_type
             case '+':
-                result_value = self._add(self._block.load(lhs_ptr), type, rhs_value, type, type)
+                result_value = self._add(self._block.load(lhs_ptr), lhs_type, rhs_value, rhs_type)
             case '-':
-                result_value = self._sub(self._block.load(lhs_ptr), type, rhs_value, type, type)
+                result_value = self._sub(self._block.load(lhs_ptr), lhs_type, rhs_value, rhs_type)
             case '*':
-                result_value = self._mul(self._block.load(lhs_ptr), type, rhs_value, type, type)
+                result_value = self._mul(self._block.load(lhs_ptr), lhs_type, rhs_value, rhs_type)
             case '/':
-                result_value = self._div(self._block.load(lhs_ptr), type, rhs_value, type, type)
+                result_value = self._div(self._block.load(lhs_ptr), lhs_type, rhs_value, rhs_type)
             case _:
                 raise ValueError(f"unknown op {expr.op}")
-        result_value = self._helper.coerce_lower_type(self._block, result_value, rhs_lower_type, lhs_lower_type)
+        result_value = self._helper.coerce_lower_type(self._block, result_value[0], result_value[1], lhs_type)
         self._store(lhs_ptr, result_value)
 
     def compile_assignments(self, exprs: list[TypedAssignExpr], tid: Value):
@@ -450,7 +477,7 @@ class CompiledWrapper:
         for symbol, value in arg.items():
             seen_symbols.add(symbol)
             info = self._symbols.get_symbol(symbol)
-            type, lower_type = self._symbols.type_cache.get_symbol_type(symbol)
+            lower_type = self._symbols.type_cache.get_symbol_type(symbol)
             lower_type_ctype = lower_type.to_ctype()
             match info:
                 case ScalarArgInfo():
@@ -509,7 +536,9 @@ class _AssignmentsKernel(LoopKernel):
     @override
     def compile_total_size(self, begin: BasicBlock, args: tuple[Value, ...]) -> tuple[BasicBlock, Value]:
         cp = _FunctionCompiler(self._parent, self._helper, args, begin, self._symbol_scope)
-        return begin, cp.compile_non_complex_expr(self._total_size, ())
+        value, type = cp.compile_non_complex_expr(self._total_size, ())
+        assert isinstance(type, ap.IntType), f"integer type expected for total size, got {type}"
+        return begin, value
 
     @override
     def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> BasicBlock:

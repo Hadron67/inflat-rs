@@ -10,15 +10,6 @@ from .util import ForLoopBuilder
 from .llvm import I32, I8, ArrayType, BasicBlock, DeclareFunction, FnType, Function, GlobalAggregateValue, GlobalStringValue, GlobalValueFlags, GlobalZeroAggregateValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Value, VoidType, VoidValue
 from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel
 
-class ident_t(ctypes.Structure):
-    _fields_ = [
-        ('reserved1', ctypes.c_int32),
-        ('reserved2', ctypes.c_int32),
-        ('reserved3', ctypes.c_int32),
-        ('reserved4', ctypes.c_int32),
-        ('source', ctypes.POINTER(ctypes.c_int8)),
-    ]
-
 _LLVM_IDEN_T = StructType(
     I32,
     I32,
@@ -26,20 +17,6 @@ _LLVM_IDEN_T = StructType(
     I32,
     PointerType(I8),
 )
-
-def _for_static_init_type(type: type[ctypes._SimpleCData]):
-    return ctypes.CFUNCTYPE(
-        None,
-        ctypes.POINTER(ident_t), # loc
-        ctypes.c_uint32, # gitd
-        ctypes.c_uint32, # schedtype
-        ctypes.POINTER(ctypes.c_int32), # plastiter
-        ctypes.POINTER(type), # plower
-        ctypes.POINTER(type), # pupper
-        ctypes.POINTER(type), # pstride
-        type, # incr
-        type, # chunk
-    )
 
 def _for_static_init(type: IntType):
     fn_type = FnType((
@@ -114,7 +91,6 @@ class OpenMPBackend(Backend):
         # separate outer and inner function subroutines so that we won't accidentally use a variable across functions
         def compile_outer():
             b = outer_fn.entry
-            echo(b, "start")
             closure_ptr = b.alloca(closure_type)
             args = outer_fn.get_args()
             b, total_size = kernel.compile_total_size(b, args)
