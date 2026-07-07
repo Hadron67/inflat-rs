@@ -158,30 +158,30 @@ class PointerType(LowerType):
     def to_llvm_type(self) -> llvm.Type:
         return llvm.PointerType(self.type.to_llvm_type())
 
-def merge_shape(shape1: tuple[Expr, ...], shape2: tuple[Expr, ...]) -> tuple[Expr, ...]:
-    if len(shape1) == len(shape2):
-        assert shape1 == shape2, f"shape mismatch {shape1} != {shape2}"
-        return shape1
-    ret: list[Expr] = []
-    for i in range(max(len(shape1), len(shape2))):
-        if i < len(shape1) and i < len(shape2):
-            s1 = shape1[-1 - i]
-            s2 = shape2[-1 - i]
-            assert s1 == s2, f"incompatible shapes {shape1} != {shape2}"
-            ret.append(s1)
-        elif i < len(shape1):
-            ret.append(shape1[-1 - i])
-        elif i < len(shape2):
-            ret.append(shape2[-1 - i])
-    ret.reverse()
-    return tuple(ret)
+# def merge_shape(shape1: tuple[Expr, ...], shape2: tuple[Expr, ...]) -> tuple[Expr, ...]:
+#     if len(shape1) == len(shape2):
+#         assert shape1 == shape2, f"shape mismatch {shape1} != {shape2}"
+#         return shape1
+#     ret: list[Expr] = []
+#     for i in range(max(len(shape1), len(shape2))):
+#         if i < len(shape1) and i < len(shape2):
+#             s1 = shape1[-1 - i]
+#             s2 = shape2[-1 - i]
+#             assert s1 == s2, f"incompatible shapes {shape1} != {shape2}"
+#             ret.append(s1)
+#         elif i < len(shape1):
+#             ret.append(shape1[-1 - i])
+#         elif i < len(shape2):
+#             ret.append(shape2[-1 - i])
+#     ret.reverse()
+#     return tuple(ret)
 
-def merge_shapes(*shapes: tuple[Expr, ...]) -> tuple[Expr, ...]:
-    assert len(shapes) > 0
-    ret = shapes[0]
-    for shape in shapes[1:]:
-        ret = merge_shape(ret, shape)
-    return ret
+# def merge_shapes(*shapes: tuple[Expr, ...]) -> tuple[Expr, ...]:
+#     assert len(shapes) > 0
+#     ret = shapes[0]
+#     for shape in shapes[1:]:
+#         ret = merge_shape(ret, shape)
+#     return ret
 
 def _get_complex_peer_type(type: ComplexFloatType, other: LowerType) -> ComplexFloatType:
     match other:
@@ -238,7 +238,7 @@ class TypeContext:
         self._symbol_shapes = {}
         self._symbol_dimension = {}
 
-    def set_symbol(self, expr: Symbol, type: LowerType | None = None, shape: tuple[Expr, ...] | None = None, dimension: int | None = None):
+    def set_symbol(self, expr: Symbol, type: LowerType | None = None, dimension: int | None = None, shape: tuple[Expr, ...] | None = None):
         if type is not None:
             assert expr not in self._symbol_types
             self._symbol_types[expr] = type
@@ -259,15 +259,15 @@ class TypeContext:
         return self._symbol_dimension[expr]
 
 class TypeCache:
+    resolved_shapes: dict[SymbolShape, Expr]
     _ctx: TypeContext
     _shape_cache: dict[Expr, tuple[Expr, ...]]
-    _resolved_shapes: dict[SymbolShape, Expr]
 
     def __init__(self, ctx: TypeContext) -> None:
         self._ctx = ctx
         self._type_cache = {}
         self._shape_cache = {}
-        self._resolved_shapes = {}
+        self.resolved_shapes = {}
 
     def get_symbol_type(self, expr: Symbol):
         return self._ctx.get_type(expr)
@@ -275,10 +275,48 @@ class TypeCache:
     def get_symbol_shape(self, expr: Symbol):
         return self._ctx.get_shape(expr)
 
-    def get_shape(self, expr: Expr):
-        if isinstance(expr, Symbol):
-            return self._ctx.get_shape(expr)
+    def get_symbol_dimension(self, expr: Symbol):
+        return self._ctx.get_dimension(expr)
 
+    def _resolve_equal_constraint(self, expr1: Expr, expr2: Expr):
+        expr1 = expr1.map(lambda e: self.resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
+        expr2 = expr2.map(lambda e: self.resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
+        if expr1 == expr2:
+            return
+        if not isinstance(expr1, SymbolShape) and isinstance(expr2, SymbolShape):
+            t = expr1
+            expr1 = expr2
+            expr2 = t
+
+        if isinstance(expr1, SymbolShape):
+            assert expr1 not in self.resolved_shapes
+            self.resolved_shapes[expr1] = expr2
+            return
+
+        raise ValueError(f"cannot resolve equal constrain {expr1} === {expr2}")
+
+    def merge_shape(self, lhs: tuple[Expr, ...], rhs: tuple[Expr, ...], is_assign: bool = False):
+        if is_assign and len(rhs) > len(lhs):
+            raise TypeError(f"cannot assign shape {rhs} to shape {lhs}")
+        ret: list[Expr] = []
+        for i in range(max(len(lhs), len(rhs))):
+            lhs_s = lhs[len(lhs) - 1 - i] if i < len(lhs) else None
+            rhs_s = rhs[len(rhs) - 1 - i] if i < len(rhs) else None
+            if lhs_s is not None and rhs_s is not None:
+                self._resolve_equal_constraint(lhs_s, rhs_s)
+            if lhs_s is not None:
+                ret.append(lhs_s)
+            elif rhs_s is not None:
+                ret.append(rhs_s)
+        return tuple(ret)
+
+    def merge_shapes(self, *shapes: tuple[Expr, ...]) -> tuple[Expr, ...]:
+        ret = shapes[0]
+        for shape in shapes[1:]:
+            ret = self.merge_shape(ret, shape)
+        return ret
+
+    def get_shape(self, expr: Expr):
         if expr in self._shape_cache:
             return self._shape_cache[expr]
         ret = self._get_shape_no_cache(expr)
@@ -287,10 +325,12 @@ class TypeCache:
 
     def _get_shape_no_cache(self, expr: Expr) -> tuple[Expr, ...]:
         match expr:
+            case Symbol():
+                return tuple(SymbolShape(expr, i) for i in range(self._ctx.get_dimension(expr)))
             case Plus(children) | Times(children):
-                return merge_shapes(*tuple(self.get_shape(a) for a in children))
+                return self.merge_shapes(*tuple(self.get_shape(a) for a in children))
             case Power(base, exp):
-                return merge_shapes(self.get_shape(base), self.get_shape(exp))
+                return self.merge_shapes(self.get_shape(base), self.get_shape(exp))
             case UnaryNumericFunction():
                 return self.get_shape(expr.expr)
             case Roll():
@@ -312,8 +352,7 @@ class TypedAssignExpr:
 
         lhs_shape = ctx.get_shape(expr.lhs)
         rhs_shape = ctx.get_shape(expr.rhs)
-        shape = merge_shape(lhs_shape, rhs_shape)
-        assert shape == lhs_shape, "incompatible shape"
+        shape = ctx.merge_shape(lhs_shape, rhs_shape, True)
         self.shape = shape
 
     def total_size(self):
@@ -349,6 +388,7 @@ class ScalarArgInfo(SymbolArgInfo):
 @dataclass
 class ArrayArgInfo(SymbolArgInfo):
     ptr: int
+    shape: tuple[int, ...]
     strides: tuple[int, ...]
 
     @override

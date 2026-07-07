@@ -33,6 +33,9 @@ class Expr:
     def map(self, op: 'Callable[[Expr], Expr]') -> 'Expr':
         return op(self)
 
+    def replace(self, replacements: 'dict[Expr, Expr]') -> 'Expr':
+        return self.map(lambda e: replacements.get(e, e))
+
     @abstractmethod
     def head_sort_token(self) -> int:
         pass

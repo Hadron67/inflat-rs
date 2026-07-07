@@ -6,7 +6,7 @@ import ctypes
 from . import argpass as ap
 
 from .helper import CompileHelper, ComplexValue, MaybeComplexValue
-from ..expr import AssignExpr, Cos, Exp, Expr, Float, Int, Ln, Plus, Power, Rational, Roll, Sin, Slice, Symbol, Times
+from ..expr import AssignExpr, Cos, Exp, Expr, Float, Int, Ln, Plus, Power, Rational, Roll, Sin, Slice, Symbol, SymbolShape, Times
 from .argpass import ArrayArgInfo, ComplexFloatType, ScalarArgInfo, SymbolArgInfo, TypesConfig, LowerType, TypeCache, TypeContext, TypedAssignExpr, get_peer_type
 from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel
 from .llvm import BasicBlock, FloatValue, IntType, IntValue, Value
@@ -27,25 +27,18 @@ class StandardLayoutMode(Enum):
     ROW_MAJOR = "row"
 
 class _SymbolScope:
-    _parent: 'JitCompiler'
     type_cache: TypeCache
     _symbol_values: dict[Symbol, SymbolArgInfo]
     _args: list[LowerType]
-    _helper: CompileHelper
 
-    def __init__(self, parent: 'JitCompiler', helper: CompileHelper, type_cache: TypeCache) -> None:
-        self._parent = parent
+    def __init__(self, type_cache: TypeCache) -> None:
         self._symbol_values = {}
         self._args = []
-        self._helper = helper
         self.type_cache = type_cache
+        self._symbol_shapes = {}
 
     def get_symbol(self, symbol: Symbol):
         return self._symbol_values[symbol]
-
-    def add_symbol(self, symbol: Symbol, info: SymbolArgInfo):
-        assert symbol not in self._symbol_values
-        self._symbol_values[symbol] = info
 
     def get_args(self) -> tuple[LowerType, ...]:
         return tuple(self._args)
@@ -61,13 +54,12 @@ class _SymbolScope:
         self._args.append(type)
         return ret
 
-    def _add_symbol(self, expr: Symbol, is_ref: bool):
+    def _add_symbol(self, expr: Symbol, is_ref: bool, type_config: TypesConfig):
         if expr in self._symbol_values:
             return
         lower_type = self.type_cache.get_symbol_type(expr)
-        shape = self.type_cache.get_symbol_shape(expr)
-        assert shape is not None, f"cannot compile symbol {expr} with unspecified shape"
-        if len(shape) == 0:
+        dim = self.type_cache.get_symbol_dimension(expr)
+        if dim == 0:
             if is_ref:
                 ret = ScalarArgInfo(
                     self._add_arg(ap.PointerType(lower_type)),
@@ -84,42 +76,43 @@ class _SymbolScope:
             # TODO: check indices types
             ret = ArrayArgInfo(
                 self._add_arg(ap.PointerType(lower_type)),
-                tuple(self._add_arg(self._parent.index_type) for _ in range(len(shape))),
+                tuple(self._add_arg(type_config.index_type) for _ in range(dim)),
+                tuple(self._add_arg(type_config.index_type) for _ in range(dim)),
             )
             self._symbol_values[expr] = ret
 
-    def scan_lvalue_symbols(self, expr: Expr):
+    def scan_lvalue_symbols(self, expr: Expr, type_config: TypesConfig):
         match expr:
             case Symbol():
-                self._add_symbol(expr, True)
+                self._add_symbol(expr, True, type_config)
             case Roll():
-                self.scan_lvalue_symbols(expr.expr)
+                self.scan_lvalue_symbols(expr.expr, type_config)
             case Slice():
-                self.scan_lvalue_symbols(expr.expr)
+                self.scan_lvalue_symbols(expr.expr, type_config)
 
-    def scan_symbols(self, expr: Expr):
+    def scan_symbols(self, expr: Expr, type_config: TypesConfig):
         todo = [expr]
         while len(todo) > 0:
             elem = todo.pop()
             if isinstance(elem, Symbol):
-                self._add_symbol(elem, False)
+                self._add_symbol(elem, False, type_config)
             else:
                 children = elem.subexpressions()
                 children.reverse()
                 todo.extend(children)
 
-    def scan_assignment(self, typed_expr: TypedAssignExpr):
+    def scan_assignment(self, typed_expr: TypedAssignExpr, type_config: TypesConfig):
         expr = typed_expr.expr
-        self.scan_lvalue_symbols(expr.lhs)
-        self.scan_symbols(expr.lhs)
-        self.scan_symbols(expr.rhs)
+        self.scan_lvalue_symbols(expr.lhs, type_config)
+        self.scan_symbols(expr.lhs, type_config)
+        self.scan_symbols(expr.rhs, type_config)
 
         for e in typed_expr.shape:
-            self.scan_symbols(e)
+            self.scan_symbols(e, type_config)
 
-    def scan_assignments(self, exprs: list[TypedAssignExpr]):
+    def scan_assignments(self, exprs: list[TypedAssignExpr], type_config: TypesConfig):
         for expr in exprs:
-            self.scan_assignment(expr)
+            self.scan_assignment(expr, type_config)
 
     @override
     def __str__(self):
@@ -314,15 +307,20 @@ class _FunctionCompiler:
                     case _:
                         raise NotImplementedError
                 return self._helper.coerce(self._block, ret, lower_type, lower_target_type), lower_target_type
+            case SymbolShape(symbol, index):
+                sym = self._symbol_scope.get_symbol(symbol)
+                assert isinstance(sym, ArrayArgInfo), "SymbolShape must be used with an array symbol"
+                assert index < len(sym.shape), "SymbolShape index out of bounds"
+                return self._args[sym.shape[index]], self.parent.index_type
             case Roll():
                 assert not self._standard_layout, "cannot compile Roll in standard layout mode"
                 expr_shape = self._type_cache.get_shape(expr.expr)
                 assert expr_shape is not None, "cannot compile unspecified shape"
-                len, len_type = self.compile_non_complex_expr(expr_shape[expr.axis], ())
-                assert isinstance(len_type, ap.IntType), "length must be an integer"
+                length, length_type = self.compile_non_complex_expr(expr_shape[expr.axis], ())
+                assert isinstance(length_type, ap.IntType), "length must be an integer"
                 new_index = subscripts[expr.axis]
                 new_index = self._block.add(new_index, IntValue(-expr.amount, h.llvm_index_type))
-                new_index = self._block.rem(new_index, len, False)
+                new_index = self._block.rem(new_index, length, False)
                 subscripts = subscripts[:expr.axis] + (new_index,) + subscripts[expr.axis + 1:]
                 return self.compile_expr(expr.expr, subscripts)
             case Slice():
@@ -486,11 +484,15 @@ class CompiledWrapper:
                     else:
                         converted_args[info.value] = lower_type_ctype(value)
                 case ArrayArgInfo():
+                    value_shape = value.shape
                     ptr_type = ctypes.POINTER(lower_type_ctype)
                     # np.ndarray
                     value_strides = value.strides
                     converted_args[info.ptr] = ctypes.cast(value.ctypes.data, ptr_type)
+                    assert len(value_shape) == len(info.strides)
                     assert len(value_strides) == len(info.strides)
+                    for index, shape in zip(info.shape, value_shape):
+                        converted_args[index] = index_type(shape)
                     for index, stride in zip(info.strides, value_strides):
                         converted_args[index] = index_type(stride // ctypes.sizeof(lower_type_ctype))
 
@@ -522,8 +524,8 @@ class _AssignmentsKernel(LoopKernel):
         self._exprs = list(TypedAssignExpr(a, type_cache) for a in exprs)
         self._total_size = _check_and_get_total_size(self._exprs)
         self._helper = CompileHelper(parent)
-        self._symbol_scope = _SymbolScope(parent, self._helper, type_cache)
-        self._symbol_scope.scan_assignments(self._exprs)
+        self._symbol_scope = _SymbolScope(type_cache)
+        self._symbol_scope.scan_assignments(self._exprs, parent)
 
     @override
     def get_index_type(self) -> IntType:
