@@ -4,8 +4,9 @@ from abc import abstractmethod
 import ctypes
 
 from pylat.jit.argpass import LowerType
+from pylat.jit.helper import MaybeComplexValue
 
-from .llvm import BasicBlock, IntType, Value
+from .llvm import BasicBlock, IntType, Ordering, Type, Value
 
 class CompiledBackendFunction:
     @abstractmethod
@@ -35,10 +36,23 @@ class LoopKernel:
         raise NotImplementedError
 
     @abstractmethod
-    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> BasicBlock:
+    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> tuple[BasicBlock, MaybeComplexValue]:
+        raise NotImplementedError
+
+class ReductionKernel:
+    @abstractmethod
+    def get_type(self) -> Type:
+        raise NotImplementedError
+
+    @abstractmethod
+    def store_initial_value(self, block: BasicBlock, value_ptr: Value):
+        raise NotImplementedError
+
+    @abstractmethod
+    def reduce(self, block: BasicBlock, acc_ptr: Value, value: MaybeComplexValue, ordering: Ordering | None = None) -> BasicBlock:
         raise NotImplementedError
 
 class Backend:
     @abstractmethod
-    def compile_paralell_loop(self, kernel: LoopKernel) -> CompiledBackendFunction:
+    def compile_paralell_loop(self, kernel: LoopKernel, reduction: ReductionKernel | None = None) -> CompiledBackendFunction:
         raise NotImplementedError

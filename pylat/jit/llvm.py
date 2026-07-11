@@ -2,7 +2,8 @@ from enum import Enum, IntEnum
 import math
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import final, override
+from types import EllipsisType
+from typing import Any, final, override
 
 from ..util import ObjectCounter, StrBiMap, gen_get_children
 
@@ -30,6 +31,14 @@ class Type:
 
     def is_compatible(self, other: 'Type'):
         return self == other
+
+    @abstractmethod
+    def size(self, pointer_size: int) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def align(self, pointer_size: int) -> int:
+        raise NotImplementedError
 
 class Value:
     @abstractmethod
@@ -75,6 +84,14 @@ class FloatType(Type):
     def from_float(self, value: float) -> 'Value':
         return FloatValue(value, self)
 
+    @override
+    def size(self, pointer_size: int) -> int:
+        return (self.bits + 7) // 8
+
+    @override
+    def align(self, pointer_size: int) -> int:
+        return self.size(pointer_size)
+
 F32 = FloatType(32)
 F64 = FloatType(64)
 
@@ -103,6 +120,14 @@ class IntType(Type):
             raise ValueError(f'value {value} out of range for {self}')
         return IntValue(value, self)
 
+    @override
+    def size(self, pointer_size: int) -> int:
+        return (self.bits + 7) // 8
+
+    @override
+    def align(self, pointer_size: int) -> int:
+        return self.size(pointer_size)
+
 I8 = IntType(8)
 I32 = IntType(32)
 I64 = IntType(64)
@@ -127,6 +152,15 @@ class PointerType(Type):
     def is_compatible(self, other: Type):
         return isinstance(other, PointerType)
 
+    @override
+    def size(self, pointer_size: int) -> int:
+        return pointer_size
+
+    @override
+    def align(self, pointer_size: int) -> int:
+        return pointer_size
+
+
 @dataclass(frozen=True)
 @gen_get_children
 class FnType(Type):
@@ -150,6 +184,17 @@ class FnType(Type):
         if self.varargs:
             args.append('...')
         return f"{ret} ({' '.join(args)})"
+
+def fn_type(ret: Type | None, *args: Type | EllipsisType) -> FnType:
+    varargs = False
+    args2: list[Type] = []
+    for arg in args:
+        match arg:
+            case Type():
+                args2.append(arg)
+            case EllipsisType():
+                varargs = True
+    return FnType(args=tuple(args2), return_type=ret if ret is not None else VoidType(), varargs=varargs)
 
 @dataclass
 class VoidType(Type):
@@ -204,6 +249,15 @@ class ArrayType(AggregateType):
     @override
     def stringify(self, name_context: 'NameContext | None' = None) -> str:
         return f"[{self.length} x {self.child.stringify(name_context)}]"
+
+    @override
+    def size(self, pointer_size: int) -> int:
+        return self.length * self.child.size(pointer_size)
+
+    @override
+    def align(self, pointer_size: int) -> int:
+        return self.child.align(pointer_size)
+
 
 class LocalValue(Value):
     def __eq__(self, other) -> bool:
@@ -266,6 +320,7 @@ class FloatValue(Value):
     value: float
     type: FloatType
 
+    @override
     def __str__(self) -> str:
         return str(self.value)
 
@@ -273,34 +328,18 @@ class FloatValue(Value):
     def get_type(self) -> Type:
         return self.type
 
-# @dataclass
-# @gen_get_children
-# class AggregateValue(Value):
-#     type: Type
-#     values: tuple[Value, ...]
+@dataclass
+@gen_get_children
+class NullValue(Value):
+    type: PointerType
 
-#     @override
-#     def __init__(self, type: Type, *values: Value) -> None:
-#         match type:
-#             case StructType():
-#                 for field, value in zip(type.fields, values):
-#                     value_type = value.get_type()
-#                     assert field.is_compatible(value_type), f"incompatible types {field} and {value_type}"
-#             case ArrayType():
-#                 assert len(values) == type.length, f"wrong length {type.length} != {len(values)}"
-#                 for value in values:
-#                     value_type = value.get_type()
-#                     assert type.child.is_compatible(value_type), f"incompatible types {type.child} and {value_type}"
-#         self.type = type
-#         self.values = values
+    @override
+    def __str__(self) -> str:
+        return "null"
 
-#     @override
-#     def get_type(self) -> Type:
-#         return self.type
-
-#     @override
-#     def stringify_value(self, name_context: NameContext, local_counter: 'ObjectCounter[LocalValue] | None' = None) -> str:
-#         return f"{{{", ".join(v.stringify(name_context, local_counter) for v in self.values)}}}"
+    @override
+    def get_type(self) -> Type:
+        return self.type
 
 _CHAR_CODES = [
 
@@ -782,45 +821,48 @@ class BasicBlock(LocalValue):
         match lhs.get_type():
             case IntType():
                 if isinstance(rhs, IntValue) and rhs.value < 0:
-                    return self.emit(Sub(lhs, IntValue(-rhs.value, rhs.type)))
-                return self.emit(Add(lhs, rhs))
+                    return self.emit(Binary(Sub(), lhs, IntValue(-rhs.value, rhs.type)))
+                return self.emit(Binary(Add(), lhs, rhs))
             case FloatType():
-                return self.emit(FAdd(lhs, rhs))
+                return self.emit(Binary(FAdd(), lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
     def sub(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(Sub(lhs, rhs))
+                return self.emit(Binary(Sub(), lhs, rhs))
             case FloatType():
-                return self.emit(FSub(lhs, rhs))
+                return self.emit(Binary(FSub(), lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
     def mul(self, lhs: Value, rhs: Value) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(Mul(lhs, rhs))
+                return self.emit(Binary(Mul(), lhs, rhs))
             case FloatType():
-                return self.emit(FMul(lhs, rhs))
+                return self.emit(Binary(FMul(), lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
     def div(self, lhs: Value, rhs: Value, signed: bool) -> Value:
         match lhs.get_type():
             case IntType():
-                return self.emit(SDiv(lhs, rhs) if signed else UDiv(lhs, rhs))
+                return self.emit(Binary(SDiv() if signed else UDiv(), lhs, rhs))
             case FloatType():
-                return self.emit(FDiv(lhs, rhs))
+                return self.emit(Binary(FDiv(), lhs, rhs))
             case _:
                 raise TypeError(f'unsupported type: {lhs.get_type()}')
 
     def fdiv(self, lhs: Value, rhs: Value):
-        return self.emit(FDiv(lhs, rhs))
+        return self.emit(Binary(FDiv(), lhs, rhs))
+
+    def atomicrmw(self, op: 'BinaryOp', ptr: Value, rhs: Value, ordering: 'Ordering') -> Value:
+        return self.emit(AtomicRmw(op, ptr, rhs, ordering))
 
     def rem(self, lhs: Value, rhs: Value, signed: bool) -> Value:
-        return self.emit(SRem(lhs, rhs) if signed else URem(lhs, rhs))
+        return self.emit(Binary(SRem() if signed else URem(), lhs, rhs))
 
     def load(self, ptr: Value) -> Value:
         return self.emit(Load(ptr))
@@ -869,6 +911,9 @@ class BasicBlock(LocalValue):
 
     def get_element_ptr(self, array: Value, *indices: Value | int) -> Value:
         return self.emit(GetElementPtr(array, indices))
+
+    def ptrtoint(self, value: Value, type: IntType):
+        return self.emit(PtrToInt(value, type))
 
     def icmp(self, op: 'IcmpOp', signed: bool, lhs: Value, rhs: Value):
         return self.emit(Icmp(op, signed, lhs, rhs))
@@ -954,13 +999,27 @@ class FNeg(Unary):
                 return FloatValue(-value, t)
         return None
 
+class BinaryOp:
+    @abstractmethod
+    def get_type(self) -> Type:
+        raise NotImplementedError
+
+    @abstractmethod
+    def head_name(self) -> str:
+        raise NotImplementedError
+
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        return None
+
 @gen_get_children
 class Binary(Inst):
+    op: BinaryOp
     lhs: Value
     rhs: Value
     type: Type
 
-    def __init__(self, lhs: Value, rhs: Value) -> None:
+    def __init__(self, op: BinaryOp, lhs: Value, rhs: Value) -> None:
+        self.op = op
         self.lhs = lhs
         self.rhs = rhs
         lhs_type = lhs.get_type()
@@ -968,78 +1027,78 @@ class Binary(Inst):
         assert lhs_type == rhs_type, f"incompatible types {lhs_type} and {rhs_type}"
         self.type = lhs_type
 
-    @abstractmethod
+    @override
     def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
-        return f'{self.head_name()} {self.type} {self.lhs.stringify_value(name_context, local_counter)}, {self.rhs.stringify_value(name_context, local_counter)}'
+        return f'{self.op.head_name()} {self.type} {self.lhs.stringify_value(name_context, local_counter)}, {self.rhs.stringify_value(name_context, local_counter)}'
 
     @override
     def get_type(self) -> Type:
         return self.lhs.get_type()
 
-    @abstractmethod
-    def head_name(self) -> str:
-        pass
+    @override
+    def try_evaluate(self) -> Value | None:
+        return self.op.try_evaluate(self.lhs, self.rhs)
 
-class Add(Binary):
+class Add(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'add'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a + b, t)
         return None
 
-class FAdd(Binary):
+class FAdd(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'fadd'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case FloatValue(a, t), FloatValue(b, _):
                 return FloatValue(a + b, t)
             case FloatValue(0, t), _:
-                return self.rhs
+                return rhs
             case _, FloatValue(0, t):
-                return self.lhs
+                return lhs
         return None
 
-class Sub(Binary):
+class Sub(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'sub'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a - b, t)
         return None
 
-class Mul(Binary):
+class Mul(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'mul'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a * b, t)
         return None
 
-class FMul(Binary):
+class FMul(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'fmul'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case FloatValue(a, t), FloatValue(b, _):
                 return FloatValue(a * b, t)
             case FloatValue(0, t), _:
@@ -1048,91 +1107,124 @@ class FMul(Binary):
                 return FloatValue(0, t)
         return None
 
-class FSub(Binary):
+class FSub(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'fsub'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case FloatValue(a, t), FloatValue(b, _):
                 return FloatValue(a - b, t)
             case _, FloatValue(0, _):
-                return self.lhs
+                return lhs
         return None
 
-class SRem(Binary):
+class SRem(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'srem'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a % b, t)
         return None
 
-class URem(Binary):
+class URem(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'urem'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a % b, t)
         return None
 
-class FRem(Binary):
+class FRem(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'frem'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case FloatValue(a, t), FloatValue(b, _):
                 return FloatValue(math.fmod(a, b), t)
         return None
 
-class SDiv(Binary):
+class SDiv(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'sdiv'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a // b, t)
         return None
 
-class UDiv(Binary):
+class UDiv(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'udiv'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a // b, t)
         return None
 
-class FDiv(Binary):
+class FDiv(BinaryOp):
     @override
     def head_name(self) -> str:
         return 'fdiv'
 
     @override
-    def try_evaluate(self) -> Value | None:
-        match self.lhs, self.rhs:
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
             case FloatValue(a, t), FloatValue(b, _):
                 return FloatValue(a / b, t)
         return None
+
+class Ordering(Enum):
+    ACQUIRE = 'acquire'
+    RELEASE = 'release'
+    ACQ_REL = 'acq_rel'
+    SEQ_CST = 'seq_cst'
+    RELAXED = 'relaxed'
+    MONOTONIC = 'monotonic'
+
+class AtomicRmw(Inst):
+    op: BinaryOp
+    ptr: Value
+    value: Value
+    ordering: Ordering
+
+    def __init__(self, op: BinaryOp, ptr: Value, value: Value, ordering: Ordering = Ordering.SEQ_CST):
+        self.op = op
+        self.ptr = ptr
+        self.value = value
+        self.ordering = ordering
+
+        ptr_type = ptr.get_type()
+        value_type = value.get_type()
+        assert isinstance(ptr_type, PointerType), f"pointer type expected, got {ptr_type}"
+        assert ptr_type.child.is_compatible(value_type), f"incompatible types: {ptr_type.child} and {value_type}"
+
+    @override
+    def get_type(self) -> Type:
+        return self.value.get_type()
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        return f'atomic_rmw {self.op.head_name()} {self.ptr.stringify(name_context, local_counter)}, {self.value.stringify(name_context, local_counter)} {self.ordering.value}'
 
 @gen_get_children
 class Load(Inst):
@@ -1545,6 +1637,27 @@ class Icmp(Inst):
     @override
     def get_type(self) -> Type:
         return BOOL_TYPE
+
+@gen_get_children
+class PtrToInt(Inst):
+    value: Value
+    type: IntType
+
+    def __init__(self, value: Value, type: IntType) -> None:
+        value_type = value.get_type()
+        assert isinstance(value_type, PointerType), f"expected pointer type, got {value_type}"
+        self.value = value
+        self.type = type
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        value = self.value.stringify_value(name_context, local_counter)
+        type = self.type.stringify(name_context)
+        return f"ptrtoint {type} to {value}"
+
+    @override
+    def get_type(self) -> Type:
+        return self.type
 
 SQRT_F32 = DeclareFunction('llvm.sqrt.f32', FnType((F32,), F32))
 SQRT_F64 = DeclareFunction('llvm.sqrt.f64', FnType((F64,), F64))

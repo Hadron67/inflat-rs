@@ -1,11 +1,11 @@
 from abc import abstractmethod
 import ctypes
 from dataclasses import dataclass
-from typing import Any, Callable, override
+from typing import Any, override
 
 from . import llvm
 
-from ..expr import AssignExpr, Expr, Plus, Power, Roll, Slice, Symbol, SymbolShape, Times, UnaryNumericFunction
+from ..expr import AssignExpr, Cos, Expr, Int, Ln, Plus, Power, Roll, Sin, Slice, Symbol, SymbolShape, Times, UnaryNumericFunction
 
 class LowerType:
     @staticmethod
@@ -158,30 +158,10 @@ class PointerType(LowerType):
     def to_llvm_type(self) -> llvm.Type:
         return llvm.PointerType(self.type.to_llvm_type())
 
-# def merge_shape(shape1: tuple[Expr, ...], shape2: tuple[Expr, ...]) -> tuple[Expr, ...]:
-#     if len(shape1) == len(shape2):
-#         assert shape1 == shape2, f"shape mismatch {shape1} != {shape2}"
-#         return shape1
-#     ret: list[Expr] = []
-#     for i in range(max(len(shape1), len(shape2))):
-#         if i < len(shape1) and i < len(shape2):
-#             s1 = shape1[-1 - i]
-#             s2 = shape2[-1 - i]
-#             assert s1 == s2, f"incompatible shapes {shape1} != {shape2}"
-#             ret.append(s1)
-#         elif i < len(shape1):
-#             ret.append(shape1[-1 - i])
-#         elif i < len(shape2):
-#             ret.append(shape2[-1 - i])
-#     ret.reverse()
-#     return tuple(ret)
-
-# def merge_shapes(*shapes: tuple[Expr, ...]) -> tuple[Expr, ...]:
-#     assert len(shapes) > 0
-#     ret = shapes[0]
-#     for shape in shapes[1:]:
-#         ret = merge_shape(ret, shape)
-#     return ret
+@dataclass
+class TypesConfig:
+    real_type: FloatType
+    index_type: IntType
 
 def _get_complex_peer_type(type: ComplexFloatType, other: LowerType) -> ComplexFloatType:
     match other:
@@ -258,16 +238,18 @@ class TypeContext:
     def get_dimension(self, expr: Symbol):
         return self._symbol_dimension[expr]
 
-class TypeCache:
+class TypeResolver:
+    type_config: TypesConfig
     resolved_shapes: dict[SymbolShape, Expr]
     _ctx: TypeContext
     _shape_cache: dict[Expr, tuple[Expr, ...]]
 
-    def __init__(self, ctx: TypeContext) -> None:
+    def __init__(self, ctx: TypeContext, type_config: TypesConfig) -> None:
         self._ctx = ctx
         self._type_cache = {}
         self._shape_cache = {}
         self.resolved_shapes = {}
+        self.type_config = type_config
 
     def get_symbol_type(self, expr: Symbol):
         return self._ctx.get_type(expr)
@@ -343,11 +325,58 @@ class TypeCache:
             case _:
                 raise TypeError(f"cannot get shape from {expr}")
 
+    def get_type(self, expr: Expr) -> LowerType:
+        if expr in self._type_cache:
+            return self._type_cache[expr]
+        ret = self._get_type_no_cache(expr)
+        self._type_cache[expr] = ret
+        return ret
+
+    def _promote_type(self, type: LowerType) -> LowerType:
+        match type:
+            case IntType():
+                return self.type_config.index_type
+            case FloatType():
+                return self.type_config.real_type
+            case ComplexFloatType(type):
+                t = self._promote_type(type)
+                assert isinstance(t, FloatType)
+                return ComplexFloatType(t)
+            case _:
+                raise ValueError(f"unsupported type: {type}")
+
+    def _int_to_float_type(self, type: LowerType) -> LowerType:
+        match type:
+            case IntType():
+                return self.type_config.real_type
+            case _:
+                return type
+
+    def _get_type_no_cache(self, expr: Expr) -> LowerType:
+        match expr:
+            case Symbol():
+                return self._promote_type(self._ctx.get_type(expr))
+            case SymbolShape():
+                return self.type_config.index_type
+            case Plus(children) | Times(children):
+                return get_peer_types(*tuple(self.get_type(a) for a in children))
+            case Power(base, exp):
+                if isinstance(exp, Int) and exp.value >= 0:
+                    return self.get_type(base)
+                else:
+                    return self._int_to_float_type(self.get_type(base))
+            case Roll() | Slice():
+                return self.get_type(expr.expr)
+            case Sin() | Cos() | Ln():
+                return self._int_to_float_type(self.get_type(expr.expr))
+            case _:
+                raise ValueError(f"cannot get type of {expr}")
+
 class TypedAssignExpr:
     expr: AssignExpr
     shape: tuple[Expr, ...]
 
-    def __init__(self, expr: AssignExpr, ctx: TypeCache) -> None:
+    def __init__(self, expr: AssignExpr, ctx: TypeResolver) -> None:
         self.expr = expr
 
         lhs_shape = ctx.get_shape(expr.lhs)
@@ -358,16 +387,7 @@ class TypedAssignExpr:
     def total_size(self):
         return Times.make(self.shape).evaluate()
 
-@dataclass
-class TypesConfig:
-    real_type: FloatType
-    index_type: IntType
-
 class SymbolArgInfo:
-    @abstractmethod
-    def map_arg(self, op: Callable[[int], int]) -> 'SymbolArgInfo':
-        raise NotImplementedError
-
     @abstractmethod
     def write_one_arg(self, arg_value: Any, args: list[ctypes._CDataType | None], config: TypesConfig):
         raise NotImplementedError
@@ -381,10 +401,6 @@ class ScalarArgInfo(SymbolArgInfo):
     def __str__(self) -> str:
         return f"%{self.value}: {'&' if self.is_ref else ''}Scalar"
 
-    @override
-    def map_arg(self, op: Callable[[int], int]) -> SymbolArgInfo:
-        return ScalarArgInfo(op(self.value), self.is_ref)
-
 @dataclass
 class ArrayArgInfo(SymbolArgInfo):
     ptr: int
@@ -394,7 +410,3 @@ class ArrayArgInfo(SymbolArgInfo):
     @override
     def __str__(self) -> str:
         return f"%{self.ptr}: Array(strides=({", ".join(str(i) for i in self.strides)}))"
-
-    @override
-    def map_arg(self, op: Callable[[int], int]) -> 'SymbolArgInfo':
-        return ArrayArgInfo(op(self.ptr), tuple(op(i) for i in self.strides))

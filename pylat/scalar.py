@@ -2,9 +2,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-import jax
 
-from .expr import Expr, Symbol
+from .expr import Expr
 
 @dataclass
 class ScalarField:

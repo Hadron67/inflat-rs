@@ -7,10 +7,10 @@ from llvmlite import binding as llvm
 from .helper import echo, _GLOBAL_HELPERS
 
 from .util import ForLoopBuilder
-from .llvm import I32, I8, ArrayType, BasicBlock, DeclareFunction, FnType, Function, GlobalAggregateValue, GlobalStringValue, GlobalValueFlags, GlobalZeroAggregateValue, IcmpOp, IntType, IntValue, Module, PointerType, StructType, Value, VoidType, VoidValue
-from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel
+from .llvm import I32, I64, I8, ArrayType, BasicBlock, DeclareFunction, FnType, Function, GlobalAggregateValue, GlobalStringValue, GlobalValueFlags, GlobalZeroAggregateValue, IcmpOp, IntType, IntValue, Module, NullValue, Ordering, PointerType, StructType, Value, VoidType, VoidValue, fn_type
+from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel, ReductionKernel
 
-_LLVM_IDEN_T = StructType(
+_IDEN_T = StructType(
     I32,
     I32,
     I32,
@@ -18,9 +18,11 @@ _LLVM_IDEN_T = StructType(
     PointerType(I8),
 )
 
+_KMPC_CRITICAL_NAME = ArrayType(I32, 8)
+
 def _for_static_init(type: IntType):
     fn_type = FnType((
-        PointerType(_LLVM_IDEN_T), # loc
+        PointerType(_IDEN_T), # loc
         I32, # gitd
         I32, # schedtype
         PointerType(I32), # plastiter
@@ -32,21 +34,19 @@ def _for_static_init(type: IntType):
     ), VoidType())
     return DeclareFunction(f'__kmpc_for_static_init_{type.bits // 8}', fn_type)
 
-_KMPC_FORK_CALL_CALLBACK_TYPE = FnType((
-    PointerType(I32),
-    PointerType(I32),
-), VoidType(), True)
-_KMPC_FORK_CALL_TYPE = FnType((
-    PointerType(_LLVM_IDEN_T),
-    I32,
-    PointerType(_KMPC_FORK_CALL_CALLBACK_TYPE),
-), VoidType(), True)
+_KMPC_FORK_CALL_CALLBACK_TYPE = fn_type(None, PointerType(I32), PointerType(I32), ...)
+_KMPC_FORK_CALL_TYPE = fn_type(None, PointerType(_IDEN_T), I32, PointerType(_KMPC_FORK_CALL_CALLBACK_TYPE), ...)
 
+_SIZE_T = I64
+
+_REDUCE_FN = fn_type(None, PointerType(I8), PointerType(I8))
 _KMPC_FORK_CALL = DeclareFunction('__kmpc_fork_call', _KMPC_FORK_CALL_TYPE)
-_KMPC_FOR_STATIC_FINI = DeclareFunction('__kmpc_for_static_fini', FnType((PointerType(_LLVM_IDEN_T), I32), VoidType()))
-_KMPC_CRITIAL = DeclareFunction('__kmpc_critical', FnType((PointerType(_LLVM_IDEN_T), I32, PointerType(ArrayType(I32, 8))), VoidType()))
-_KMPC_END_CRITICAL = DeclareFunction('__kmpc_end_critical', FnType((PointerType(_LLVM_IDEN_T), I32, PointerType(ArrayType(I32, 8))), VoidType()))
-_KMPC_BARRIER = DeclareFunction('__kmpc_barrier', FnType((PointerType(_LLVM_IDEN_T), I32), VoidType()))
+_KMPC_FOR_STATIC_FINI = DeclareFunction('__kmpc_for_static_fini', fn_type(None, PointerType(_IDEN_T), I32))
+_KMPC_CRITIAL = DeclareFunction('__kmpc_critical', fn_type(None, PointerType(_IDEN_T), I32, PointerType(_KMPC_CRITICAL_NAME)))
+_KMPC_END_CRITICAL = DeclareFunction('__kmpc_end_critical', fn_type(None, PointerType(_IDEN_T), I32, PointerType(_KMPC_CRITICAL_NAME)))
+_KMPC_BARRIER = DeclareFunction('__kmpc_barrier', fn_type(None, PointerType(_IDEN_T), I32))
+_KMPC_REDUCE_NOWAIT = DeclareFunction('__kmpc_reduce_nowait', fn_type(I32, PointerType(_IDEN_T), I32, I32, _SIZE_T, PointerType(I8), PointerType(_REDUCE_FN), PointerType(_KMPC_CRITICAL_NAME)))
+_KMPC_END_REDUCE_NOWAIT = DeclareFunction('__kmpc_end_reduce_nowait', fn_type(None, PointerType(_IDEN_T), I32, PointerType(_KMPC_CRITICAL_NAME)))
 
 class _DebugInterface(DebugInterface):
     gtid: Value
@@ -64,11 +64,11 @@ class OpenMPBackend(Backend):
         pass
 
     @override
-    def compile_paralell_loop(self, kernel: LoopKernel) -> CompiledBackendFunction:
+    def compile_paralell_loop(self, kernel: LoopKernel, reduction: ReductionKernel | None = None) -> CompiledBackendFunction:
         index_type = kernel.get_index_type()
         arg_lower_types = kernel.get_args()
         arg_llvm_types = tuple(a.to_llvm_type() for a in arg_lower_types)
-        ident = GlobalAggregateValue(_LLVM_IDEN_T,
+        ident = GlobalAggregateValue(_IDEN_T,
             IntValue(0, I32),
             IntValue(0, I32),
             IntValue(0, I32),
@@ -76,6 +76,8 @@ class OpenMPBackend(Backend):
             GlobalStringValue(b';unknown;unknown;0;0;;\00'),
         )
         closure_type = StructType(*arg_llvm_types, index_type)
+        if reduction is not None:
+            closure_type.add_field(PointerType(PointerType(reduction.get_type())))
 
         outer_fn = Function('main')
         outer_fn.add_args(*arg_llvm_types)
@@ -92,10 +94,24 @@ class OpenMPBackend(Backend):
         def compile_outer():
             b = outer_fn.entry
             closure_ptr = b.alloca(closure_type)
+
+            reduction_ptr = None
+            if reduction is not None:
+                reduction_ptr = b.alloca(PointerType(reduction.get_type()))
+                reduction.store_initial_value(b, reduction_ptr)
+
             args = outer_fn.get_args()
             b, total_size = kernel.compile_total_size(b, args)
-            for i, value in enumerate(args + (total_size,)):
-                b.store(b.get_element_ptr(closure_ptr, 0, i), value)
+            cursor = 0
+            for value in args:
+                b.store(b.get_element_ptr(closure_ptr, 0, cursor), value)
+                cursor += 1
+            b.store(b.get_element_ptr(closure_ptr, 0, cursor), total_size)
+            cursor += 1
+            if reduction_ptr is not None:
+                b.store(b.get_element_ptr(closure_ptr, 0, cursor), reduction_ptr)
+                cursor += 1
+
             b.call(_KMPC_FORK_CALL, ident, IntValue(1, I32), inner_fn, closure_ptr)
             b.ret(VoidValue())
 
@@ -108,11 +124,26 @@ class OpenMPBackend(Backend):
             lb = b.alloca(index_type)
             ub = b.alloca(index_type)
             step = b.alloca(index_type)
+            local_sum_ptr = None
+            reduce_data = None
+            if reduction is not None:
+                local_sum_ptr = b.alloca(reduction.get_type())
+                reduce_data = b.alloca(PointerType(reduction.get_type()))
 
             args: list[Value] = []
-            for i in range(len(arg_lower_types)):
-                args.append(b.load(b.get_element_ptr(closure_ptr, 0, i)))
-            inner_total_size = b.load(b.get_element_ptr(closure_ptr, 0, len(arg_lower_types)))
+            cursor = 0
+            for _ in range(len(arg_lower_types)):
+                args.append(b.load(b.get_element_ptr(closure_ptr, 0, cursor)))
+                cursor += 1
+            inner_total_size = b.load(b.get_element_ptr(closure_ptr, 0, cursor))
+            cursor += 1
+
+            sum_ptr = None
+            if reduction is not None:
+                assert local_sum_ptr is not None
+                sum_ptr = b.load(b.get_element_ptr(closure_ptr, 0, cursor))
+                reduction.store_initial_value(b, local_sum_ptr)
+                cursor += 1
 
             b.store(chunk, 0)
             b.store(lb, 0)
@@ -141,9 +172,13 @@ class OpenMPBackend(Backend):
             b.br(b.icmp(IcmpOp.GT, True, b.load(ub), max_ub), clamper, new_b)
             b = new_b
 
+            # main loop
             loop_builder = ForLoopBuilder(b, True, b.load(lb), b.load(ub), IntValue(1, index_type))
             b = loop_builder.body_entry
-            b = kernel.compile_body(b, tuple(args), loop_builder.loop_var, _DebugInterface(gtid))
+            b, value = kernel.compile_body(b, tuple(args), loop_builder.loop_var, _DebugInterface(gtid))
+            if reduction is not None:
+                assert local_sum_ptr is not None
+                b = reduction.reduce(b, local_sum_ptr, value)
             b = loop_builder.end(b)
 
             b.call(
@@ -151,6 +186,47 @@ class OpenMPBackend(Backend):
                 ident,
                 b.load(inner_fn.get_arg(0)),
             )
+
+            if reduction is not None:
+                assert reduce_data is not None and local_sum_ptr is not None and sum_ptr is not None
+                reduce_type = reduction.get_type()
+                sizeof_type = b.ptrtoint(b.get_element_ptr(NullValue(PointerType(reduce_type)), 1), _SIZE_T)
+
+                reduce_fn = Function()
+                reduce_fn.add_args(PointerType(reduce_type), PointerType(reduce_type))
+                reduce_fn.set_return_type(VoidType())
+                reduction.reduce(reduce_fn.entry, reduce_fn.get_arg(0), reduce_fn.entry.load(reduce_fn.get_arg(1)))
+
+                lock = GlobalZeroAggregateValue(_KMPC_CRITICAL_NAME)
+
+                b.store(reduce_data, local_sum_ptr)
+
+                reduce_op = b.call(
+                    _KMPC_REDUCE_NOWAIT,
+                    ident,
+                    gtid,
+                    sizeof_type,
+                    reduce_data,
+                    reduce_fn,
+                    lock,
+                )
+                op1_block = BasicBlock()
+                op1_block = reduction.reduce(op1_block, sum_ptr, op1_block.load(local_sum_ptr))
+                op1_block.call(
+                    _KMPC_END_REDUCE_NOWAIT,
+                    ident,
+                    gtid,
+                    lock,
+                )
+                op2_block = BasicBlock()
+                op2_block = reduction.reduce(op2_block, sum_ptr, op2_block.load(local_sum_ptr), ordering=Ordering.MONOTONIC)
+
+                b.br(b.icmp(IcmpOp.EQ, False, reduce_op, reduce_op.get_type().from_int(1)), op1_block, op2_block)
+                new_block = BasicBlock()
+                op1_block.jmp(new_block)
+                op2_block.jmp(new_block)
+                b = new_block
+
             b.ret(VoidValue())
 
         compile_outer()
@@ -222,8 +298,8 @@ class _Compiled(CompiledBackendFunction):
         return self._mod.write()
 
 def _echo_sync(b: BasicBlock, gtid: Value, *values: Value | str):
-    gomp_critical = GlobalZeroAggregateValue(ArrayType(I32, 8), flags=GlobalValueFlags.COMMON | GlobalValueFlags.GLOBAL)
-    ident = GlobalAggregateValue(_LLVM_IDEN_T,
+    gomp_critical = GlobalZeroAggregateValue(_KMPC_CRITICAL_NAME, flags=GlobalValueFlags.COMMON | GlobalValueFlags.GLOBAL)
+    ident = GlobalAggregateValue(_IDEN_T,
         IntValue(0, I32),
         IntValue(0, I32),
         IntValue(0, I32),
@@ -236,7 +312,7 @@ def _echo_sync(b: BasicBlock, gtid: Value, *values: Value | str):
     _barrier(b, gtid)
 
 def _barrier(b: BasicBlock, gtid: Value):
-    ident = GlobalAggregateValue(_LLVM_IDEN_T,
+    ident = GlobalAggregateValue(_IDEN_T,
         IntValue(0, I32),
         IntValue(0, I32),
         IntValue(0, I32),

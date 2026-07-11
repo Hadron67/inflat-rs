@@ -3,7 +3,7 @@ from unittest import TestCase
 from numpy.testing import assert_almost_equal
 
 from pylat.jit.openmp import OpenMPBackend
-from pylat.jit.argpass import ComplexFloatType, IntType, TypeContext, FloatType
+from pylat.jit.argpass import ComplexFloatType, TypeContext, FloatType
 
 from .jit.compile import JitCompiler
 from .expr import AssignExpr, Int, Plus, Rational, Times, S, symbols
@@ -15,7 +15,7 @@ llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 
 class TestExpr(TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
+    def __init__(self, methodName: str = "test_evaluation") -> None:
         super().__init__(methodName)
 
     def test_evaluation(self):
@@ -26,12 +26,11 @@ class TestExpr(TestCase):
         )
 
 class JitTest(TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
+    def __init__(self, methodName: str = "test_jit") -> None:
         super().__init__(methodName)
 
     def test_jit(self):
-        nx, ny, nz, dt = symbols('nx', 'ny', 'nz', 'dt')
-        phi, mom_phi = symbols('phi', 'mom_phi')
+        phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
         context = TypeContext()
         context.set_symbol(dt, FloatType(64), 0)
         context.set_symbol(phi, ComplexFloatType(FloatType(64)), 3)
