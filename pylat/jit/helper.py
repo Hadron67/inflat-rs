@@ -130,7 +130,8 @@ class CompileHelper:
                         return block.sext(value, target_type.to_llvm_type())
                     else:
                         return block.zext(value, target_type.to_llvm_type())
-                if target_type == value_type:
+                if target_type.bits == value_type.bits:
+                    # same bit width: signedness is just an interpretation
                     return value
                 raise TypeError(f"cannot coerce {value_type} to integer")
             case _:

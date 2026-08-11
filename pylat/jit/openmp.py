@@ -105,7 +105,7 @@ class OpenMPBackend(Backend):
             reduction_ptr = None
             if reduction is not None:
                 assert reduction_llvm_type is not None
-                reduction_ptr = b.alloca(PointerType(reduction_llvm_type))
+                reduction_ptr = b.alloca(reduction_llvm_type)
                 reduction.store_initial_value(b, reduction_ptr)
 
             args = outer_fn.get_args()
@@ -137,11 +137,9 @@ class OpenMPBackend(Backend):
             ub = b.alloca(index_type)
             step = b.alloca(index_type)
             local_sum_ptr = None
-            reduce_data = None
             if reduction is not None:
                 assert reduction_llvm_type is not None
                 local_sum_ptr = b.alloca(reduction_llvm_type)
-                reduce_data = b.alloca(PointerType(reduction_llvm_type))
 
             args: list[Value] = []
             cursor = 0
@@ -201,24 +199,24 @@ class OpenMPBackend(Backend):
             )
 
             if reduction is not None:
-                assert reduce_data is not None and local_sum_ptr is not None and sum_ptr is not None and reduction_llvm_type is not None
+                assert local_sum_ptr is not None and sum_ptr is not None and reduction_llvm_type is not None
                 sizeof_type = b.ptrtoint(b.get_element_ptr(NullValue(PointerType(reduction_llvm_type)), 1), _SIZE_T)
 
                 reduce_fn = Function()
                 reduce_fn.add_args(PointerType(reduction_llvm_type), PointerType(reduction_llvm_type))
                 reduce_fn.set_return_type(VoidType())
                 reduction.reduce(reduce_fn.entry, reduce_fn.get_arg(0), reduce_fn.entry.load(reduce_fn.get_arg(1)))
+                reduce_fn.entry.ret(VoidValue())
 
                 lock = GlobalZeroAggregateValue(_KMPC_CRITICAL_NAME)
-
-                b.store(reduce_data, local_sum_ptr)
 
                 reduce_op = b.call(
                     _KMPC_REDUCE_NOWAIT,
                     ident,
                     gtid,
+                    IntValue(1, I32),
                     sizeof_type,
-                    reduce_data,
+                    sum_ptr,
                     reduce_fn,
                     lock,
                 )
@@ -301,7 +299,7 @@ class _Compiled(CompiledBackendFunction):
         engine.add_module(llvm_mod)
 
         libc = ctypes.CDLL(None)
-        for name in [_KMPC_FORK_CALL.name, _KMPC_FOR_STATIC_FINI.name, _KMPC_CRITIAL.name, _KMPC_END_CRITICAL.name, '__kmpc_for_static_init_8']:
+        for name in [_KMPC_FORK_CALL.name, _KMPC_FOR_STATIC_FINI.name, _KMPC_CRITIAL.name, _KMPC_END_CRITICAL.name, _KMPC_REDUCE_NOWAIT.name, _KMPC_END_REDUCE_NOWAIT.name, _KMPC_BARRIER.name, '__kmpc_for_static_init_8']:
             value = None
             try:
                 value = llvm_mod.get_function(name)

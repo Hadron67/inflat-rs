@@ -1224,7 +1224,7 @@ class AtomicRmw(Inst):
 
     @override
     def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
-        return f'atomic_rmw {self.op.head_name()} {self.ptr.stringify(name_context, local_counter)}, {self.value.stringify(name_context, local_counter)} {self.ordering.value}'
+        return f'atomicrmw {self.op.head_name()} {self.ptr.stringify(name_context, local_counter)}, {self.value.stringify(name_context, local_counter)} {self.ordering.value}'
 
 @gen_get_children
 class Load(Inst):
@@ -1651,9 +1651,9 @@ class PtrToInt(Inst):
 
     @override
     def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
-        value = self.value.stringify_value(name_context, local_counter)
+        value = self.value.stringify(name_context, local_counter)
         type = self.type.stringify(name_context)
-        return f"ptrtoint {type} to {value}"
+        return f"ptrtoint {value} to {type}"
 
     @override
     def get_type(self) -> Type:

@@ -1,21 +1,82 @@
+import ctypes
 from enum import Enum
 from typing import Any, override
 
-import ctypes
-
+from ..expr import (
+    AssignExpr,
+    Cos,
+    Exp,
+    Expr,
+    Float,
+    Int,
+    Ln,
+    Plus,
+    Power,
+    Rational,
+    Roll,
+    Sin,
+    Slice,
+    Symbol,
+    SymbolShape,
+    Times,
+)
 from . import argpass as ap
-
+from .argpass import (
+    ArrayArgInfo,
+    ComplexFloatType,
+    LowerType,
+    ScalarArgInfo,
+    SymbolArgInfo,
+    TypeContext,
+    TypedAssignExpr,
+    TypeResolver,
+    TypesConfig,
+)
+from .backend import (
+    Backend,
+    CompiledBackendFunction,
+    DebugInterface,
+    LoopKernel,
+    ReductionKernel,
+)
 from .helper import CompileHelper, ComplexValue, MaybeComplexValue
-from ..expr import AssignExpr, Cos, Exp, Expr, Float, Int, Ln, Plus, Power, Rational, Roll, Sin, Slice, Symbol, SymbolShape, Times
-from .argpass import ArrayArgInfo, ComplexFloatType, ScalarArgInfo, SymbolArgInfo, TypesConfig, LowerType, TypeResolver, TypeContext, TypedAssignExpr
-from .backend import Backend, CompiledBackendFunction, DebugInterface, LoopKernel, ReductionKernel
-from .llvm import Add, BasicBlock, FloatValue, IntType, IntValue, Ordering, Value, VoidValue
+from .llvm import (
+    Add,
+    BasicBlock,
+    FAdd,
+    FloatType,
+    FloatValue,
+    IntType,
+    IntValue,
+    Ordering,
+    Value,
+    VoidValue,
+)
 
-def _check_and_get_total_size(exprs: list[TypedAssignExpr]):
-    first_size = exprs[0].total_size()
-    for expr in exprs[1:]:
+
+def _check_and_get_total_size(exprs: list[TypedAssignExpr], reduction: 'TypedReductionExpr | None' = None, resolver: 'TypeResolver | None' = None):
+    assert len(exprs) > 0 or reduction is not None, "no expressions to compile"
+    if len(exprs) > 0:
+        first_size = exprs[0].total_size()
+        rest = exprs[1:]
+    else:
+        assert reduction is not None
+        first_size = reduction.total_size()
+        rest = []
+
+    def resolve_size(expr: Expr) -> Expr:
+        if resolver is None:
+            return expr
+        resolved_shapes = resolver.resolved_shapes
+        return expr.map(lambda e: resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
+
+    first_resolved = resolve_size(first_size)
+    for expr in rest:
         expr_size = expr.total_size()
-        assert first_size == expr_size, f"incompatible expressions {exprs[0]} and {expr}, with incompatible total sizes {first_size} and {expr_size}"
+        assert first_resolved == resolve_size(expr_size), f"incompatible expressions {exprs[0]} and {expr}, with incompatible total sizes {first_size} and {expr_size}"
+    if reduction is not None:
+        reduction_size = reduction.total_size()
+        assert first_resolved == resolve_size(reduction_size), f"incompatible reduction expression {reduction.expr}, with total size {reduction_size}, expected {first_size}"
 
     assert first_size is not None, "cannot compile expression with unspecified shapes"
 
@@ -230,9 +291,12 @@ class _FunctionCompiler:
                 b.store(ptr, value)
 
     def _compile_unpack_subscripts(self, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
+        """
+            sizes are innermost-first, i.e. in the order produced by merge_shape
+        """
         assert len(sizes) > 0
         ret: list[Value] = []
-        for size in sizes[-1:0:-1]:
+        for size in sizes[:-1]:
             ret.append(self._block.rem(packed, size, False))
             packed = self._block.div(packed, size, False)
         ret.append(packed)
@@ -462,7 +526,7 @@ class CompiledWrapper:
         self._symbols = symbols
         self._inner = inner
 
-    def call(self, arg: dict[Symbol, Any]) -> None:
+    def call(self, arg: dict[Symbol, Any]) -> Any:
         index_type = self._parent.index_type.to_ctype()
         seen_symbols: set[Symbol] = set()
         converted_args: list[ctypes._CDataType | None] = [None for _ in range(self._symbols.get_arg_count())]
@@ -495,7 +559,7 @@ class CompiledWrapper:
                 raise ValueError(f"Symbol {symbol} not found in arg")
         for a in converted_args:
             assert a is not None
-        self._inner.call(*converted_args) # type: ignore
+        return self._inner.call(*converted_args) # type: ignore
 
     @override
     def __str__(self) -> str:
@@ -504,22 +568,55 @@ class CompiledWrapper:
     def print_all(self):
         return self._inner.print_all()
 
+class TypedReductionExpr:
+    expr: Expr
+    shape: tuple[Expr, ...]
+
+    def __init__(self, expr: Expr, ctx: TypeResolver) -> None:
+        self.expr = expr
+        shape = ctx.get_shape(expr)
+        # get_shape returns shape elements in an order that depends on how many
+        # shape merges the expression underwent; normalize to the innermost-first
+        # convention used by _compile_unpack_subscripts
+        indices = [e.index for e in shape if isinstance(e, SymbolShape)]
+        if len(indices) > 0 and indices == sorted(indices):
+            shape = tuple(reversed(shape))
+        self.shape = shape
+
+    def total_size(self):
+        return Times.make(self.shape).evaluate()
+
 class _AssignmentsKernel(LoopKernel):
     _parent: 'JitCompiler'
     _exprs: list[TypedAssignExpr]
     symbol_scope: _SymbolScope
     _total_size: Expr
     _helper: CompileHelper
+    _reduction: TypedReductionExpr | None
+    reduction_type: LowerType | None
 
     @override
-    def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext) -> None:
+    def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None) -> None:
         type_cache = TypeResolver(type_context, parent)
         self._parent = parent
         self._exprs = list(TypedAssignExpr(a, type_cache) for a in exprs)
-        self._total_size = _check_and_get_total_size(self._exprs)
+        self._reduction = None
+        self.reduction_type = None
+        if reduction is not None:
+            self._reduction = TypedReductionExpr(reduction, type_cache)
+            reduction_type = type_cache.get_type(reduction)
+            if isinstance(reduction_type, ap.IntType):
+                # integer sums follow the C convention of being signed
+                reduction_type = ap.IntType(reduction_type.bits, True)
+            self.reduction_type = reduction_type
+        self._total_size = _check_and_get_total_size(self._exprs, self._reduction, type_cache)
         self._helper = CompileHelper(parent)
         self.symbol_scope = _SymbolScope(type_cache)
         self.symbol_scope.scan_assignments(self._exprs)
+        if self._reduction is not None:
+            self.symbol_scope.scan_symbols(self._reduction.expr)
+            for e in self._reduction.shape:
+                self.symbol_scope.scan_symbols(e)
 
     @override
     def get_index_type(self) -> IntType:
@@ -538,10 +635,19 @@ class _AssignmentsKernel(LoopKernel):
         return begin, value
 
     @override
-    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> tuple[BasicBlock, Value]:
+    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> tuple[BasicBlock, MaybeComplexValue]:
         cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope, debug=debug)
         cp.compile_assignments(self._exprs, loop_var)
-        return begin, VoidValue()
+        value: MaybeComplexValue = VoidValue()
+        if self._reduction is not None:
+            shape: list[Value] = []
+            for i in self._reduction.shape:
+                size_type = cp._type_cache.get_type(i)
+                assert isinstance(size_type, ap.IntType), f"integer type expected for shape, got {size_type}"
+                shape.append(cp.compile_non_complex_expr(i, ()))
+            indices = cp._compile_unpack_subscripts(tuple(shape), loop_var) if len(shape) > 0 else ()
+            value = cp.compile_expr(self._reduction.expr, indices)
+        return begin, value
 
 class SumReductionKernel(ReductionKernel):
     type: LowerType
@@ -551,6 +657,10 @@ class SumReductionKernel(ReductionKernel):
     def __init__(self, type: LowerType, helper: CompileHelper) -> None:
         self.type = type
         self._helper = helper
+
+    @override
+    def get_type(self) -> LowerType:
+        return self.type
 
     @override
     def store_initial_value(self, block: BasicBlock, value_ptr: Value):
@@ -567,20 +677,25 @@ class SumReductionKernel(ReductionKernel):
     @override
     def reduce(self, block: BasicBlock, acc_ptr: Value, value: MaybeComplexValue, ordering: Ordering | None = None):
         match self.type:
-            case ComplexFloatType(type):
-                llvm_float_type = type.to_llvm_type()
+            case ComplexFloatType():
                 re_acc = block.get_element_ptr(acc_ptr, 0, 0)
                 im_acc = block.get_element_ptr(acc_ptr, 0, 1)
                 re_value, im_value = self._helper.expand_complex_value(block, value)
                 if ordering is not None:
-                    block.atomicrmw(Add(), re_acc, re_value, ordering)
-                    block.atomicrmw(Add(), im_acc, im_value, ordering)
+                    block.atomicrmw(FAdd(), re_acc, re_value, ordering)
+                    block.atomicrmw(FAdd(), im_acc, im_value, ordering)
                 else:
-                    block.store(re_acc, re_value)
-                    block.store(im_acc, llvm_float_type.from_int(0))
+                    block.store(re_acc, block.add(block.load(re_acc), re_value))
+                    block.store(im_acc, block.add(block.load(im_acc), im_value))
             case _:
                 assert not isinstance(value, ComplexValue)
-                block.store(acc_ptr, block.add(block.load(acc_ptr), value))
+                if ordering is not None:
+                    if isinstance(value.get_type(), FloatType):
+                        block.atomicrmw(FAdd(), acc_ptr, value, ordering)
+                    else:
+                        block.atomicrmw(Add(), acc_ptr, value, ordering)
+                else:
+                    block.store(acc_ptr, block.add(block.load(acc_ptr), value))
         return block
 
 class JitCompiler(TypesConfig):
@@ -591,8 +706,15 @@ class JitCompiler(TypesConfig):
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_assignments(self, exprs: list[AssignExpr], type_context: TypeContext) -> CompiledWrapper:
-        kernel = _AssignmentsKernel(self, exprs, type_context)
-        compiled = self._backend.compile_paralell_loop(kernel)
+    def compile_assignments(self, exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None) -> CompiledWrapper:
+        kernel = _AssignmentsKernel(self, exprs, type_context, reduction)
+        reduction_kernel: ReductionKernel | None = None
+        if reduction is not None:
+            assert kernel.reduction_type is not None
+            reduction_kernel = SumReductionKernel(kernel.reduction_type, kernel._helper)
+        compiled = self._backend.compile_paralell_loop(kernel, reduction_kernel)
 
         return CompiledWrapper(self, kernel.symbol_scope, compiled)
+
+    def compile_reduction(self, expr: Expr, type_context: TypeContext) -> CompiledWrapper:
+        return self.compile_assignments([], type_context, expr)
