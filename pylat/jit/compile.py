@@ -507,7 +507,7 @@ class CompiledWrapper:
 class _AssignmentsKernel(LoopKernel):
     _parent: 'JitCompiler'
     _exprs: list[TypedAssignExpr]
-    _symbol_scope: _SymbolScope
+    symbol_scope: _SymbolScope
     _total_size: Expr
     _helper: CompileHelper
 
@@ -518,8 +518,8 @@ class _AssignmentsKernel(LoopKernel):
         self._exprs = list(TypedAssignExpr(a, type_cache) for a in exprs)
         self._total_size = _check_and_get_total_size(self._exprs)
         self._helper = CompileHelper(parent)
-        self._symbol_scope = _SymbolScope(type_cache)
-        self._symbol_scope.scan_assignments(self._exprs)
+        self.symbol_scope = _SymbolScope(type_cache)
+        self.symbol_scope.scan_assignments(self._exprs)
 
     @override
     def get_index_type(self) -> IntType:
@@ -527,11 +527,11 @@ class _AssignmentsKernel(LoopKernel):
 
     @override
     def get_args(self) -> tuple[LowerType, ...]:
-        return self._symbol_scope.get_args()
+        return self.symbol_scope.get_args()
 
     @override
     def compile_total_size(self, begin: BasicBlock, args: tuple[Value, ...]) -> tuple[BasicBlock, Value]:
-        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self._symbol_scope)
+        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope)
         value = cp.compile_non_complex_expr(self._total_size, ())
         type = cp._type_cache.get_type(self._total_size)
         assert isinstance(type, ap.IntType), f"integer type expected for total size, got {type}"
@@ -539,7 +539,7 @@ class _AssignmentsKernel(LoopKernel):
 
     @override
     def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> tuple[BasicBlock, Value]:
-        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self._symbol_scope, debug=debug)
+        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope, debug=debug)
         cp.compile_assignments(self._exprs, loop_var)
         return begin, VoidValue()
 
@@ -579,7 +579,8 @@ class SumReductionKernel(ReductionKernel):
                     block.store(re_acc, re_value)
                     block.store(im_acc, llvm_float_type.from_int(0))
             case _:
-                block.store(acc_ptr, self.type.to_llvm_type().from_int(0))
+                assert not isinstance(value, ComplexValue)
+                block.store(acc_ptr, block.add(block.load(acc_ptr), value))
         return block
 
 class JitCompiler(TypesConfig):
@@ -590,8 +591,8 @@ class JitCompiler(TypesConfig):
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_one_kernel(self, exprs: list[AssignExpr], type_context: TypeContext) -> CompiledWrapper:
+    def compile_assignments(self, exprs: list[AssignExpr], type_context: TypeContext) -> CompiledWrapper:
         kernel = _AssignmentsKernel(self, exprs, type_context)
         compiled = self._backend.compile_paralell_loop(kernel)
 
-        return CompiledWrapper(self, kernel._symbol_scope, compiled)
+        return CompiledWrapper(self, kernel.symbol_scope, compiled)

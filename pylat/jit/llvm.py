@@ -3,7 +3,7 @@ import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from types import EllipsisType
-from typing import Any, final, override
+from typing import final, override
 
 from ..util import ObjectCounter, StrBiMap, gen_get_children
 

@@ -29,7 +29,7 @@ class JitTest(TestCase):
     def __init__(self, methodName: str = "test_jit") -> None:
         super().__init__(methodName)
 
-    def test_jit(self):
+    def test_assignment(self):
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
         context = TypeContext()
         context.set_symbol(dt, FloatType(64), 0)
@@ -37,7 +37,7 @@ class JitTest(TestCase):
         context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_one_kernel([
+        fn = compiler.compile_assignments([
             AssignExpr(phi, mom_phi * mom_phi * dt)
         ], context)
 
@@ -49,5 +49,13 @@ class JitTest(TestCase):
         fn.call({phi: phi0, mom_phi: mom_phi0, dt: dt0})  # type: ignore
 
         assert_almost_equal(phi0, mom_phi0 * mom_phi0 * dt0)
+
+    def test_sum(self):
+        a, dt = symbols('a', 'dt')
+        context = TypeContext()
+        context.set_symbol(a, ComplexFloatType(FloatType(64)), 0)
+        context.set_symbol(dt, FloatType(64), 0)
+
+        compiler = JitCompiler(OpenMPBackend())
 
 all_tests = [TestExpr, JitTest]

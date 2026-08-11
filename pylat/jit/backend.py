@@ -6,11 +6,11 @@ import ctypes
 from pylat.jit.argpass import LowerType
 from pylat.jit.helper import MaybeComplexValue
 
-from .llvm import BasicBlock, IntType, Ordering, Type, Value
+from .llvm import BasicBlock, IntType, Ordering, Value
 
 class CompiledBackendFunction:
     @abstractmethod
-    def call(self, *args: ctypes._CDataType):
+    def call(self, *args: ctypes._CDataType) -> ctypes._CDataType | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -41,7 +41,7 @@ class LoopKernel:
 
 class ReductionKernel:
     @abstractmethod
-    def get_type(self) -> Type:
+    def get_type(self) -> LowerType:
         raise NotImplementedError
 
     @abstractmethod
