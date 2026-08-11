@@ -1,15 +1,14 @@
 from unittest import TestCase
 
+import numpy as np
+from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
+from pylat.jit.argpass import ComplexFloatType, FloatType, TypeContext
 from pylat.jit.openmp import OpenMPBackend
-from pylat.jit.argpass import ComplexFloatType, TypeContext, FloatType
 
+from .expr import AssignExpr, Int, Plus, Rational, S, Times, symbols
 from .jit.compile import JitCompiler
-from .expr import AssignExpr, Int, Plus, Rational, Times, S, symbols
-
-from llvmlite import binding as llvm
-import numpy as np
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()

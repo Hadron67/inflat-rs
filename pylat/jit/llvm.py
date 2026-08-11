@@ -1,11 +1,12 @@
-from enum import Enum, IntEnum
 import math
 from abc import abstractmethod
 from dataclasses import dataclass
+from enum import Enum, IntEnum
 from types import EllipsisType
 from typing import final, override
 
 from ..util import ObjectCounter, StrBiMap, gen_get_children
+
 
 class NameContext:
     @abstractmethod
@@ -180,7 +181,7 @@ class FnType(Type):
     @override
     def stringify(self, name_context: 'NameContext | None' = None) -> str:
         ret = self.return_type.stringify(name_context)
-        args = list(i.stringify(name_context) for i in self.args)
+        args = [i.stringify(name_context) for i in self.args]
         if self.varargs:
             args.append('...')
         return f"{ret} ({' '.join(args)})"
@@ -288,7 +289,7 @@ class ArgValue(LocalValue):
         return f"{self.type} %{self.index}"
 
     def __repr__(self) -> str:
-        return f"ArgValue@{id(self)}(type={repr(self.type)}, index={self.index})"
+        return f"ArgValue@{id(self)}(type={self.type!r}, index={self.index})"
 
 @dataclass
 class VoidValue(Value):
@@ -373,7 +374,7 @@ class Module(NameContext):
 
         while len(todo_values) > 0:
             value = todo_values.pop()
-            if isinstance(value, Inst) or isinstance(value, BasicBlock):
+            if isinstance(value, (Inst, BasicBlock)):
                 continue
             if isinstance(value, GlobalValue):
                 if self._globals.has_value(value):
@@ -502,9 +503,9 @@ class GlobalAggregateValue(GlobalValue):
         match type:
             case StructType():
                 assert len(values) == len(type.fields), f"length mismatch: {len(values)} != {len(type.fields)}"
-                for value, type in zip(values, type.fields):
+                for value, result_type in zip(values, type.fields):
                     value_type = value.get_type()
-                    assert type.is_compatible(value_type), f"incompatible types {type} and {value_type}"
+                    assert result_type.is_compatible(value_type), f"incompatible types {result_type} and {value_type}"
             case ArrayType():
                 assert len(values) == type.length, f"length mismatch: {len(values)} != {type.length}"
                 for value in values:

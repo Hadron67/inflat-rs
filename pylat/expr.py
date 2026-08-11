@@ -1,10 +1,10 @@
 from abc import abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import dataclass_transform, override
 
-from typing_extensions import Callable
-
 from pylat.util import SubExprFnBuilder
+
 
 class Expr:
     @staticmethod
@@ -54,13 +54,13 @@ class Expr:
         if isinstance(other, Expr):
             return self.compare(other) < 0
         else:
-            raise ValueError(f"cannot compare {self} with {other}")
+            raise TypeError(f"cannot compare {self} with {other}")
 
     def __gt__(self, other) -> bool:
         if isinstance(other, Expr):
             return self.compare(other) > 0
         else:
-            raise ValueError(f"cannot compare {self} with {other}")
+            raise TypeError(f"cannot compare {self} with {other}")
 
     def __add__(self, other) -> 'Expr':
         other = Expr.as_expr(other)
@@ -153,17 +153,17 @@ def exprclass(cls=None, **kwargs):
 
         globals = {}
         globals[cls.__name__] = cls
-        exec('\n'.join(compare_code + map_code + get_subexpressions_code), globals)
+        exec('\n'.join(compare_code + map_code + get_subexpressions_code), globals)  # noqa: S102
 
         Expr._HEAD_SORT_TOKEN_COUNTER += 1
         cls = dataclass_wrapper(cls)
-        if getattr(cls, 'compare') is Expr.compare:
-            setattr(cls, "compare", globals[compare_name])
-        if getattr(cls, 'subexpressions') is Expr.subexpressions:
-            setattr(cls, "subexpressions", globals[subexpressions_name])
-        if getattr(cls, 'map') is Expr.map:
-            setattr(cls, "map", globals[map_name])
-        setattr(cls, "HEAD_SORT_TOKEN", Expr._HEAD_SORT_TOKEN_COUNTER)
+        if cls.compare is Expr.compare:
+            cls.compare = globals[compare_name]
+        if cls.subexpressions is Expr.subexpressions:
+            cls.subexpressions = globals[subexpressions_name]
+        if cls.map is Expr.map:
+            cls.map = globals[map_name]
+        cls.HEAD_SORT_TOKEN = Expr._HEAD_SORT_TOKEN_COUNTER
         return cls
 
     if cls is not None:

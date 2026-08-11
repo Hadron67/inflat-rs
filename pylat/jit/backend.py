@@ -1,12 +1,13 @@
 
 
-from abc import abstractmethod
 import ctypes
+from abc import abstractmethod
 
 from pylat.jit.argpass import LowerType
 from pylat.jit.helper import MaybeComplexValue
 
 from .llvm import BasicBlock, IntType, Ordering, Value
+
 
 class CompiledBackendFunction:
     @abstractmethod

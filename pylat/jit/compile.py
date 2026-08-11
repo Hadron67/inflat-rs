@@ -599,7 +599,7 @@ class _AssignmentsKernel(LoopKernel):
     def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None) -> None:
         type_cache = TypeResolver(type_context, parent)
         self._parent = parent
-        self._exprs = list(TypedAssignExpr(a, type_cache) for a in exprs)
+        self._exprs = [TypedAssignExpr(a, type_cache) for a in exprs]
         self._reduction = None
         self.reduction_type = None
         if reduction is not None:
@@ -698,10 +698,13 @@ class SumReductionKernel(ReductionKernel):
                     block.store(acc_ptr, block.add(block.load(acc_ptr), value))
         return block
 
+_F64 = ap.FloatType(64)
+_U64 = ap.IntType(64, False)
+
 class JitCompiler(TypesConfig):
     _backend: Backend
 
-    def __init__(self, backend: Backend, real_type: ap.FloatType = ap.FloatType(64), index_type: ap.IntType = ap.IntType(64, False)):
+    def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64):
         self._backend = backend
         self.real_type = real_type
         self.index_type = index_type

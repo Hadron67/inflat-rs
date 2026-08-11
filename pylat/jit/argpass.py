@@ -1,11 +1,26 @@
-from abc import abstractmethod
 import ctypes
+from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Any, override
 
+from ..expr import (
+    AssignExpr,
+    Cos,
+    Expr,
+    Int,
+    Ln,
+    Plus,
+    Power,
+    Roll,
+    Sin,
+    Slice,
+    Symbol,
+    SymbolShape,
+    Times,
+    UnaryNumericFunction,
+)
 from . import llvm
 
-from ..expr import AssignExpr, Cos, Expr, Int, Ln, Plus, Power, Roll, Sin, Slice, Symbol, SymbolShape, Times, UnaryNumericFunction
 
 class LowerType:
     @staticmethod
