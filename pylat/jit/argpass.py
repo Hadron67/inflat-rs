@@ -400,7 +400,7 @@ class TypedAssignExpr:
         self.shape = shape
 
     def total_size(self):
-        return Times.make(self.shape).evaluate()
+        return Times.make(self.shape).normalize()
 
 class SymbolArgInfo:
     @abstractmethod

@@ -17,7 +17,7 @@ class Expr:
             case int():
                 return Int(expr)
             case float():
-                return Float(expr).normalize()
+                return Float(expr).const_normalize()
             case complex():
                 re = Expr.as_expr(expr.real)
                 im = Expr.as_expr(expr.imag)
@@ -47,7 +47,7 @@ class Expr:
     def is_subtype(self, other: 'Expr') -> bool:
         return False
 
-    def evaluate(self, context: 'Context | None' = None) -> 'Expr':
+    def normalize(self) -> 'Expr':
         return self
 
     def __lt__(self, other) -> bool:
@@ -216,7 +216,7 @@ class Context:
 
 class Constant(Expr):
     @abstractmethod
-    def normalize(self) -> 'Constant':
+    def const_normalize(self) -> 'Constant':
         pass
 
     @abstractmethod
@@ -259,8 +259,9 @@ class Constant(Expr):
             return self.int_pow(other.value)
         return super().__pow__(other)
 
-    def evaluate(self, context: 'Context | None' = None) -> 'Expr':
-        return self.normalize()
+    @override
+    def normalize(self, context: 'Context | None' = None) -> 'Expr':
+        return self.const_normalize()
 
 class PrimitiveConstant(Constant):
     pass
@@ -270,7 +271,7 @@ class Int(PrimitiveConstant):
     value: int
 
     @override
-    def normalize(self) -> 'Constant':
+    def const_normalize(self) -> 'Constant':
         return self
 
     @override
@@ -284,10 +285,6 @@ class Int(PrimitiveConstant):
     @override
     def is_one(self) -> bool:
         return self.value == 1
-
-    @override
-    def evaluate(self, context: 'Context | None' = None) -> 'Expr':
-        return self
 
     @override
     def const_inverse(self) -> 'Constant':
@@ -340,7 +337,7 @@ class Float(PrimitiveConstant):
         return self.value == 0
 
     @override
-    def normalize(self) -> 'Constant':
+    def const_normalize(self) -> 'Constant':
         if self.value == 0:
             return Int(0)
         if self.value.is_integer():
@@ -398,7 +395,7 @@ class Rational(PrimitiveConstant):
         return self.numerator == 0
 
     @override
-    def normalize(self) -> 'Constant':
+    def const_normalize(self) -> 'Constant':
         if self.numerator == 0:
             return Int(0)
         num = self.numerator
@@ -465,9 +462,9 @@ class Complex(Constant):
         return self.re.is_zero() and self.im.is_zero()
 
     @override
-    def normalize(self) -> 'Constant':
-        re = self.re.normalize()
-        im = self.im.normalize()
+    def const_normalize(self) -> 'Constant':
+        re = self.re.const_normalize()
+        im = self.im.const_normalize()
         if im.is_zero():
             return re
         return Complex(re, im) if re != self.re or im != self.im else self
@@ -575,10 +572,11 @@ class Plus(Expr):
                 constant_term = constant_term.const_add(term)
             else:
                 other_terms.append(term)
-        return constant_term.normalize(), other_terms
+        return constant_term.const_normalize(), other_terms
 
-    def evaluate(self, context: 'Context | None' = None) -> 'Expr':
-        constant_term, other_terms = self._separate_constant_terms([expr.evaluate(context) for expr in self._collect_terms()])
+    @override
+    def normalize(self) -> 'Expr':
+        constant_term, other_terms = self._separate_constant_terms([expr.normalize() for expr in self._collect_terms()])
 
         term_to_factor: dict[Expr, Constant] = {}
         for term in other_terms:
@@ -587,11 +585,11 @@ class Plus(Expr):
 
         new_terms: list[Expr] = []
         for factor, cf in term_to_factor.items():
-            cf = cf.normalize()
+            cf = cf.const_normalize()
             if cf.is_one():
                 new_terms.append(factor)
             elif not cf.is_zero():
-                new_terms.append(Times((cf, factor)).evaluate(context))
+                new_terms.append(Times((cf, factor)).normalize())
 
         if not constant_term.is_zero():
             new_terms.insert(0, constant_term)
@@ -648,7 +646,7 @@ class Times(Expr):
                 constant_factor = constant_factor.const_mul(child)
             else:
                 other_factors.append(child)
-        return constant_factor.normalize(), tuple(other_factors)
+        return constant_factor.const_normalize(), tuple(other_factors)
 
     def _collect_factors(self) -> list[Expr]:
         todo = list(self.children)
@@ -667,8 +665,8 @@ class Times(Expr):
         return constant_factor, Times.make(other_factors)
 
     @override
-    def evaluate(self, context: 'Context | None' = None) -> 'Expr':
-        constant_factor, other_factors = Times._separate_factors_and_power(tuple(child.evaluate(context) for child in self._collect_factors()))
+    def normalize(self) -> 'Expr':
+        constant_factor, other_factors = Times._separate_factors_and_power(tuple(child.normalize() for child in self._collect_factors()))
 
         # simple case
         if constant_factor.is_zero():
@@ -689,14 +687,14 @@ class Times(Expr):
             if len(exponents) == 1:
                 new_factor = Power.make(base, exponents[0])
             else:
-                new_factor = Power(base, Plus(tuple(exponents))).evaluate(context)
+                new_factor = Power(base, Plus(tuple(exponents))).normalize()
 
             if isinstance(new_factor, Constant):
                 constant_factor = constant_factor.const_mul(new_factor)
             else:
                 new_factors.append(new_factor)
 
-        constant_factor = constant_factor.normalize()
+        constant_factor = constant_factor.const_normalize()
 
         if not constant_factor.is_one():
             new_factors.insert(0, constant_factor)
@@ -728,9 +726,9 @@ class Power(Expr):
         return self
 
     @override
-    def evaluate(self, context: 'Context | None' = None) -> 'Expr':
-        base = self.base.evaluate(context)
-        exponent = self.exponent.evaluate(context)
+    def normalize(self) -> 'Expr':
+        base = self.base.normalize()
+        exponent = self.exponent.normalize()
 
         # simple cases
         if base.is_zero() and isinstance(exponent, Int) and exponent.value > 0:
@@ -740,10 +738,10 @@ class Power(Expr):
 
         if isinstance(exponent, Int):
             if isinstance(base, Times):
-                factors = tuple((a ** exponent).evaluate(context) for a in base.children)
-                return Times(factors).evaluate(context)
+                factors = tuple((a ** exponent).normalize() for a in base.children)
+                return Times(factors).normalize()
             if isinstance(base, Constant):
-                return base.int_pow(exponent.value).normalize()
+                return base.int_pow(exponent.value).const_normalize()
 
         return Power(base, exponent) if base is not self.base or exponent is not self.exponent else self
 

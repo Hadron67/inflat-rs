@@ -20,7 +20,7 @@ class TestExpr(TestCase):
     def test_evaluation(self):
         x, y = symbols('x', 'y')
         self.assertEqual(
-            (x + x * 2 + S(2) * y + y * 3 + y / 2).evaluate(),
+            (x + x * 2 + S(2) * y + y * 3 + y / 2).normalize(),
             Plus((Times((Int(3), x)), Times((Rational(11, 2), y))))
         )
 
