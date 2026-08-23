@@ -666,7 +666,14 @@ class Times(Expr):
 
     @override
     def normalize(self) -> 'Expr':
-        constant_factor, other_factors = Times._separate_factors_and_power(tuple(child.normalize() for child in self._collect_factors()))
+        factors: list[Expr] = []
+        for child in self._collect_factors():
+            n = child.normalize()
+            if isinstance(n, Times):
+                factors.extend(n.children)
+            else:
+                factors.append(n)
+        constant_factor, other_factors = Times._separate_factors_and_power(tuple(factors))
 
         # simple case
         if constant_factor.is_zero():
@@ -742,6 +749,11 @@ class Power(Expr):
                 return Times(factors).normalize()
             if isinstance(base, Constant):
                 return base.int_pow(exponent.value).const_normalize()
+            if isinstance(base, Power) and isinstance(base.exponent, Int):
+                # (a^m)^n = a^(m*n)
+                return Power(base.base, Int(base.exponent.value * exponent.value)).normalize()
+            if exponent.value == 1:
+                return base
 
         return Power(base, exponent) if base is not self.base or exponent is not self.exponent else self
 

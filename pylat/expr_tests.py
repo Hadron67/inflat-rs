@@ -335,30 +335,36 @@ class ComplexExpressionNormalizationTests(TestCase):
             (((x + 1) + (x + 2)) / S(3)).normalize(),
             Times((Rational(1, 3), Plus((Int(3), Times((Int(2), x)))))),
         )
-        # note: a sum that normalizes into a Times is not flattened into its
-        # enclosing Times (only literally nested Times children are)
-        self.assertEqual(
-            ((x + x + x) * (y + y)).normalize(),
-            Times((Times((Int(2), y)), Times((Int(3), x)))),
-        )
+        # sums that normalize into a Times are flattened into the enclosing Times
+        self.assertEqual(((x + x + x) * (y + y)).normalize(), Times((Int(6), x, y)))
+        self.assertEqual(((2 * x) * (3 * y) * (4 * z)).normalize(), Times((Int(24), x, y, z)))
         self.assertEqual(
             ((x ** 2 - 1) / (x - 1)).normalize(),
             Times((Plus((Int(-1), Power(x, Int(2)))), Power(Plus((Int(-1), x)), Int(-1)))),
         )
 
-    def test_powers_of_powers_are_kept(self):
+    def test_powers_of_powers_are_combined(self):
+        # (a^m)^n = a^(m*n) and x^1 folds to x
+        self.assertEqual(((x ** 2) ** 3).normalize(), Power(x, Int(6)))
+        self.assertEqual(((x ** 2) ** 0).normalize(), Int(1))
+        self.assertEqual(((x ** -1) ** 2).normalize(), Power(x, Int(-2)))
+        self.assertEqual((x ** 3 / x).normalize(), Power(x, Int(2)))
+        self.assertEqual((x ** 2 / x).normalize(), x)
+        self.assertEqual((x / x ** 2).normalize(), Power(x, Int(-1)))
         self.assertEqual(
             (x ** 2 / y ** 2).normalize(),
-            Times((Power(x, Int(2)), Power(Power(y, Int(2)), Int(-1)))),
+            Times((Power(x, Int(2)), Power(y, Int(-2)))),
         )
         self.assertEqual(
             ((x / y) ** 2).normalize(),
-            Times((Power(x, Int(2)), Power(Power(y, Int(-1)), Int(2)))),
+            Times((Power(x, Int(2)), Power(y, Int(-2)))),
         )
         self.assertEqual(
             (x ** 2 / y ** 3 + 1).normalize(),
-            Plus((Int(1), Times((Power(x, Int(2)), Power(Power(y, Int(3)), Int(-1)))))),
+            Plus((Int(1), Times((Power(x, Int(2)), Power(y, Int(-3)))))),
         )
+        # distribution and exponent combination cooperate
+        self.assertEqual((x ** 2 * y ** 2 / (x * y)).normalize(), Times((x, y)))
 
     def test_complex_coefficients(self):
         self.assertEqual(
