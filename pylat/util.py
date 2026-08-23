@@ -3,6 +3,7 @@ from inspect import isclass
 from typing import get_args, get_origin, override
 from weakref import WeakKeyDictionary
 
+
 def next_unique_name(prefix: str, used_names: set[str]) -> str:
     i = 0
     while True:
@@ -238,7 +239,7 @@ def gen_get_children(cls: type | None = None, base: type | None = None, excludes
         get_children = 'get_children'
         globals = {}
         source = '\n'.join(children_builder.generate_get_children(cls, get_children, excludes))
-        exec(source, globals=globals)
+        exec(source, globals=globals)  # noqa: S102
         setattr(cls, method_name, globals[get_children])
         return cls
 

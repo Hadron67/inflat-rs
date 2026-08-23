@@ -417,8 +417,8 @@ class Rational(PrimitiveConstant):
         den //= gcd
 
         num *= sign
-        if num == den:
-            return Int(sign)
+        if den == 1:
+            return Int(num)
         return Rational(num, den) if num != self.numerator or den != self.denominator else self
 
     @override
@@ -448,7 +448,7 @@ class Rational(PrimitiveConstant):
             case Rational(numerator, denominator):
                 return Rational(self.numerator * numerator, self.denominator * denominator)
             case Int(value):
-                return Int(self.numerator * value)
+                return Rational(self.numerator * value, self.denominator)
             case Float(value):
                 return Float(self.numerator * value / self.denominator)
             case Complex():
