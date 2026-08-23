@@ -257,6 +257,123 @@ class ExpressionFormTests(TestCase):
         # symbol('a') and S('a') differ in their name prefix
         self.assertNotEqual(a, S('a'))
 
+class ComplexExpressionNormalizationTests(TestCase):
+    """Normalization of larger expressions combining multiple features."""
+
+    def test_polynomial(self):
+        self.assertEqual(
+            (x ** 3 + 3 * x ** 2 * y + 3 * x * y ** 2 + y ** 3).normalize(),
+            Plus((
+                Times((Int(3), x, Power(y, Int(2)))),
+                Times((Int(3), y, Power(x, Int(2)))),
+                Power(x, Int(3)),
+                Power(y, Int(3)),
+            )),
+        )
+
+    def test_like_term_collection_across_structures(self):
+        # powers are collected like any other factor
+        self.assertEqual((x ** 2 + x ** 2 + x ** 2).normalize(), Times((Int(3), Power(x, Int(2)))))
+        # like terms are recognized regardless of factor order
+        self.assertEqual((x ** 2 * y + y * x ** 2).normalize(), Times((Int(2), y, Power(x, Int(2)))))
+        self.assertEqual((x ** 2 * y ** 3 + x ** 2 * y ** 3).normalize(), Times((Int(2), Power(x, Int(2)), Power(y, Int(3)))))
+        self.assertEqual(
+            (x ** 2 * y + x * y ** 2 + x ** 2 * y).normalize(),
+            Plus((Times((Int(2), y, Power(x, Int(2)))), Times((x, Power(y, Int(2)))))),
+        )
+        # rational coefficients are summed exactly
+        self.assertEqual(
+            (Rational(1, 2) * x ** 2 + Rational(1, 3) * x ** 2).normalize(),
+            Times((Rational(5, 6), Power(x, Int(2)))),
+        )
+
+    def test_power_of_product_distributes(self):
+        self.assertEqual(
+            ((x * y) ** 2 + x ** 2 * y ** 2).normalize(),
+            Times((Int(2), Power(x, Int(2)), Power(y, Int(2)))),
+        )
+
+    def test_products_of_sums_are_kept_factored(self):
+        self.assertEqual(
+            ((2 * x + 3 * y) * (4 * x - 5 * y)).normalize(),
+            Times((
+                Plus((Times((Int(-5), y)), Times((Int(4), x)))),
+                Plus((Times((Int(2), x)), Times((Int(3), y)))),
+            )),
+        )
+        self.assertEqual(
+            ((x + 2) * (x + 3) * (x + 4)).normalize(),
+            Times((Plus((Int(2), x)), Plus((Int(3), x)), Plus((Int(4), x)))),
+        )
+
+    def test_repeated_factors_are_collected_into_powers(self):
+        self.assertEqual(((x + y) * (x + y) * (x + y)).normalize(), Power(Plus((x, y)), Int(3)))
+        self.assertEqual(
+            ((x + y) * (x - y) * (x + y)).normalize(),
+            Times((Plus((x, Times((Int(-1), y)))), Power(Plus((x, y)), Int(2)))),
+        )
+        self.assertEqual(
+            (((x + y) * (x - y)) ** 2).normalize(),
+            Times((Power(Plus((x, y)), Int(2)), Power(Plus((x, Times((Int(-1), y)))), Int(2)))),
+        )
+
+    def test_fractional_expressions(self):
+        self.assertEqual(
+            (x / y + y / x).normalize(),
+            Plus((Times((x, Power(y, Int(-1)))), Times((y, Power(x, Int(-1)))))),
+        )
+        self.assertEqual((S(1) / (x + y)).normalize(), Power(Plus((x, y)), Int(-1)))
+        self.assertEqual(
+            ((x + 1) / (y + 2)).normalize(),
+            Times((Plus((Int(1), x)), Power(Plus((Int(2), y)), Int(-1)))),
+        )
+        self.assertEqual(((x / y) * (y / x)).normalize(), Int(1))
+        self.assertEqual((x / 2 + x / 4 + x / 8).normalize(), Times((Rational(7, 8), x)))
+
+    def test_nested_normalization(self):
+        self.assertEqual(
+            (((x + 1) + (x + 2)) / S(3)).normalize(),
+            Times((Rational(1, 3), Plus((Int(3), Times((Int(2), x)))))),
+        )
+        # note: a sum that normalizes into a Times is not flattened into its
+        # enclosing Times (only literally nested Times children are)
+        self.assertEqual(
+            ((x + x + x) * (y + y)).normalize(),
+            Times((Times((Int(2), y)), Times((Int(3), x)))),
+        )
+        self.assertEqual(
+            ((x ** 2 - 1) / (x - 1)).normalize(),
+            Times((Plus((Int(-1), Power(x, Int(2)))), Power(Plus((Int(-1), x)), Int(-1)))),
+        )
+
+    def test_powers_of_powers_are_kept(self):
+        self.assertEqual(
+            (x ** 2 / y ** 2).normalize(),
+            Times((Power(x, Int(2)), Power(Power(y, Int(2)), Int(-1)))),
+        )
+        self.assertEqual(
+            ((x / y) ** 2).normalize(),
+            Times((Power(x, Int(2)), Power(Power(y, Int(-1)), Int(2)))),
+        )
+        self.assertEqual(
+            (x ** 2 / y ** 3 + 1).normalize(),
+            Plus((Int(1), Times((Power(x, Int(2)), Power(Power(y, Int(3)), Int(-1)))))),
+        )
+
+    def test_complex_coefficients(self):
+        self.assertEqual(
+            (S(1 + 2j) * (x + y) + S(2 - 1j) * (x + y)).normalize(),
+            Times((Complex(Int(3), Int(1)), Plus((x, y)))),
+        )
+        self.assertEqual(
+            (S(1 + 2j) * x + S(3 - 4j) * y + x).normalize(),
+            Plus((Times((Complex(Int(2), Int(2)), x)), Times((Complex(Int(3), Int(-4)), y)))),
+        )
+
+    def test_function_terms(self):
+        # applications of numeric functions take part in like-term collection
+        self.assertEqual((Sin(x) + Sin(x)).normalize(), Times((Int(2), Sin(x))))
+
 all_tests = [
     ConstantEvaluationTests,
     PlusEvaluationTests,
@@ -265,4 +382,5 @@ all_tests = [
     ComplexArithmeticTests,
     MixedArithmeticTests,
     ExpressionFormTests,
+    ComplexExpressionNormalizationTests,
 ]
