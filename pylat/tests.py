@@ -9,8 +9,8 @@ from pylat.jit.argpass import ComplexFloatType, FloatType, TypeContext
 from pylat.jit.fn_wrapper import Wrapper
 from pylat.jit.openmp import OpenMPBackend
 
-from .expr import AssignExpr, Int, Plus, Rational, S, Times, symbols
-from .jit.compile import JitCompiler
+from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, symbols
+from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
@@ -519,4 +519,294 @@ class JitWrapperTest(TestCase):
         with self.assertRaises(TypeError):
             foo(np.zeros((3, 3)))
 
-all_tests = [TestExpr, JitTest, JitWrapperTest]
+class SimdLayoutTests(TestCase):
+    """Tests for the SIMD friendly linear-index kernels.
+
+    When the expressions contain no rolls and no interior slices, and every array
+    argument is a standard layout (C or F contiguous), the kernel skips the
+    unpack/repack of the loop index and accesses arrays directly with the flat
+    loop variable.
+    """
+
+    @staticmethod
+    def _last_compiled(f) -> CompiledWrapper:
+        return list(f._cache.values())[-1]
+
+    def test_row_major_uses_flat_kernel(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, c, dt):
+            a += b * c + b * dt
+
+        np.random.seed(3)
+        a = np.random.rand(8, 9, 10)
+        b = np.random.rand(8, 9, 10)
+        c = np.random.rand(8, 9, 10)
+        a0, b0, c0 = a.copy(), b.copy(), c.copy()
+        f(a, b, c, 0.5)
+        assert_almost_equal(a, a0 + b0 * c0 + b0 * 0.5)
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
+        # the flat kernel must not unpack the loop index (no unsigned div/rem)
+        ir = '\n'.join(self._last_compiled(f).print_all())
+        self.assertNotIn('urem', ir)
+        self.assertNotIn('udiv', ir)
+
+    def test_column_major_uses_flat_kernel(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, c):
+            a += b * c + b
+
+        np.random.seed(4)
+        a = np.asfortranarray(np.random.rand(6, 7, 8))
+        b = np.asfortranarray(np.random.rand(6, 7, 8))
+        c = np.asfortranarray(np.random.rand(6, 7, 8))
+        a0, b0, c0 = a.copy(), b.copy(), c.copy()
+        f(a, b, c)
+        assert_almost_equal(a, a0 + b0 * c0 + b0)
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.COLUMN_MAJOR)
+        ir = '\n'.join(self._last_compiled(f).print_all())
+        self.assertNotIn('urem', ir)
+        self.assertNotIn('udiv', ir)
+
+    def test_non_contiguous_arrays_fall_back_to_generic(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b * 2
+
+        np.random.seed(5)
+        a = np.zeros((4, 5))
+        b = np.random.rand(5, 4)
+        a0 = a.copy()
+        f(a, b.T)  # transposed views are not standard layout
+        assert_almost_equal(a, a0 + b.T * 2)
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
+
+    def test_mixed_layout_falls_back_to_generic(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, c):
+            a += b * c
+
+        np.random.seed(6)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        c = np.asfortranarray(np.random.rand(4, 5))
+        a0 = a.copy()
+        f(a, b, c)
+        assert_almost_equal(a, a0 + b * c)
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
+
+    def test_axis0_slice_uses_flat_kernel(self):
+        # slicing the max-stride axis is linear, including negative indices
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b[1]
+            a += b[0]
+            a += b[-1]
+
+        a = np.zeros(6)
+        b = np.arange(30).reshape(5, 6).astype(float)
+        f(a, b)
+        assert_almost_equal(a, b[1] + b[0] + b[-1])
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
+
+    def test_middle_slice_falls_back_to_generic(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b[:, 1]
+
+        a = np.zeros(5)
+        b = np.arange(30).reshape(5, 6).astype(float)
+        f(a, b)
+        assert_almost_equal(a, b[:, 1])
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
+
+    def test_3d_slices(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b[1, 2]
+
+        a = np.zeros(7)
+        b = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
+        f(a, b)
+        assert_almost_equal(a, b[1, 2])
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
+
+        @wrapper.jit()
+        def g(a, b):
+            a += b[1, :, 2]
+
+        a = np.zeros(4)
+        b = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
+        g(a, b)
+        assert_almost_equal(a, b[1, :, 2])
+        self.assertIs(self._last_compiled(g).standard_layout, StandardLayoutMode.NONE)
+
+    def test_roll_falls_back_to_generic(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.roll(b, 1, axis=0)
+
+        a = np.zeros((5, 6))
+        b = np.random.rand(5, 6)
+        f(a, b)
+        assert_almost_equal(a, np.roll(b, 1, axis=0))
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
+
+    def test_1d_lhs_slice_uses_flat_kernel(self):
+        # the sliced base has a higher rank than the loop; the flat kernel handles it
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b[1] + b[-1]
+
+        a = np.zeros(6)
+        b = np.arange(30).reshape(5, 6).astype(float)
+        f(a, b)
+        assert_almost_equal(a, b[1] + b[-1])
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
+
+    def test_layout_cache_variants(self):
+        # C-contiguous and F-contiguous calls compile separate kernels
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b * 2
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        self.assertEqual(len(f._cache), 1)
+        a = np.asfortranarray(np.zeros((4, 5)))
+        b = np.asfortranarray(np.random.rand(4, 5))
+        f(a, b)
+        self.assertEqual(len(f._cache), 2)
+        self.assertEqual(
+            {w.standard_layout for w in f._cache.values()},
+            {StandardLayoutMode.ROW_MAJOR, StandardLayoutMode.COLUMN_MAJOR},
+        )
+
+    def test_flat_reduction(self):
+        a, = symbols('a')
+        context = TypeContext()
+        context.set_symbol(a, FloatType(64), 3)
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_reduction(a, context, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
+
+        np.random.seed(7)
+        a0 = np.random.rand(10, 10, 10)
+        assert_almost_equal(fn.call({a: a0}), np.sum(a0))  # type: ignore
+
+    def test_flat_reduction_column_major(self):
+        a, = symbols('a')
+        context = TypeContext()
+        context.set_symbol(a, FloatType(64), 2)
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_reduction(a, context, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
+        self.assertIs(fn.standard_layout, StandardLayoutMode.COLUMN_MAJOR)
+
+        np.random.seed(8)
+        a0 = np.asfortranarray(np.random.rand(10, 10))
+        assert_almost_equal(fn.call({a: a0}), np.sum(a0))  # type: ignore
+
+    def test_flat_reduction_with_slice(self):
+        a, b = symbols('a', 'b')
+        context = TypeContext()
+        context.set_symbol(a, FloatType(64), 1)
+        context.set_symbol(b, FloatType(64), 2)
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_reduction(Slice(b, 0, 1), context, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
+
+        np.random.seed(9)
+        b0 = np.random.rand(5, 6)
+        assert_almost_equal(fn.call({b: b0}), np.sum(b0[1]))  # type: ignore
+
+    def test_mismatched_layout_raises(self):
+        # the direct JitCompiler API verifies the layout of the arguments at call time
+        a, b = symbols('a', 'b')
+        context = TypeContext()
+        context.set_symbol(a, FloatType(64), 2)
+        context.set_symbol(b, FloatType(64), 2)
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_assignments(
+            [AssignExpr(a, b, '+')], context, standard_layout=StandardLayoutMode.ROW_MAJOR
+        )
+        a0 = np.zeros((4, 5))
+        b0 = np.asfortranarray(np.random.rand(4, 5))
+        with self.assertRaises(ValueError):
+            fn.call({a: a0, b: b0})  # type: ignore
+
+    def test_generic_rank_mismatched_slices(self):
+        # regression: the generic kernel must handle sliced arrays whose rank is
+        # higher than the loop rank (e.g. a += b[1] with a one-dimensional a)
+        a, b = symbols('a', 'b')
+        context = TypeContext()
+        context.set_symbol(a, FloatType(64), 1)
+        context.set_symbol(b, FloatType(64), 2)
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_assignments([AssignExpr(a, Slice(b, 0, 1), '+')], context)
+        a0 = np.zeros(6)
+        b0 = np.arange(30).reshape(5, 6).astype(float)
+        fn.call({a: a0, b: b0})  # type: ignore
+        assert_almost_equal(a0, b0[1])
+
+        context3 = TypeContext()
+        context3.set_symbol(a, FloatType(64), 1)
+        b3, = symbols('b3')
+        context3.set_symbol(b3, FloatType(64), 3)
+        fn3 = compiler.compile_assignments(
+            [AssignExpr(a, Slice(Slice(b3, 2, 2), 0, 1), '+')], context3
+        )
+        a3 = np.zeros(4)
+        b30 = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
+        fn3.call({a: a3, b3: b30})  # type: ignore
+        assert_almost_equal(a3, b30[1, :, 2])
+
+        # a sliced array that is broadcast into a higher-rank loop (base rank is
+        # smaller than the loop rank) must align its surviving axis with the
+        # trailing loop axes
+        context4 = TypeContext()
+        context4.set_symbol(a, FloatType(64), 3)
+        context4.set_symbol(b, FloatType(64), 2)
+        fn4 = compiler.compile_assignments([AssignExpr(a, Slice(b, 0, 1), '+')], context4)
+        a4 = np.zeros((2, 3, 6))
+        b40 = np.arange(30).reshape(5, 6).astype(float)
+        fn4.call({a: a4, b: b40})  # type: ignore
+        assert_almost_equal(a4, np.broadcast_to(b40[1], a4.shape))
+
+        context5 = TypeContext()
+        context5.set_symbol(a, FloatType(64), 2)
+        b5, = symbols('b5')
+        context5.set_symbol(b5, FloatType(64), 4)
+        fn5 = compiler.compile_assignments(
+            [AssignExpr(a, Slice(Slice(b5, 2, 3), 1, 2), '+')], context5
+        )
+        a5 = np.zeros((2, 4))
+        b50 = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5).astype(float)
+        fn5.call({a: a5, b5: b50})  # type: ignore
+        assert_almost_equal(a5, b50[:, 2, 3][:, :4])
+
+all_tests = [TestExpr, JitTest, JitWrapperTest, SimdLayoutTests]

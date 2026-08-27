@@ -36,7 +36,7 @@ from ..expr import (
 )
 from .argpass import ComplexFloatType, FloatType, IntType, LowerType, TypeContext
 from .backend import Backend
-from .compile import CompiledWrapper, JitCompiler
+from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .openmp import OpenMPBackend
 
 _FUNC_MAP = {
@@ -283,6 +283,28 @@ def _collect_symbols(expr: Expr) -> set[Symbol]:
     return used
 
 
+def _determine_layout(values) -> StandardLayoutMode:
+    """Pick the kernel layout that matches the actual array arguments.
+
+    Returns ``ROW_MAJOR`` when every array is C-contiguous, ``COLUMN_MAJOR`` when
+    every array is F-contiguous, and ``NONE`` (generic kernel) otherwise.
+    """
+    row_ok = True
+    col_ok = True
+    for value in values:
+        if not isinstance(value, np.ndarray):
+            continue
+        if not value.flags['C_CONTIGUOUS']:
+            row_ok = False
+        if not value.flags['F_CONTIGUOUS']:
+            col_ok = False
+    if row_ok:
+        return StandardLayoutMode.ROW_MAJOR
+    if col_ok:
+        return StandardLayoutMode.COLUMN_MAJOR
+    return StandardLayoutMode.NONE
+
+
 def _infer_params(fn: Callable) -> tuple[str, ...]:
     try:
         signature = inspect.signature(fn)
@@ -310,7 +332,7 @@ class _JittedFunction:
         self._names = {name: symbol(name) for name in params}
         self._assigns: list[AssignExpr] | None = None
         self._used_symbols: set[Symbol] | None = None
-        self._cache: dict[tuple[tuple[LowerType, int], ...], CompiledWrapper] = {}
+        self._cache: dict[tuple[tuple[tuple[LowerType, int], ...], StandardLayoutMode], CompiledWrapper] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
@@ -351,7 +373,7 @@ class _JittedFunction:
             return self._wrapper._index_type, 0
         raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
-    def _compile(self, signature: tuple[tuple[LowerType, int], ...]) -> CompiledWrapper:
+    def _compile(self, signature: tuple[tuple[LowerType, int], ...], layout: StandardLayoutMode) -> CompiledWrapper:
         assigns, _ = self._trace()
         context = TypeContext()
         for name, (lower_type, dim) in zip(self._params, signature):
@@ -361,7 +383,7 @@ class _JittedFunction:
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
         )
-        return compiler.compile_assignments(assigns, context)
+        return compiler.compile_assignments(assigns, context, standard_layout=layout)
 
     def __call__(self, *args, **kwargs):
         if len(kwargs) > 0:
@@ -371,11 +393,14 @@ class _JittedFunction:
                 f"{self.__name__}() takes {len(self._params)} positional arguments but {len(args)} were given"
             )
         signature = tuple(self._infer_arg_type(arg) for arg in args)
-        compiled = self._cache.get(signature)
-        if compiled is None:
-            compiled = self._compile(signature)
-            self._cache[signature] = compiled
         _, used = self._trace()
+        used_args = [value for name, value in zip(self._params, args) if self._names[name] in used]
+        layout = _determine_layout(used_args)
+        key = (signature, layout)
+        compiled = self._cache.get(key)
+        if compiled is None:
+            compiled = self._compile(signature, layout)
+            self._cache[key] = compiled
         arg_map = {self._names[n]: v for n, v in zip(self._params, args) if self._names[n] in used}
         return compiled.call(arg_map)
 

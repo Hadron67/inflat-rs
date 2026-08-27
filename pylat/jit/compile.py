@@ -2,6 +2,8 @@ import ctypes
 from enum import Enum
 from typing import Any, override
 
+import numpy as np
+
 from ..expr import (
     AssignExpr,
     Complex,
@@ -204,6 +206,8 @@ class _FunctionCompiler:
     _block: BasicBlock
     _finished: bool
     _layout_mode: StandardLayoutMode
+    _standard_layout: StandardLayoutMode
+    _slice_info: dict[Slice, tuple[Symbol, int]]
     _symbol_scope: _SymbolScope
     _args: tuple[Value, ...]
     _type_cache: TypeResolver
@@ -218,6 +222,7 @@ class _FunctionCompiler:
         symbol_scope: _SymbolScope,
         debug: DebugInterface | None = None,
         standard_layout: StandardLayoutMode = StandardLayoutMode.NONE,
+        slice_info: dict[Slice, tuple[Symbol, int]] | None = None,
     ) -> None:
         self.parent = parent
         self._args = args
@@ -229,6 +234,7 @@ class _FunctionCompiler:
         self._finished = False
         self._type_cache = symbol_scope.type_cache
         self._standard_layout = standard_layout
+        self._slice_info = slice_info if slice_info is not None else {}
         self._debug = debug
 
     def _add(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
@@ -298,6 +304,63 @@ class _FunctionCompiler:
                 b.store(b.get_element_ptr(ptr, 0, 1), im)
             case _:
                 b.store(ptr, value)
+
+    def _normalize_slice_index(self, base_info: ArrayArgInfo, base_axis: int, index: int) -> Value:
+        """Normalize a (possibly negative) slice index to ``index mod length``."""
+        h = self._helper
+        if index >= 0:
+            return IntValue(index, h.llvm_index_type)
+        length = self._args[base_info.shape[base_axis]]
+        abs_index = IntValue(-index, h.llvm_index_type)
+        # ceil(abs_index / length)
+        multiples = self._block.div(
+            self._block.add(abs_index, self._block.sub(length, IntValue(1, h.llvm_index_type))),
+            length,
+            False,
+        )
+        return self._block.rem(
+            self._block.add(IntValue(index, h.llvm_index_type), self._block.mul(multiples, length)),
+            length,
+            False,
+        )
+
+    def _compile_slice_chain(self, expr: Slice, subscripts: tuple[Value, ...]) -> MaybeComplexValue:
+        """Compile a slice chain that ends in a symbol by building the subscript
+        vector of the base array directly.  Unlike the positional substitution, this
+        also works when the base array has a different rank than the loop, e.g.
+        ``a += b[1]`` with a one-dimensional ``a``."""
+        nodes: list[Slice] = []
+        cur = expr
+        while isinstance(cur, Slice):
+            nodes.append(cur)
+            cur = cur.expr
+        assert isinstance(cur, Symbol), "slice chains compiled atomically must end in a symbol"
+        base = cur
+        dim = self._type_cache.get_symbol_dimension(base)
+        base_info = self._symbol_scope.get_symbol(base)
+        assert isinstance(base_info, ArrayArgInfo), "sliced expressions must be arrays"
+        r = len(subscripts)
+        entries: list[tuple[int, Value]] = []
+        for node in nodes:
+            base_axis = self._slice_info[node][1]
+            entries.append((base_axis, self._normalize_slice_index(base_info, base_axis, node.index)))
+        if dim == r:
+            # the loop covers every base axis: replace the value at the fixed axes
+            v: list[Value] = list(subscripts)
+            for axis, index in entries:
+                v[axis] = index
+            return self.compile_expr(base, tuple(v))
+        # the loop does not cover every base axis: the sliced array is broadcast, so
+        # the surviving axes (ascending) receive the trailing-aligned loop subscripts
+        # and the fixed axes receive their indices
+        fixed = {axis for axis, _ in entries}
+        surviving = [axis for axis in range(dim) if axis not in fixed]
+        r_rhs = len(surviving)
+        value_at = {axis: index for axis, index in entries}
+        for j, axis in enumerate(surviving):
+            value_at[axis] = subscripts[r - r_rhs + j]
+        v = [value_at[axis] for axis in range(dim)]
+        return self.compile_expr(base, tuple(v))
 
     def _compile_unpack_subscripts(self, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
         """
@@ -381,7 +444,11 @@ class _FunctionCompiler:
                     case ScalarArgInfo():
                         ret = self._block.load(self._args[sym.value]) if sym.is_ref else self._args[sym.value]
                     case ArrayArgInfo():
-                        ret = self._block.load(self._compile_array_symbol_access(sym, subscripts))
+                        if self._standard_layout is StandardLayoutMode.NONE:
+                            ret = self._block.load(self._compile_array_symbol_access(sym, subscripts))
+                        else:
+                            # standard layout: the loop variable is the linear array index
+                            ret = self._block.load(self._block.get_element_ptr(self._args[sym.ptr], subscripts[0]))
                     case _:
                         raise NotImplementedError
                 return self._helper.coerce(self._block, ret, lower_type, expr_type)
@@ -415,6 +482,18 @@ class _FunctionCompiler:
                 subscripts = subscripts[:expr.axis] + (new_index,) + subscripts[expr.axis + 1:]
                 return self.compile_expr(expr.expr, subscripts)
             case Slice():
+                if self._standard_layout is not StandardLayoutMode.NONE:
+                    # linear access: the flat index plus the fixed slice index times the
+                    # stride of the sliced axis of the base array
+                    base_symbol, base_axis = self._slice_info[expr]
+                    base_info = self._symbol_scope.get_symbol(base_symbol)
+                    assert isinstance(base_info, ArrayArgInfo), "sliced expressions must be arrays"
+                    stride = self._args[base_info.strides[base_axis]]
+                    index = self._normalize_slice_index(base_info, base_axis, expr.index)
+                    offset = self._block.add(subscripts[0], self._block.mul(index, stride))
+                    return self.compile_expr(expr.expr, (offset,))
+                if expr in self._slice_info:
+                    return self._compile_slice_chain(expr, subscripts)
                 if expr.index < 0:
                     # normalize negative indices: index mod length
                     expr_shape = self._type_cache.get_shape(expr.expr)
@@ -505,7 +584,10 @@ class _FunctionCompiler:
                         else:
                             raise TypeError(f"cannot use {expr} as left-value")
                     case ArrayArgInfo():
-                        return self._compile_array_symbol_access(sym, subscripts), lower_type
+                        if self._standard_layout is StandardLayoutMode.NONE:
+                            return self._compile_array_symbol_access(sym, subscripts), lower_type
+                        else:
+                            return self._block.get_element_ptr(self._args[sym.ptr], subscripts[0]), lower_type
         raise ValueError(f"cannot use {expr} as left-value")
 
     def compile_expr(self, expr: Expr, subscripts: tuple[Value, ...]) -> MaybeComplexValue:
@@ -524,13 +606,17 @@ class _FunctionCompiler:
     def _compile_assignment(self, typed_expr: TypedAssignExpr, tid: Value):
         expr = typed_expr.expr
 
-        shape: list[Value] = []
-        for i in typed_expr.shape:
-            type = self._type_cache.get_type(i)
-            assert isinstance(type, ap.IntType), f"integer type expected for shape, got {type}"
-            value = self.compile_non_complex_expr(i, ())
-            shape.append(value)
-        indices = self._compile_unpack_subscripts(tuple(shape), tid)
+        if self._standard_layout is StandardLayoutMode.NONE:
+            shape: list[Value] = []
+            for i in typed_expr.shape:
+                type = self._type_cache.get_type(i)
+                assert isinstance(type, ap.IntType), f"integer type expected for shape, got {type}"
+                value = self.compile_non_complex_expr(i, ())
+                shape.append(value)
+            indices = self._compile_unpack_subscripts(tuple(shape), tid)
+        else:
+            # standard layout: use the flat loop variable directly as the array index
+            indices = (tid,)
         lhs_ptr, lhs_type = self._compile_lvalue(expr.lhs, indices)
 
         rhs_value = self.compile_expr(expr.rhs, indices)
@@ -575,14 +661,30 @@ class CompiledWrapper:
     _parent: 'JitCompiler'
     _symbols: _SymbolScope
     _inner: CompiledBackendFunction
+    standard_layout: StandardLayoutMode
 
     @override
-    def __init__(self, parent: 'JitCompiler', symbols: _SymbolScope, inner: CompiledBackendFunction) -> None:
+    def __init__(self, parent: 'JitCompiler', symbols: _SymbolScope, inner: CompiledBackendFunction, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
         self._parent = parent
         self._symbols = symbols
         self._inner = inner
+        self.standard_layout = standard_layout
+
+    def _check_layout(self, arg: dict[Symbol, Any]) -> bool:
+        """Verify that every array argument matches the layout the kernel was compiled for."""
+        flag = 'C_CONTIGUOUS' if self.standard_layout is StandardLayoutMode.ROW_MAJOR else 'F_CONTIGUOUS'
+        for value in arg.values():
+            if isinstance(value, np.ndarray) and not value.flags[flag]:
+                return False
+        return True
 
     def call(self, arg: dict[Symbol, Any]) -> Any:
+        if self.standard_layout is not StandardLayoutMode.NONE and not self._check_layout(arg):
+            raise ValueError(
+                f"the kernel was compiled for {self.standard_layout.value} layout but the array "
+                "arguments do not match; pass contiguous arrays of the expected layout or recompile "
+                "with standard_layout=StandardLayoutMode.NONE"
+            )
         index_type = self._parent.index_type.to_ctype()
         seen_symbols: set[Symbol] = set()
         converted_args: list[ctypes._CDataType | None] = [None for _ in range(self._symbols.get_arg_count())]
@@ -650,11 +752,15 @@ class _AssignmentsKernel(LoopKernel):
     _helper: CompileHelper
     _reduction: TypedReductionExpr | None
     reduction_type: LowerType | None
+    _type_cache: TypeResolver
+    _standard_layout: StandardLayoutMode
+    _slice_info: dict[Slice, tuple[Symbol, int]]
 
     @override
-    def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None) -> None:
+    def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
         type_cache = TypeResolver(type_context, parent)
         self._parent = parent
+        self._type_cache = type_cache
         self._exprs = [TypedAssignExpr(a, type_cache) for a in exprs]
         self._reduction = None
         self.reduction_type = None
@@ -673,6 +779,128 @@ class _AssignmentsKernel(LoopKernel):
             self.symbol_scope.scan_symbols(self._reduction.expr)
             for e in self._reduction.shape:
                 self.symbol_scope.scan_symbols(e)
+        self._slice_info = self._analyze_slice_chains()
+        self._standard_layout = self._check_standard_layout(standard_layout)
+
+    def _analyze_slice_chains(self) -> dict[Slice, tuple[Symbol, int]]:
+        """Record, for every slice node whose chain ends in a symbol, the base symbol
+        and the base axis it fixes.  The axis attribute of a slice is relative to the
+        expression it wraps (which may have axes removed already), so the mapping is
+        computed from the innermost node outward."""
+        slice_info: dict[Slice, tuple[Symbol, int]] = {}
+
+        def check_chain(expr: Slice) -> None:
+            nodes: list[Slice] = []
+            cur = expr
+            while isinstance(cur, Slice):
+                nodes.append(cur)
+                cur = cur.expr
+            if not isinstance(cur, Symbol):
+                return
+            dim = self._type_cache.get_symbol_dimension(cur)
+            remaining = list(range(dim))
+            for node in reversed(nodes):
+                if node.axis < 0 or node.axis >= len(remaining):
+                    return
+                slice_info[node] = (cur, remaining[node.axis])
+                del remaining[node.axis]
+
+        def walk(expr: Expr) -> None:
+            if isinstance(expr, Slice):
+                check_chain(expr)
+            elif isinstance(expr, (Symbol, SymbolShape, Roll)):
+                return
+            else:
+                for child in expr.subexpressions():
+                    walk(child)
+
+        for typed in self._exprs:
+            walk(typed.expr.lhs)
+            walk(typed.expr.rhs)
+        if self._reduction is not None:
+            walk(self._reduction.expr)
+        return slice_info
+
+    def _check_standard_layout(self, requested: StandardLayoutMode) -> StandardLayoutMode:
+        """Validate that the expressions can be compiled with a linear (SIMD friendly)
+        index: no rolls, no slices on interior axes, no broadcasting, and every array
+        must be standard layout.  Falls back to :data:`StandardLayoutMode.NONE` when
+        the expressions are not compatible."""
+        if requested is StandardLayoutMode.NONE:
+            return StandardLayoutMode.NONE
+        if len(self._exprs) > 0:
+            loop_rank = len(self._exprs[0].shape)
+        else:
+            assert self._reduction is not None
+            loop_rank = len(self._reduction.shape)
+        dim_of = self._type_cache.get_symbol_dimension
+        failures: list[str] = []
+
+        def check_slice_chain(expr: Slice) -> None:
+            # a chain of slices that ends in a symbol; check that the base axes the
+            # slices fix are compatible with the layout (the per-node base axes are
+            # already recorded in ``_slice_info`` by ``_analyze_slice_chains``)
+            nodes: list[Slice] = []
+            cur = expr
+            while isinstance(cur, Slice):
+                nodes.append(cur)
+                cur = cur.expr
+            if not isinstance(cur, Symbol):
+                failures.append(f"slice of non-symbol expression {cur}")
+                return
+            base = cur
+            dim = dim_of(base)
+            k = len(nodes)
+            if dim != loop_rank + k:
+                failures.append(
+                    f"array {base} has rank {dim} but the loop rank is {loop_rank} "
+                    f"with {k} sliced axes; broadcasting arrays are not supported "
+                    "in standard layout kernels"
+                )
+                return
+            effective = []
+            for node in nodes:
+                if node not in self._slice_info:
+                    failures.append(f"slice chain {expr} cannot be analyzed")
+                    return
+                effective.append(self._slice_info[node][1])
+            if requested is StandardLayoutMode.ROW_MAJOR:
+                expected = list(range(k))
+            else:
+                expected = list(range(dim - k, dim))
+            if sorted(effective) != expected:
+                failures.append(
+                    f"slice axes {sorted(effective)} are not compatible with the "
+                    f"{requested.value} layout"
+                )
+
+        def walk(expr: Expr) -> None:
+            if isinstance(expr, Roll):
+                failures.append("np.roll is not supported in standard layout kernels")
+            elif isinstance(expr, Slice):
+                check_slice_chain(expr)
+            elif isinstance(expr, SymbolShape):
+                # shape values are scalars; they do not access array data
+                return
+            elif isinstance(expr, Symbol):
+                dim = dim_of(expr)
+                if dim != 0 and dim != loop_rank:
+                    failures.append(
+                        f"array {expr} has rank {dim} but the loop rank is {loop_rank}; "
+                        "broadcasting arrays are not supported in standard layout kernels"
+                    )
+            else:
+                for child in expr.subexpressions():
+                    walk(child)
+
+        for typed in self._exprs:
+            walk(typed.expr.lhs)
+            walk(typed.expr.rhs)
+        if self._reduction is not None:
+            walk(self._reduction.expr)
+        if len(failures) > 0:
+            return StandardLayoutMode.NONE
+        return requested
 
     @override
     def get_index_type(self) -> IntType:
@@ -684,7 +912,8 @@ class _AssignmentsKernel(LoopKernel):
 
     @override
     def compile_total_size(self, begin: BasicBlock, args: tuple[Value, ...]) -> tuple[BasicBlock, Value]:
-        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope)
+        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope,
+                               standard_layout=self._standard_layout, slice_info=self._slice_info)
         value = cp.compile_non_complex_expr(self._total_size, ())
         type = cp._type_cache.get_type(self._total_size)
         assert isinstance(type, ap.IntType), f"integer type expected for total size, got {type}"
@@ -692,16 +921,20 @@ class _AssignmentsKernel(LoopKernel):
 
     @override
     def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> tuple[BasicBlock, MaybeComplexValue]:
-        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope, debug=debug)
+        cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope, debug=debug,
+                               standard_layout=self._standard_layout, slice_info=self._slice_info)
         cp.compile_assignments(self._exprs, loop_var)
         value: MaybeComplexValue = VoidValue()
         if self._reduction is not None:
-            shape: list[Value] = []
-            for i in self._reduction.shape:
-                size_type = cp._type_cache.get_type(i)
-                assert isinstance(size_type, ap.IntType), f"integer type expected for shape, got {size_type}"
-                shape.append(cp.compile_non_complex_expr(i, ()))
-            indices = cp._compile_unpack_subscripts(tuple(shape), loop_var) if len(shape) > 0 else ()
+            if self._standard_layout is StandardLayoutMode.NONE:
+                shape: list[Value] = []
+                for i in self._reduction.shape:
+                    size_type = cp._type_cache.get_type(i)
+                    assert isinstance(size_type, ap.IntType), f"integer type expected for shape, got {size_type}"
+                    shape.append(cp.compile_non_complex_expr(i, ()))
+                indices = cp._compile_unpack_subscripts(tuple(shape), loop_var) if len(shape) > 0 else ()
+            else:
+                indices = (loop_var,)
             value = cp.compile_expr(self._reduction.expr, indices)
         return begin, value
 
@@ -765,15 +998,15 @@ class JitCompiler(TypesConfig):
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_assignments(self, exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None) -> CompiledWrapper:
-        kernel = _AssignmentsKernel(self, exprs, type_context, reduction)
+    def compile_assignments(self, exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        kernel = _AssignmentsKernel(self, exprs, type_context, reduction, standard_layout)
         reduction_kernel: ReductionKernel | None = None
         if reduction is not None:
             assert kernel.reduction_type is not None
             reduction_kernel = SumReductionKernel(kernel.reduction_type, kernel._helper)
         compiled = self._backend.compile_paralell_loop(kernel, reduction_kernel)
 
-        return CompiledWrapper(self, kernel.symbol_scope, compiled)
+        return CompiledWrapper(self, kernel.symbol_scope, compiled, standard_layout=kernel._standard_layout)
 
-    def compile_reduction(self, expr: Expr, type_context: TypeContext) -> CompiledWrapper:
-        return self.compile_assignments([], type_context, expr)
+    def compile_reduction(self, expr: Expr, type_context: TypeContext, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        return self.compile_assignments([], type_context, expr, standard_layout=standard_layout)
