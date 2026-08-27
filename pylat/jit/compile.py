@@ -1,4 +1,5 @@
 import ctypes
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, override
 
@@ -198,6 +199,18 @@ class _SymbolScope:
                     elems.append(f"%{info.ptr}: Array(strides=({strides})) = {sym}")
         return f"SymbolScope({', '.join(elems)})"
 
+class _SubscriptsInfo:
+    pass
+
+@dataclass
+class _RealSubscriptsInfo(_SubscriptsInfo):
+    subscripts: tuple[Value, ...]
+
+@dataclass
+class _StandardLayoutSubscriptInfo(_SubscriptsInfo):
+    mode: StandardLayoutMode
+    subscript: Value
+
 class _FunctionCompiler:
     parent: 'JitCompiler'
     _helper: CompileHelper
@@ -207,7 +220,7 @@ class _FunctionCompiler:
     _finished: bool
     _layout_mode: StandardLayoutMode
     _standard_layout: StandardLayoutMode
-    _slice_info: dict[Slice, tuple[Symbol, int]]
+    _slice_info: dict[Slice, tuple[Symbol | None, int]]
     _symbol_scope: _SymbolScope
     _args: tuple[Value, ...]
     _type_cache: TypeResolver
@@ -222,7 +235,7 @@ class _FunctionCompiler:
         symbol_scope: _SymbolScope,
         debug: DebugInterface | None = None,
         standard_layout: StandardLayoutMode = StandardLayoutMode.NONE,
-        slice_info: dict[Slice, tuple[Symbol, int]] | None = None,
+        slice_info: dict[Slice, tuple[Symbol | None, int]] | None = None,
     ) -> None:
         self.parent = parent
         self._args = args
@@ -305,12 +318,11 @@ class _FunctionCompiler:
             case _:
                 b.store(ptr, value)
 
-    def _normalize_slice_index(self, base_info: ArrayArgInfo, base_axis: int, index: int) -> Value:
+    def _normalize_slice_index(self, length: Value, index: int) -> Value:
         """Normalize a (possibly negative) slice index to ``index mod length``."""
         h = self._helper
         if index >= 0:
             return IntValue(index, h.llvm_index_type)
-        length = self._args[base_info.shape[base_axis]]
         abs_index = IntValue(-index, h.llvm_index_type)
         # ceil(abs_index / length)
         multiples = self._block.div(
@@ -325,32 +337,32 @@ class _FunctionCompiler:
         )
 
     def _compile_slice_chain(self, expr: Slice, subscripts: tuple[Value, ...]) -> MaybeComplexValue:
-        """Compile a slice chain that ends in a symbol by building the subscript
-        vector of the base array directly.  Unlike the positional substitution, this
-        also works when the base array has a different rank than the loop, e.g.
-        ``a += b[1]`` with a one-dimensional ``a``."""
+        """Compile a slice chain by building the subscript vector of the sliced
+        expression directly and compiling the sliced expression with it, so compound
+        bases like ``np.sin(b)[2]`` work.  Unlike the positional substitution, this
+        also works when the sliced expression has a different rank than the loop,
+        e.g. ``a += b[1]`` with a one-dimensional ``a``."""
         nodes: list[Slice] = []
         cur = expr
         while isinstance(cur, Slice):
             nodes.append(cur)
             cur = cur.expr
-        assert isinstance(cur, Symbol), "slice chains compiled atomically must end in a symbol"
-        base = cur
-        dim = self._type_cache.get_symbol_dimension(base)
-        base_info = self._symbol_scope.get_symbol(base)
-        assert isinstance(base_info, ArrayArgInfo), "sliced expressions must be arrays"
+        cur_shape = self._type_cache.get_shape(cur)
+        dim = len(cur_shape)
         r = len(subscripts)
         entries: list[tuple[int, Value]] = []
         for node in nodes:
-            base_axis = self._slice_info[node][1]
-            entries.append((base_axis, self._normalize_slice_index(base_info, base_axis, node.index)))
+            axis = self._slice_info[node][1]
+            length = self.compile_non_complex_expr(cur_shape[axis], ())
+            entries.append((axis, self._normalize_slice_index(length, node.index)))
         if dim == r:
-            # the loop covers every base axis: replace the value at the fixed axes
+            # the loop covers every axis of the sliced expression: replace the value
+            # at the fixed axes
             v: list[Value] = list(subscripts)
             for axis, index in entries:
                 v[axis] = index
-            return self.compile_expr(base, tuple(v))
-        # the loop does not cover every base axis: the sliced array is broadcast, so
+            return self.compile_expr(cur, tuple(v))
+        # the loop does not cover every axis: the sliced expression is broadcast, so
         # the surviving axes (ascending) receive the trailing-aligned loop subscripts
         # and the fixed axes receive their indices
         fixed = {axis for axis, _ in entries}
@@ -360,7 +372,7 @@ class _FunctionCompiler:
         for j, axis in enumerate(surviving):
             value_at[axis] = subscripts[r - r_rhs + j]
         v = [value_at[axis] for axis in range(dim)]
-        return self.compile_expr(base, tuple(v))
+        return self.compile_expr(cur, tuple(v))
 
     def _compile_unpack_subscripts(self, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
         """
@@ -486,10 +498,11 @@ class _FunctionCompiler:
                     # linear access: the flat index plus the fixed slice index times the
                     # stride of the sliced axis of the base array
                     base_symbol, base_axis = self._slice_info[expr]
+                    assert base_symbol is not None, "standard layout requires a single-array slice base"
                     base_info = self._symbol_scope.get_symbol(base_symbol)
                     assert isinstance(base_info, ArrayArgInfo), "sliced expressions must be arrays"
                     stride = self._args[base_info.strides[base_axis]]
-                    index = self._normalize_slice_index(base_info, base_axis, expr.index)
+                    index = self._normalize_slice_index(self._args[base_info.shape[base_axis]], expr.index)
                     offset = self._block.add(subscripts[0], self._block.mul(index, stride))
                     return self.compile_expr(expr.expr, (offset,))
                 if expr in self._slice_info:
@@ -754,7 +767,7 @@ class _AssignmentsKernel(LoopKernel):
     reduction_type: LowerType | None
     _type_cache: TypeResolver
     _standard_layout: StandardLayoutMode
-    _slice_info: dict[Slice, tuple[Symbol, int]]
+    _slice_info: dict[Slice, tuple[Symbol | None, int]]
 
     @override
     def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
@@ -782,12 +795,13 @@ class _AssignmentsKernel(LoopKernel):
         self._slice_info = self._analyze_slice_chains()
         self._standard_layout = self._check_standard_layout(standard_layout)
 
-    def _analyze_slice_chains(self) -> dict[Slice, tuple[Symbol, int]]:
-        """Record, for every slice node whose chain ends in a symbol, the base symbol
-        and the base axis it fixes.  The axis attribute of a slice is relative to the
-        expression it wraps (which may have axes removed already), so the mapping is
-        computed from the innermost node outward."""
-        slice_info: dict[Slice, tuple[Symbol, int]] = {}
+    def _analyze_slice_chains(self) -> dict[Slice, tuple[Symbol | None, int]]:
+        """Record, for every slice node, the axis of the sliced expression it fixes
+        and the base symbol when the sliced expression accesses a single array.  The
+        axis attribute of a slice is relative to the expression it wraps (which may
+        have axes removed already), so the mapping is computed from the innermost
+        node outward."""
+        slice_info: dict[Slice, tuple[Symbol | None, int]] = {}
 
         def check_chain(expr: Slice) -> None:
             nodes: list[Slice] = []
@@ -795,14 +809,13 @@ class _AssignmentsKernel(LoopKernel):
             while isinstance(cur, Slice):
                 nodes.append(cur)
                 cur = cur.expr
-            if not isinstance(cur, Symbol):
-                return
-            dim = self._type_cache.get_symbol_dimension(cur)
+            base = self._find_unique_base(cur)
+            dim = len(self._type_cache.get_shape(cur))
             remaining = list(range(dim))
             for node in reversed(nodes):
                 if node.axis < 0 or node.axis >= len(remaining):
                     return
-                slice_info[node] = (cur, remaining[node.axis])
+                slice_info[node] = (base, remaining[node.axis])
                 del remaining[node.axis]
 
         def walk(expr: Expr) -> None:
@@ -821,6 +834,26 @@ class _AssignmentsKernel(LoopKernel):
             walk(self._reduction.expr)
         return slice_info
 
+    def _find_unique_base(self, expr: Expr) -> Symbol | None:
+        """Return the single array symbol accessed by ``expr``, or None when the
+        expression accesses no arrays or more than one distinct array.  Rolls and
+        nested slices change the indexing and cannot be linearized, so they
+        disqualify the expression."""
+        arrays: set[Symbol] = set()
+        todo = [expr]
+        while todo:
+            elem = todo.pop()
+            if isinstance(elem, Symbol):
+                if self._type_cache.get_symbol_dimension(elem) > 0:
+                    arrays.add(elem)
+            elif isinstance(elem, (Roll, Slice)):
+                return None
+            else:
+                todo.extend(elem.subexpressions())
+        if len(arrays) == 1:
+            return next(iter(arrays))
+        return None
+
     def _check_standard_layout(self, requested: StandardLayoutMode) -> StandardLayoutMode:
         """Validate that the expressions can be compiled with a linear (SIMD friendly)
         index: no rolls, no slices on interior axes, no broadcasting, and every array
@@ -837,18 +870,22 @@ class _AssignmentsKernel(LoopKernel):
         failures: list[str] = []
 
         def check_slice_chain(expr: Slice) -> None:
-            # a chain of slices that ends in a symbol; check that the base axes the
+            # a chain of slices over a single array; check that the base axes the
             # slices fix are compatible with the layout (the per-node base axes are
-            # already recorded in ``_slice_info`` by ``_analyze_slice_chains``)
+            # recorded in ``_slice_info`` by ``_analyze_slice_chains``)
             nodes: list[Slice] = []
             cur = expr
             while isinstance(cur, Slice):
                 nodes.append(cur)
                 cur = cur.expr
-            if not isinstance(cur, Symbol):
-                failures.append(f"slice of non-symbol expression {cur}")
+            if self._find_unique_base(cur) is None:
+                failures.append(
+                    f"slice of expression {cur} is not supported in standard layout "
+                    "kernels: the sliced expression must access a single array"
+                )
                 return
-            base = cur
+            base = self._find_unique_base(cur)
+            assert base is not None
             dim = dim_of(base)
             k = len(nodes)
             if dim != loop_rank + k:

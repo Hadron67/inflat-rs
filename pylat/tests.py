@@ -681,6 +681,66 @@ class SimdLayoutTests(TestCase):
         assert_almost_equal(a, b[1] + b[-1])
         self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
 
+    def test_slice_of_compound_expression_uses_flat_kernel(self):
+        # slicing a function application (or any compound expression over a single
+        # array) is linear: np.sin(b)[2][i] == np.sin(b[2][i])
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sin(b)[2]
+            a += np.cos(b)[-1]
+
+        np.random.seed(11)
+        a = np.zeros(6)
+        b = np.random.rand(5, 6) + 1
+        f(a, b)
+        assert_almost_equal(a, np.sin(b)[2] + np.cos(b)[-1])
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
+
+    def test_slice_of_compound_expression_no_unpack(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sin(b)[2]
+
+        np.random.seed(12)
+        a = np.zeros(6)
+        b = np.random.rand(5, 6) + 1
+        f(a, b)
+        assert_almost_equal(a, np.sin(b)[2])
+        ir = '\n'.join(self._last_compiled(f).print_all())
+        self.assertNotIn('urem', ir)
+
+    def test_slice_of_compound_expression_single_array_only(self):
+        # a slice over an expression with several distinct arrays cannot be
+        # linearized with a single flat offset; it falls back to the generic kernel
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, c):
+            a += (b + c)[1]
+
+        np.random.seed(13)
+        a = np.zeros(6)
+        b = np.random.rand(5, 6)
+        c = np.random.rand(5, 6)
+        f(a, b, c)
+        assert_almost_equal(a, (b + c)[1])
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
+
+        # the same expression with non-contiguous arrays must also stay correct
+        @wrapper.jit()
+        def g(a, b):
+            a += np.sin(b)[2]
+
+        a = np.zeros(6)
+        b = np.random.rand(6, 5)
+        g(a, b.T)
+        assert_almost_equal(a, np.sin(b.T)[2])
+        self.assertIs(self._last_compiled(g).standard_layout, StandardLayoutMode.NONE)
+
     def test_layout_cache_variants(self):
         # C-contiguous and F-contiguous calls compile separate kernels
         wrapper = Wrapper()
