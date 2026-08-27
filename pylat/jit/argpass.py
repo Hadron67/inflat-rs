@@ -5,12 +5,16 @@ from typing import Any, override
 
 from ..expr import (
     AssignExpr,
+    Complex,
     Cos,
+    Exp,
     Expr,
+    Float,
     Int,
     Ln,
     Plus,
     Power,
+    Rational,
     Roll,
     Sin,
     Slice,
@@ -324,6 +328,8 @@ class TypeResolver:
         match expr:
             case Symbol():
                 return tuple(SymbolShape(expr, i) for i in range(self._ctx.get_dimension(expr)))
+            case Int() | Float() | Rational() | Complex():
+                return ()
             case Plus(children) | Times(children):
                 return self.merge_shapes(*tuple(self.get_shape(a) for a in children))
             case Power(base, exp):
@@ -369,6 +375,12 @@ class TypeResolver:
 
     def _get_type_no_cache(self, expr: Expr) -> LowerType:
         match expr:
+            case Int():
+                return self.type_config.index_type
+            case Float() | Rational():
+                return self.type_config.real_type
+            case Complex():
+                return ComplexFloatType(self.type_config.real_type)
             case Symbol():
                 return self._promote_type(self._ctx.get_type(expr))
             case SymbolShape():
@@ -382,7 +394,7 @@ class TypeResolver:
                     return self._int_to_float_type(self.get_type(base))
             case Roll() | Slice():
                 return self.get_type(expr.expr)
-            case Sin() | Cos() | Ln():
+            case Sin() | Cos() | Ln() | Exp():
                 return self._int_to_float_type(self.get_type(expr.expr))
             case _:
                 raise ValueError(f"cannot get type of {expr}")

@@ -1,9 +1,10 @@
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
 from .expr import Expr
+
 
 @dataclass
 class ScalarField:

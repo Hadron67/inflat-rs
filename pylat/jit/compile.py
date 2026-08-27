@@ -4,6 +4,7 @@ from typing import Any, override
 
 from ..expr import (
     AssignExpr,
+    Complex,
     Cos,
     Exp,
     Expr,
@@ -31,6 +32,7 @@ from .argpass import (
     TypedAssignExpr,
     TypeResolver,
     TypesConfig,
+    get_peer_types,
 )
 from .backend import (
     Backend,
@@ -64,11 +66,18 @@ def _check_and_get_total_size(exprs: list[TypedAssignExpr], reduction: 'TypedRed
         first_size = reduction.total_size()
         rest = []
 
-    def resolve_size(expr: Expr) -> Expr:
+    def resolve_size(expr: Expr) -> tuple[Expr, ...]:
         if resolver is None:
-            return expr
-        resolved_shapes = resolver.resolved_shapes
-        return expr.map(lambda e: resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
+            resolved = expr
+        else:
+            resolved_shapes = resolver.resolved_shapes
+            resolved = expr.map(lambda e: resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
+        # total sizes are products of shape variables; compare them as multisets,
+        # since the shape variables may have been constrained to equal each other
+        # in different orders
+        if isinstance(resolved, Times):
+            return tuple(sorted(resolved.children))
+        return (resolved,)
 
     first_resolved = resolve_size(first_size)
     for expr in rest:
@@ -354,6 +363,16 @@ class _FunctionCompiler:
                 return FloatValue(numerator / denominator, h.llvm_real_type)
             case Float(value):
                 return FloatValue(value, h.llvm_real_type)
+            case Complex(re, im):
+                assert isinstance(expr_type, ap.ComplexFloatType)
+                re_value = self.compile_non_complex_expr(re, subscripts)
+                im_value = self.compile_non_complex_expr(im, subscripts)
+                re_type = self._type_cache.get_type(re)
+                im_type = self._type_cache.get_type(im)
+                re_value = self._helper.coerce(self._block, re_value, re_type, expr_type.type)
+                im_value = self._helper.coerce(self._block, im_value, im_type, expr_type.type)
+                assert not isinstance(re_value, ComplexValue) and not isinstance(im_value, ComplexValue)
+                return ComplexValue(re_value, im_value)
             case Symbol():
                 sym = self._symbol_scope.get_symbol(expr)
                 lower_type = self._type_cache.get_symbol_type(expr)
@@ -419,25 +438,25 @@ class _FunctionCompiler:
                 arg = self.compile_expr(expr, subscripts)
                 arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
                 assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
-                assert not isinstance(arg, MaybeComplexValue)
+                assert not isinstance(arg, ComplexValue)
                 return self._block.sin(arg)
             case Cos(expr):
                 arg = self.compile_expr(expr, subscripts)
                 arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
                 assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
-                assert not isinstance(arg, MaybeComplexValue)
+                assert not isinstance(arg, ComplexValue)
                 return self._block.cos(arg)
             case Ln(expr):
                 arg = self.compile_expr(expr, subscripts)
                 arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
                 assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
-                assert not isinstance(arg, MaybeComplexValue)
+                assert not isinstance(arg, ComplexValue)
                 return self._block.ln(arg)
             case Exp(expr):
                 arg = self.compile_expr(expr, subscripts)
                 arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
                 assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
-                assert not isinstance(arg, MaybeComplexValue)
+                assert not isinstance(arg, ComplexValue)
                 return self._block.exp(arg)
 
         raise TypeError(f'unsupported expression: {expr}')
@@ -487,23 +506,29 @@ class _FunctionCompiler:
         rhs_type = self._type_cache.get_type(expr.rhs)
 
         result_value = None
+        final_type = rhs_type
+        result_type = get_peer_types(lhs_type, rhs_type)
 
         def make_lhs():
-            return self._helper.coerce(self._block, self._block.load(lhs_ptr), lhs_type, rhs_type)
+            return self._block.load(lhs_ptr)
         match expr.op:
             case '':
                 result_value = rhs_value
             case '+':
-                result_value = self._add(make_lhs(), rhs_type, rhs_value, rhs_type, rhs_type)
+                result_value = self._add(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                final_type = result_type
             case '-':
-                result_value = self._sub(make_lhs(), rhs_type, rhs_value, rhs_type, rhs_type)
+                result_value = self._sub(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                final_type = result_type
             case '*':
-                result_value = self._mul(make_lhs(), rhs_type, rhs_value, rhs_type, rhs_type)
+                result_value = self._mul(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                final_type = result_type
             case '/':
-                result_value = self._div(make_lhs(), rhs_type, rhs_value, rhs_type, rhs_type)
+                result_value = self._div(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                final_type = result_type
             case _:
                 raise ValueError(f"unknown op {expr.op}")
-        result_value = self._helper.coerce(self._block, result_value, rhs_type, lhs_type)
+        result_value = self._helper.coerce(self._block, result_value, final_type, lhs_type)
         self._store(lhs_ptr, result_value)
 
     def compile_assignments(self, exprs: list[TypedAssignExpr], tid: Value):

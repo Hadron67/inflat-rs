@@ -121,6 +121,8 @@ class CompileHelper:
                     return value
                 if target_type.bits > value_type.bits:
                     return block.float_ext(value, target_type.to_llvm_type())
+                if target_type.bits < value_type.bits:
+                    return block.float_trunc(value, target_type.to_llvm_type())
                 raise TypeError(f"cannot coerce type {value_type} to {target_type}")
             case ap.IntType(_, signed):
                 if signed:
@@ -173,17 +175,17 @@ class CompileHelper:
                     return ComplexValue(re, im)
                 if target_type.type.bits < value_type.type.bits:
                     re, im = self.expand_complex_value(block, value)
-                    re = block.float_ext(re, FloatType(target_type.type.bits))
-                    im = block.float_ext(im, FloatType(target_type.type.bits))
+                    re = block.float_trunc(re, FloatType(target_type.type.bits))
+                    im = block.float_trunc(im, FloatType(target_type.type.bits))
                     return ComplexValue(re, im)
                 return value
             case ap.FloatType():
                 assert not isinstance(value, ComplexValue)
                 assert isinstance(value_type, ap.FloatType)
                 if target_type.bits > value_type.bits:
-                    return block.float_ext(value, FloatType(value_type.bits))
+                    return block.float_ext(value, FloatType(target_type.bits))
                 if target_type.bits < value_type.bits:
-                    return block.float_trunc(value, FloatType(value_type.bits))
+                    return block.float_trunc(value, FloatType(target_type.bits))
                 return value
             case ap.IntType():
                 assert isinstance(value_type, ap.IntType)

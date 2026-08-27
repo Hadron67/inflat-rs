@@ -1305,7 +1305,7 @@ class FloatToUInt(ConversionInst[IntType]):
 class IntToFloat(ConversionInst[FloatType]):
     @override
     def head_name(self) -> str:
-        return 'fptosi'
+        return 'sitofp'
 
     def try_evaluate(self) -> Value | None:
         if isinstance(self.value, IntValue):
@@ -1315,7 +1315,7 @@ class IntToFloat(ConversionInst[FloatType]):
 class UIntToFloat(ConversionInst[FloatType]):
     @override
     def head_name(self) -> str:
-        return 'fptoui'
+        return 'uitofp'
 
     def try_evaluate(self) -> Value | None:
         if isinstance(self.value, IntValue):
