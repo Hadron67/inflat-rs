@@ -224,6 +224,99 @@ class JitWrapperTest(TestCase):
         f(a, b)
         assert_almost_equal(a, a0 + 2 * b + 3 * b + 4 * b + b ** 2 - b / 2)
 
+    def test_roll(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.roll(b, 1, axis=0)
+            a += np.roll(b, -1, axis=1)
+            a += np.roll(b, 7, axis=1)  # shift larger than the axis length
+
+        a = np.zeros((5, 6))
+        b = np.random.rand(5, 6)
+        f(a, b)
+        assert_almost_equal(a, np.roll(b, 1, axis=0) + np.roll(b, -1, axis=1) + np.roll(b, 7, axis=1))
+
+    def test_roll_multiple_axes(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.roll(b, (1, -2), axis=(0, 1))
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        assert_almost_equal(a, np.roll(b, (1, -2), axis=(0, 1)))
+
+    def test_slice(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b[1]
+            a += b[:, 2]
+            a += b[1, 3]
+
+        a = np.zeros((5, 6))
+        b = np.arange(30).reshape(5, 6).astype(float)
+        f(a, b)
+        expected = (
+            np.broadcast_to(b[1], a.shape)
+            + np.broadcast_to(b[:, 2:3], a.shape)
+            + np.full(a.shape, b[1, 3])
+        )
+        assert_almost_equal(a, expected)
+
+    def test_slice_negative_index(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b[-1, :]
+            a += b[:, -1]
+
+        a = np.zeros((5, 6))
+        b = np.arange(30).reshape(5, 6).astype(float)
+        f(a, b)
+        expected = np.broadcast_to(b[-1], a.shape) + np.broadcast_to(b[:, -1:], a.shape)
+        assert_almost_equal(a, expected)
+
+    def test_roll_and_slice_combined(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.roll(b, 1, axis=0) + np.roll(b, -1, axis=0) - 2 * b
+            a += b[0] - b[-1]
+
+        a = np.zeros((6, 8))
+        b = np.random.rand(6, 8)
+        f(a, b)
+        expected = (
+            (np.roll(b, 1, axis=0) + np.roll(b, -1, axis=0) - 2 * b)
+            + np.broadcast_to(b[0] - b[-1], a.shape)
+        )
+        assert_almost_equal(a, expected)
+
+    def test_roll_slice_errors(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f1(a, b):
+            a += np.roll(b, 1)  # axis is required
+
+        with self.assertRaises(TypeError):
+            f1(np.zeros((3, 3)), np.zeros((3, 3)))
+
+        @wrapper.jit()
+        def f2(a, b):
+            a += b[1:3]  # range slices are not supported
+
+        with self.assertRaises(TypeError):
+            f2(np.zeros((3, 3)), np.zeros((3, 3)))
+
     def test_plain_assignment(self):
         wrapper = Wrapper()
 

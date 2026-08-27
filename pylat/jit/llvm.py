@@ -300,7 +300,7 @@ class VoidValue(Value):
     def get_type(self) -> Type:
         return VoidType()
 
-@dataclass
+@dataclass(frozen=True)
 class IntValue(Value):
     value: int
     type: IntType
@@ -316,7 +316,7 @@ BOOL_TYPE = IntType(1)
 BOOL_TRUE = IntValue(1, BOOL_TYPE)
 BOOL_FALSE = IntValue(0, BOOL_TYPE)
 
-@dataclass
+@dataclass(frozen=True)
 class FloatValue(Value):
     value: float
     type: FloatType

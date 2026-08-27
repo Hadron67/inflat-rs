@@ -27,7 +27,9 @@ from ..expr import (
     Ln,
     Power,
     Rational,
+    Roll,
     Sin,
+    Slice,
     Symbol,
     Times,
     symbol,
@@ -153,6 +155,54 @@ class _Probe:
 
     def __setitem__(self, key, value):
         self._trace.record(self, '', value)
+
+    # --- indexing and slicing -------------------------------------------
+    def __getitem__(self, key):
+        expr = self._expr
+        if not isinstance(key, tuple):
+            key = (key,)
+        fixed: list[tuple[int, int]] = []
+        for axis, k in enumerate(key):
+            if isinstance(k, slice):
+                if k.start is None and k.stop is None and k.step is None:
+                    continue
+                raise TypeError(
+                    "range slices are not supported in jitted functions; "
+                    "use an integer index or ':'"
+                )
+            if k is Ellipsis:
+                raise TypeError("'...' is not supported in jitted functions; use explicit ':'")
+            if isinstance(k, (int, np.integer)):
+                fixed.append((axis, int(k)))
+                continue
+            raise TypeError(f"unsupported slice index {k!r}")
+        # fix the highest axis first (innermost), so that lower axes stay valid
+        # after the higher ones have been removed
+        for axis, index in reversed(fixed):
+            expr = Slice(expr, axis, index)
+        return self._new(expr)
+
+    # --- numpy functions (np.roll, ...) ---------------------------------
+    def __array_function__(self, func, types, args, kwargs):
+        if func is np.roll:
+            return self._np_roll(*args, **kwargs)
+        return NotImplemented
+
+    def _np_roll(self, array, shift, axis=None):
+        if not isinstance(array, _Probe):
+            raise TypeError("np.roll requires a traced array in jitted functions")
+        if isinstance(shift, _Probe) or isinstance(axis, _Probe):
+            raise TypeError("np.roll shift and axis must be constants in jitted functions")
+        if axis is None:
+            raise TypeError("np.roll requires an explicit axis in jitted functions")
+        axes = axis if isinstance(axis, (tuple, list)) else (axis,)
+        shifts = shift if isinstance(shift, (tuple, list)) else (shift,) * len(axes)
+        if len(axes) != len(shifts):
+            raise TypeError("np.roll shift and axis must have the same length")
+        expr = array._expr
+        for ax, sh in zip(axes, shifts):
+            expr = Roll(expr, int(ax), int(sh))
+        return self._new(expr)
 
     # --- numpy ufuncs (np.sin, np.cos, np.exp, np.log, np.sqrt, ...) -----
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):

@@ -391,19 +391,50 @@ class _FunctionCompiler:
                 assert index < len(sym.shape), "SymbolShape index out of bounds"
                 return self._args[sym.shape[index]]
             case Roll():
-                assert not self._standard_layout, "cannot compile Roll in standard layout mode"
+                assert self._standard_layout is StandardLayoutMode.NONE, "cannot compile Roll in standard layout mode"
                 expr_shape = self._type_cache.get_shape(expr.expr)
                 assert expr_shape is not None, "cannot compile unspecified shape"
                 length = self.compile_non_complex_expr(expr_shape[expr.axis], ())
                 length_type = self._type_cache.get_type(expr_shape[expr.axis])
                 assert isinstance(length_type, ap.IntType), "length must be an integer"
-                new_index = subscripts[expr.axis]
-                new_index = self._block.add(new_index, IntValue(-expr.amount, h.llvm_index_type))
+                # new index = (subscript - amount) mod length; add enough multiples
+                # of the length so that the unsigned remainder is well-defined
+                amount = expr.amount
+                abs_amount = IntValue(abs(amount), h.llvm_index_type)
+                # ceil(abs_amount / length)
+                multiples = self._block.div(
+                    self._block.add(abs_amount, self._block.sub(length, IntValue(1, h.llvm_index_type))),
+                    length,
+                    False,
+                )
+                new_index = self._block.add(
+                    self._block.add(subscripts[expr.axis], IntValue(-amount, h.llvm_index_type)),
+                    self._block.mul(multiples, length),
+                )
                 new_index = self._block.rem(new_index, length, False)
                 subscripts = subscripts[:expr.axis] + (new_index,) + subscripts[expr.axis + 1:]
                 return self.compile_expr(expr.expr, subscripts)
             case Slice():
-                return self.compile_expr(expr.expr, subscripts[:expr.axis] + (IntValue(expr.index, h.llvm_index_type),) + subscripts[expr.axis + 1:])
+                if expr.index < 0:
+                    # normalize negative indices: index mod length
+                    expr_shape = self._type_cache.get_shape(expr.expr)
+                    assert expr_shape is not None, "cannot compile unspecified shape"
+                    length = self.compile_non_complex_expr(expr_shape[expr.axis], ())
+                    abs_index = IntValue(-expr.index, h.llvm_index_type)
+                    # ceil(abs_index / length)
+                    multiples = self._block.div(
+                        self._block.add(abs_index, self._block.sub(length, IntValue(1, h.llvm_index_type))),
+                        length,
+                        False,
+                    )
+                    index = self._block.rem(
+                        self._block.add(IntValue(expr.index, h.llvm_index_type), self._block.mul(multiples, length)),
+                        length,
+                        False,
+                    )
+                else:
+                    index = IntValue(expr.index, h.llvm_index_type)
+                return self.compile_expr(expr.expr, subscripts[:expr.axis] + (index,) + subscripts[expr.axis + 1:])
             case Plus(children):
                 ret_type = self._type_cache.get_type(children[0])
                 ret = self.compile_expr(children[0], subscripts)
