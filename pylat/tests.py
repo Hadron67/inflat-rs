@@ -271,6 +271,89 @@ class JitWrapperTest(TestCase):
         f(a, b)
         assert_almost_equal(a, a0 + b * coeff)
 
+    def test_sub_function_calls(self):
+        # plain helper functions receive probes and return probe expressions
+        wrapper = Wrapper()
+
+        def bar(x):
+            return x * 2
+
+        @wrapper.jit()
+        def foo(a, b):
+            a += bar(b)
+
+        a = np.random.rand(4, 4)
+        b = np.random.rand(4, 4)
+        a0 = a.copy()
+        foo(a, b)
+        assert_almost_equal(a, a0 + b * 2)
+
+    def test_nested_sub_function_calls(self):
+        # sub-functions may call further sub-functions and take several arguments
+        wrapper = Wrapper()
+
+        def baz(x, y):
+            return x * y
+
+        def bar(x, k):
+            return baz(x, x) + k
+
+        @wrapper.jit()
+        def foo(a, b):
+            a += bar(b, 1.5)
+
+        a = np.random.rand(4, 4)
+        b = np.random.rand(4, 4)
+        a0 = a.copy()
+        foo(a, b)
+        assert_almost_equal(a, a0 + b * b + 1.5)
+
+    def test_sub_function_with_numpy_functions(self):
+        wrapper = Wrapper()
+
+        def bar(x):
+            return np.sin(x) + np.exp(x)
+
+        @wrapper.jit()
+        def foo(a, b):
+            a += bar(b)
+
+        a = np.random.rand(4, 4) + 1
+        b = np.random.rand(4, 4) + 0.5
+        a0 = a.copy()
+        foo(a, b)
+        assert_almost_equal(a, a0 + np.sin(b) + np.exp(b))
+
+    def test_sub_function_lambda(self):
+        wrapper = Wrapper()
+        triple = lambda x: x * 3
+
+        @wrapper.jit()
+        def foo(a, b):
+            a += triple(b)
+
+        a = np.random.rand(4, 4)
+        b = np.random.rand(4, 4)
+        a0 = a.copy()
+        foo(a, b)
+        assert_almost_equal(a, a0 + b * 3)
+
+    def test_sub_function_returning_constant(self):
+        wrapper = Wrapper()
+
+        def bar():
+            return 2.5
+
+        @wrapper.jit()
+        def foo(a, b):
+            a += b * bar()
+
+        a = np.random.rand(4, 4)
+        b = np.random.rand(4, 4)
+        a0 = a.copy()
+        foo(a, b)
+        assert_almost_equal(a, a0 + b * 2.5)
+
     def test_unused_parameters(self):
         wrapper = Wrapper()
 
@@ -327,5 +410,20 @@ class JitWrapperTest(TestCase):
         f6 = _jitted_from_source(wrapper, 'def f6(a, b):\n    tmp = a + b\n    tmp += a\n', 'f6')
         with self.assertRaises(TypeError):
             f6(np.zeros((3, 3)), np.zeros((3, 3)))
+
+    def test_jitted_function_cannot_be_nested(self):
+        # helper sub-functions must be plain functions, not jitted ones
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def bar(x):
+            x += 1
+
+        @wrapper.jit()
+        def foo(a):
+            bar(a)
+
+        with self.assertRaises(TypeError):
+            foo(np.zeros((3, 3)))
 
 all_tests = [TestExpr, JitTest, JitWrapperTest]

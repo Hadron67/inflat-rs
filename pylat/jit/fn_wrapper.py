@@ -286,6 +286,11 @@ class _JittedFunction:
         return self._assigns, self._used_symbols
 
     def _infer_arg_type(self, value) -> tuple[LowerType, int]:
+        if isinstance(value, _Probe):
+            raise TypeError(
+                f"{self.__name__}() cannot be called from within another jitted function; "
+                "use a plain helper function instead"
+            )
         if isinstance(value, np.ndarray):
             return LowerType.from_numpy_dtype(str(value.dtype)), value.ndim
         if isinstance(value, (np.floating, float)):
