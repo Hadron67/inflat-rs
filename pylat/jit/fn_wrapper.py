@@ -6,14 +6,15 @@ numpy arrays.  Compilation traces the function by calling it once with ``_Probe`
 objects: every arithmetic operation builds a :class:`pylat.expr` expression tree
 and every in-place update (``a += ...`` or ``a[:] = ...``) is recorded as an
 :class:`pylat.expr.AssignExpr`.  The recorded assignments are then compiled with
-:class:`pylat.jit.compile.JitCompiler` and cached per (dtype, rank) signature of
-the arguments.  Because the function is traced by calling it, it never needs to
-be source-inspectable: closures, lambdas and functions defined in interactive
-sessions all work.
+:class:`pylat.jit.compile.JitCompiler` and cached per (dtype, rank) signature,
+array layout and compile-time argument values.  Because the function is traced by
+calling it, it never needs to be source-inspectable: closures, lambdas and
+functions defined in interactive sessions all work.
 """
 
 import inspect
 from collections.abc import Callable, Mapping
+from typing import Any
 
 import numpy as np
 from llvmlite import binding as llvm
@@ -325,37 +326,38 @@ def _infer_params(fn: Callable) -> tuple[str, ...]:
 class _JittedFunction:
     """The callable produced by ``Wrapper.jit``."""
 
-    def __init__(self, wrapper: 'Wrapper', fn: Callable, params: tuple[str, ...]) -> None:
+    def __init__(self, wrapper: 'Wrapper', fn: Callable, params: tuple[str, ...], comptime_args: set[str | int] | None = None) -> None:
         self._wrapper = wrapper
         self._fn = fn
         self._params = params
         self._names = {name: symbol(name) for name in params}
-        self._assigns: list[AssignExpr] | None = None
-        self._used_symbols: set[Symbol] | None = None
-        self._cache: dict[tuple[tuple[tuple[LowerType, int], ...], StandardLayoutMode], CompiledWrapper] = {}
+        self._comptime_args = comptime_args
+        self._cache: dict[
+            tuple[tuple[tuple[LowerType, int], ...], StandardLayoutMode, tuple[tuple[str, Any], ...]],
+            tuple[CompiledWrapper, set[Symbol]],
+        ] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
-    def _trace(self) -> tuple[list[AssignExpr], set[Symbol]]:
-        if self._assigns is None:
-            trace = _Trace(self._names)
-            probes = [trace.make_param_probe(name) for name in self._params]
-            result = self._fn(*probes)
-            if result is not None:
-                raise TypeError(
-                    f"{self.__name__}() must not return values; mutate the input arrays in place "
-                    "(e.g. with += or a[:] = ...)"
-                )
-            if len(trace.assigns) == 0:
-                raise TypeError(f"{self.__name__}() must contain at least one in-place assignment")
-            used: set[Symbol] = set()
-            for assign in trace.assigns:
-                used |= _collect_symbols(assign.lhs)
-                used |= _collect_symbols(assign.rhs)
-            self._assigns = trace.assigns
-            self._used_symbols = used
-        assert self._assigns is not None and self._used_symbols is not None
-        return self._assigns, self._used_symbols
+    def _trace(self, comptime: dict[str, Any]) -> tuple[list[AssignExpr], set[Symbol]]:
+        # compile-time parameters are traced with their constant value, so they are
+        # baked into the expression trees (which also enables compile-time control
+        # flow); the other parameters are traced with probes
+        trace = _Trace(self._names)
+        args = [comptime.get(name, trace.make_param_probe(name)) for name in self._params]
+        result = self._fn(*args)
+        if result is not None:
+            raise TypeError(
+                f"{self.__name__}() must not return values; mutate the input arrays in place "
+                "(e.g. with += or a[:] = ...)"
+            )
+        if len(trace.assigns) == 0:
+            raise TypeError(f"{self.__name__}() must contain at least one in-place assignment")
+        used: set[Symbol] = set()
+        for assign in trace.assigns:
+            used |= _collect_symbols(assign.lhs)
+            used |= _collect_symbols(assign.rhs)
+        return trace.assigns, used
 
     def _infer_arg_type(self, value) -> tuple[LowerType, int]:
         if isinstance(value, _Probe):
@@ -373,10 +375,44 @@ class _JittedFunction:
             return self._wrapper._index_type, 0
         raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
-    def _compile(self, signature: tuple[tuple[LowerType, int], ...], layout: StandardLayoutMode) -> CompiledWrapper:
-        assigns, _ = self._trace()
+    def _is_comptime_arg(self, name: str, index: int, value) -> bool:
+        """Whether an argument is a compile-time constant: either explicitly declared
+        in ``comptime_args`` (by name or position), or an unsupported runtime type
+        that is hashable (e.g. tuples used with ``np.roll``)."""
+        if self._comptime_args is not None and (name in self._comptime_args or index in self._comptime_args):
+            return True
+        if isinstance(value, _Probe):
+            # nested jitted calls are rejected by _infer_arg_type with a clear message
+            return False
+        try:
+            self._infer_arg_type(value)
+        except TypeError:
+            try:
+                hash(value)
+            except TypeError as e:
+                raise TypeError(
+                    f"unsupported argument type: {type(value).__name__}; pass an array, a "
+                    "scalar, or a hashable compile-time constant"
+                ) from e
+            return True
+        return False
+
+    def _classify_args(self, args) -> tuple[tuple[tuple[LowerType, int], ...], dict[str, Any]]:
+        """Split the arguments into a runtime signature and a map of compile-time
+        parameter names to their constant values."""
+        signature: list[tuple[LowerType, int]] = []
+        comptime: dict[str, Any] = {}
+        for index, (name, value) in enumerate(zip(self._params, args)):
+            if self._is_comptime_arg(name, index, value):
+                comptime[name] = value
+            else:
+                signature.append(self._infer_arg_type(value))
+        return tuple(signature), comptime
+
+    def _compile(self, comptime: dict[str, Any], signature: tuple[tuple[LowerType, int], ...], layout: StandardLayoutMode, assigns: list[AssignExpr]) -> CompiledWrapper:
         context = TypeContext()
-        for name, (lower_type, dim) in zip(self._params, signature):
+        runtime_names = [name for name in self._params if name not in comptime]
+        for name, (lower_type, dim) in zip(runtime_names, signature):
             context.set_symbol(self._names[name], lower_type, dim)
         compiler = JitCompiler(
             self._wrapper._backend,
@@ -392,15 +428,23 @@ class _JittedFunction:
             raise TypeError(
                 f"{self.__name__}() takes {len(self._params)} positional arguments but {len(args)} were given"
             )
-        signature = tuple(self._infer_arg_type(arg) for arg in args)
-        _, used = self._trace()
-        used_args = [value for name, value in zip(self._params, args) if self._names[name] in used]
-        layout = _determine_layout(used_args)
-        key = (signature, layout)
-        compiled = self._cache.get(key)
-        if compiled is None:
-            compiled = self._compile(signature, layout)
-            self._cache[key] = compiled
+        signature, comptime = self._classify_args(args)
+        comptime_key = tuple(comptime.items())
+        try:
+            hash(comptime_key)
+        except TypeError as e:
+            raise TypeError(
+                "comptime arguments must be hashable (they are part of the JIT cache key)"
+            ) from e
+        layout = _determine_layout(args)
+        key = (signature, layout, comptime_key)
+        entry = self._cache.get(key)
+        if entry is None:
+            assigns, used = self._trace(comptime)
+            compiled = self._compile(comptime, signature, layout, assigns)
+            entry = (compiled, used)
+            self._cache[key] = entry
+        compiled, used = entry
         arg_map = {self._names[n]: v for n, v in zip(self._params, args) if self._names[n] in used}
         return compiled.call(arg_map)
 
@@ -408,7 +452,8 @@ class _JittedFunction:
         """Print the LLVM IR of the most recently compiled kernel."""
         if len(self._cache) == 0:
             return []
-        return list(self._cache.values())[-1].print_all()
+        compiled, _ = list(self._cache.values())[-1]
+        return compiled.print_all()
 
     def __repr__(self) -> str:
         return f"<jitted {self.__name__}>"
@@ -445,10 +490,16 @@ class Wrapper:
         self._real_type = real_type if real_type is not None else FloatType(64)
         self._index_type = index_type if index_type is not None else IntType(64, False)
 
-    def jit(self, fn: Callable | None = None):
-        """Decorator that compiles a function of element-wise array assignments."""
+    def jit(self, fn: Callable | None = None, comptime_args: set[str | int] | None = None):
+        """Decorator that compiles a function of element-wise array assignments.
+
+        ``comptime_args`` lists parameters whose values are baked into the kernel as
+        compile-time constants instead of being passed as runtime scalars: match them
+        by name (``str``) or by position (``int``).  Arguments that cannot be passed
+        as runtime values and are hashable are also treated as compile-time.
+        """
         def decorator(f: Callable) -> _JittedFunction:
-            return _JittedFunction(self, f, _infer_params(f))
+            return _JittedFunction(self, f, _infer_params(f), comptime_args)
         if fn is not None:
             return decorator(fn)
         return decorator

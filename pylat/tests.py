@@ -476,6 +476,109 @@ class JitWrapperTest(TestCase):
         f(a, b, 1.0)
         self.assertEqual(len(f._cache), 2)
 
+    def test_comptime_args_by_name(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit(comptime_args={'dt'})
+        def f(a, b, dt):
+            a += b * dt
+
+        np.random.seed(20)
+        b = np.random.rand(5, 6)
+        a = np.zeros((5, 6))
+        f(a, b, 2.0)
+        assert_almost_equal(a, b * 2.0)
+        # a different compile-time value compiles a separate kernel
+        a = np.zeros((5, 6))
+        f(a, b, 3.0)
+        assert_almost_equal(a, b * 3.0)
+        # the same value reuses the cached kernel
+        a = np.zeros((5, 6))
+        f(a, b, 2.0)
+        assert_almost_equal(a, b * 2.0)
+        self.assertEqual(len(f._cache), 2)
+
+    def test_comptime_args_by_position(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit(comptime_args={1})
+        def f(x, n):
+            x *= n
+
+        x = np.ones((4, 4))
+        f(x, 3)
+        assert_almost_equal(x, np.full((4, 4), 3))
+        x = np.ones((4, 4))
+        f(x, 5)
+        assert_almost_equal(x, np.full((4, 4), 5))
+
+    def test_comptime_slice_index(self):
+        # slice indices that used to require literals can be comptime parameters
+        wrapper = Wrapper()
+
+        @wrapper.jit(comptime_args={'idx'})
+        def f(a, b, idx):
+            a += b[idx]
+
+        a = np.zeros(6)
+        b = np.arange(30).reshape(5, 6).astype(float)
+        f(a, b, 1)
+        assert_almost_equal(a, b[1])
+        a = np.zeros(6)
+        f(a, b, -1)
+        assert_almost_equal(a, b[-1])
+        self.assertEqual(len(f._cache), 2)
+
+    def test_comptime_control_flow(self):
+        # comptime values enable compile-time conditionals: only the taken branch
+        # is traced and compiled
+        wrapper = Wrapper()
+
+        @wrapper.jit(comptime_args={'mode'})
+        def f(a, b, c, mode):
+            if mode == 1:
+                a += b
+            else:
+                a += c
+
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        c = np.random.rand(5)
+        f(a, b, c, 1)
+        assert_almost_equal(a, b)
+        a = np.zeros(5)
+        f(a, b, c, 2)
+        assert_almost_equal(a, c)
+        self.assertEqual(len(f._cache), 2)
+
+    def test_comptime_unsupported_hashable(self):
+        # arguments that cannot be passed as runtime scalars but are hashable are
+        # baked as compile-time constants (e.g. tuples for np.roll)
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, shift):
+            a += np.roll(b, shift, axis=0)
+
+        a = np.zeros((5, 6))
+        b = np.random.rand(5, 6)
+        f(a, b, (1,))
+        assert_almost_equal(a, np.roll(b, 1, axis=0))
+        a = np.zeros((5, 6))
+        f(a, b, (2,))
+        assert_almost_equal(a, np.roll(b, 2, axis=0))
+        self.assertEqual(len(f._cache), 2)
+
+    def test_comptime_unhashable_error(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, bad):
+            a += 1
+
+        with self.assertRaises(TypeError):
+            f(np.zeros((3, 3)), [1, 2])
+
     def test_trace_errors(self):
         wrapper = Wrapper()
         # tracing happens lazily on the first call; errors surface there
@@ -530,7 +633,7 @@ class SimdLayoutTests(TestCase):
 
     @staticmethod
     def _last_compiled(f) -> CompiledWrapper:
-        return list(f._cache.values())[-1]
+        return list(f._cache.values())[-1][0]
 
     def test_row_major_uses_flat_kernel(self):
         wrapper = Wrapper()
@@ -761,7 +864,7 @@ class SimdLayoutTests(TestCase):
         f(a, b)
         self.assertEqual(len(f._cache), 2)
         self.assertEqual(
-            {w.standard_layout for w in f._cache.values()},
+            {w[0].standard_layout for w in f._cache.values()},
             {StandardLayoutMode.ROW_MAJOR, StandardLayoutMode.COLUMN_MAJOR},
         )
 
