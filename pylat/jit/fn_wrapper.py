@@ -2,15 +2,17 @@
 
 The ``Wrapper`` class turns a plain Python function whose body consists of
 element-wise array assignments into a JIT-compiled kernel that runs in-place on
-numpy arrays.  The assignments are parsed from the function source with the
-``ast`` module and translated into :class:`pylat.expr.AssignExpr`, which is then
-compiled with :class:`pylat.jit.compile.JitCompiler` on the first call.  The
-result is cached per (dtype, rank) signature of the arguments.
+numpy arrays.  Compilation traces the function by calling it once with ``_Probe``
+objects: every arithmetic operation builds a :class:`pylat.expr` expression tree
+and every in-place update (``a += ...`` or ``a[:] = ...``) is recorded as an
+:class:`pylat.expr.AssignExpr`.  The recorded assignments are then compiled with
+:class:`pylat.jit.compile.JitCompiler` and cached per (dtype, rank) signature of
+the arguments.  Because the function is traced by calling it, it never needs to
+be source-inspectable: closures, lambdas and functions defined in interactive
+sessions all work.
 """
 
-import ast
 import inspect
-import textwrap
 from collections.abc import Callable, Mapping
 
 import numpy as np
@@ -26,6 +28,7 @@ from ..expr import (
     Power,
     Rational,
     Sin,
+    Symbol,
     Times,
     symbol,
 )
@@ -34,146 +37,253 @@ from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler
 from .openmp import OpenMPBackend
 
-# augmented assignment operators supported by _compile_assignment
-_OP_MAP = {
-    ast.Add: '+',
-    ast.Sub: '-',
-    ast.Mult: '*',
-    ast.Div: '/',
-}
-
 _FUNC_MAP = {
     'sin': Sin,
     'cos': Cos,
     'exp': Exp,
-    'ln': Ln,
     'log': Ln,
 }
 
-
-class _ExprTranslator:
-    """Translates a Python expression AST into a pylat ``Expr``."""
-
-    def __init__(self, names: Mapping[str, Expr]) -> None:
-        self._names = names
-        self.used_names: set[str] = set()
-
-    def _call_name(self, func: ast.AST) -> str:
-        match func:
-            case ast.Name(id):
-                return id
-            case ast.Attribute(ast.Name(id), attr):
-                return f'{id}.{attr}'
-        raise TypeError(f"unsupported callable {type(func).__name__}")
-
-    def translate(self, node: ast.AST) -> Expr:
-        match node:
-            case ast.Name(id):
-                if id not in self._names:
-                    raise TypeError(f"undefined name {id!r}; only function parameters can be referenced")
-                self.used_names.add(id)
-                return self._names[id]
-            case ast.Constant(value):
-                if isinstance(value, bool):
-                    raise TypeError(f"unsupported constant {value!r}")
-                if isinstance(value, (int, float, complex)):
-                    return Expr.as_expr(value)
-                raise TypeError(f"unsupported constant {value!r}")
-            case ast.BinOp(left, op, right):
-                lhs = self.translate(left)
-                rhs = self.translate(right)
-                match op:
-                    case ast.Add():
-                        return lhs + rhs
-                    case ast.Sub():
-                        return lhs - rhs
-                    case ast.Mult():
-                        return lhs * rhs
-                    case ast.Div():
-                        return lhs / rhs
-                    case ast.Pow():
-                        return lhs ** rhs
-                raise TypeError(f"unsupported binary operator {type(op).__name__}")
-            case ast.UnaryOp(op, operand):
-                value = self.translate(operand)
-                match op:
-                    case ast.USub():
-                        return Times((Int(-1), value))
-                    case ast.UAdd():
-                        return value
-                raise TypeError(f"unsupported unary operator {type(op).__name__}")
-            case ast.Call(func, args, keywords):
-                if len(args) != 1 or len(keywords) > 0:
-                    raise TypeError("only single-argument function calls are supported")
-                name = self._call_name(func).split('.')[-1]
-                if name == 'sqrt':
-                    return Power(self.translate(args[0]), Rational(1, 2))
-                if name in _FUNC_MAP:
-                    return _FUNC_MAP[name](self.translate(args[0]))
-                raise TypeError(f"unsupported function call {name!r}")
-            case _:
-                raise TypeError(f"unsupported expression node {type(node).__name__}")
+_BIN_UFUNCS = {
+    'add': lambda l, r: l + r,
+    'subtract': lambda l, r: l - r,
+    'multiply': lambda l, r: l * r,
+    'divide': lambda l, r: l / r,
+    'true_divide': lambda l, r: l / r,
+    'power': lambda l, r: l ** r,
+}
 
 
-def _parse_fn(fn: Callable) -> tuple[tuple[str, ...], set[str], list[AssignExpr]]:
+def _as_expr(value) -> Expr:
+    """Convert a probe or a Python/numpy constant into an ``Expr``."""
+    if isinstance(value, _Probe):
+        return value._expr
+    if isinstance(value, np.integer):
+        value = int(value)
+    elif isinstance(value, np.floating):
+        value = float(value)
     try:
-        source = inspect.getsource(fn)
-    except (OSError, TypeError) as e:
-        raise TypeError(
-            f"cannot inspect the source of {fn!r}; the function must be defined in a module or a file"
-        ) from e
-    tree = ast.parse(textwrap.dedent(source))
-    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
-        raise TypeError(f"expected a function definition, got {type(tree.body[0]).__name__}")
-    node = tree.body[0]
-    params = tuple(a.arg for a in node.args.args)
-    if len(set(params)) != len(params):
-        raise TypeError("duplicate parameter names are not allowed")
-    names = {name: symbol(name) for name in params}
-    translator = _ExprTranslator(names)
+        return Expr.as_expr(value)
+    except ValueError as e:
+        raise TypeError(f"unsupported operand of type {type(value).__name__} in jitted function") from e
 
-    assigns: list[AssignExpr] = []
-    for stmt in node.body:
-        # skip the docstring
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
-            continue
-        if isinstance(stmt, ast.Assign):
-            if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
-                raise TypeError("assignment target must be a single parameter name")
-            lhs = stmt.targets[0].id
-            op = ''
-        elif isinstance(stmt, ast.AugAssign):
-            if not isinstance(stmt.target, ast.Name):
-                raise TypeError("augmented assignment target must be a parameter name")
-            lhs = stmt.target.id
-            op = _OP_MAP.get(type(stmt.op))
-            if op is None:
-                raise TypeError(f"unsupported augmented assignment operator {type(stmt.op).__name__}")
+
+class _Trace:
+    """Records the assignments performed while the function is being traced."""
+
+    def __init__(self, names: Mapping[str, Symbol]) -> None:
+        self._names = names
+        self.assigns: list[AssignExpr] = []
+
+    def make_param_probe(self, name: str) -> '_Probe':
+        return _Probe(self, self._names[name])
+
+    def record(self, target: '_Probe', op: str, value) -> None:
+        if not isinstance(target._expr, Symbol):
+            raise TypeError("cannot update an intermediate expression; assign to a parameter instead")
+        self.assigns.append(AssignExpr(target._expr, _as_expr(value), op))
+
+
+class _Probe:
+    """Records an element-wise operation by building an ``Expr`` tree."""
+
+    __slots__ = ('_expr', '_trace')
+
+    def __init__(self, trace: _Trace, expr: Expr) -> None:
+        self._trace = trace
+        self._expr = expr
+
+    def _new(self, expr: Expr) -> '_Probe':
+        return _Probe(self._trace, expr)
+
+    # --- binary arithmetic ------------------------------------------------
+    def __add__(self, other):
+        return self._new(self._expr + _as_expr(other))
+
+    def __radd__(self, other):
+        return self._new(_as_expr(other) + self._expr)
+
+    def __sub__(self, other):
+        return self._new(self._expr - _as_expr(other))
+
+    def __rsub__(self, other):
+        return self._new(_as_expr(other) - self._expr)
+
+    def __mul__(self, other):
+        return self._new(self._expr * _as_expr(other))
+
+    def __rmul__(self, other):
+        return self._new(_as_expr(other) * self._expr)
+
+    def __truediv__(self, other):
+        return self._new(self._expr / _as_expr(other))
+
+    def __rtruediv__(self, other):
+        return self._new(_as_expr(other) / self._expr)
+
+    def __pow__(self, other):
+        return self._new(self._expr ** _as_expr(other))
+
+    def __rpow__(self, other):
+        return self._new(_as_expr(other) ** self._expr)
+
+    # --- unary arithmetic -------------------------------------------------
+    def __neg__(self):
+        return self._new(Times((Int(-1), self._expr)))
+
+    def __pos__(self):
+        return self
+
+    # --- in-place updates (recorded as assignments) ----------------------
+    def __iadd__(self, other):
+        self._trace.record(self, '+', other)
+        return self
+
+    def __isub__(self, other):
+        self._trace.record(self, '-', other)
+        return self
+
+    def __imul__(self, other):
+        self._trace.record(self, '*', other)
+        return self
+
+    def __itruediv__(self, other):
+        self._trace.record(self, '/', other)
+        return self
+
+    def __setitem__(self, key, value):
+        self._trace.record(self, '', value)
+
+    # --- numpy ufuncs (np.sin, np.cos, np.exp, np.log, np.sqrt, ...) -----
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if method != '__call__' or len(kwargs) > 0:
+            return NotImplemented
+        name = ufunc.__name__
+        if len(inputs) == 1:
+            arg = inputs[0]
+            if not isinstance(arg, _Probe):
+                return NotImplemented
+            if name == 'negative':
+                return self._new(Times((Int(-1), arg._expr)))
+            if name == 'positive':
+                return self._new(arg._expr)
+            if name == 'sqrt':
+                return self._new(Power(arg._expr, Rational(1, 2)))
+            fn = _FUNC_MAP.get(name)
+            if fn is None:
+                raise TypeError(f"unsupported numpy function {name!r} in jitted function")
+            return self._new(fn(arg._expr))
+        if len(inputs) == 2:
+            # e.g. np.float64(3) * probe: numpy dispatches the operation here
+            lhs, rhs = inputs
+            if not (isinstance(lhs, _Probe) or isinstance(rhs, _Probe)):
+                return NotImplemented
+            l = lhs._expr if isinstance(lhs, _Probe) else _as_expr(lhs)
+            r = rhs._expr if isinstance(rhs, _Probe) else _as_expr(rhs)
+            fn = _BIN_UFUNCS.get(name)
+            if fn is None:
+                raise TypeError(f"unsupported numpy function {name!r} in jitted function")
+            return self._new(fn(l, r))
+        return NotImplemented
+
+    # --- operations that make no sense on a traced value ------------------
+    def __bool__(self) -> bool:
+        raise TypeError("branching on a traced value is not supported in jitted functions")
+
+    def __float__(self) -> float:
+        raise TypeError("converting a traced value to a Python float is not supported in jitted functions")
+
+    def __int__(self) -> int:
+        raise TypeError("converting a traced value to a Python int is not supported in jitted functions")
+
+    def __complex__(self) -> complex:
+        raise TypeError("converting a traced value to a Python complex is not supported in jitted functions")
+
+    def __index__(self) -> int:
+        raise TypeError("using a traced value as an index is not supported in jitted functions")
+
+    def __eq__(self, other) -> bool:
+        raise TypeError("comparisons are not supported in jitted functions")
+
+    def __ne__(self, other) -> bool:
+        raise TypeError("comparisons are not supported in jitted functions")
+
+    def __lt__(self, other) -> bool:
+        raise TypeError("comparisons are not supported in jitted functions")
+
+    def __le__(self, other) -> bool:
+        raise TypeError("comparisons are not supported in jitted functions")
+
+    def __gt__(self, other) -> bool:
+        raise TypeError("comparisons are not supported in jitted functions")
+
+    def __ge__(self, other) -> bool:
+        raise TypeError("comparisons are not supported in jitted functions")
+
+
+def _collect_symbols(expr: Expr) -> set[Symbol]:
+    used: set[Symbol] = set()
+    todo = [expr]
+    while todo:
+        elem = todo.pop()
+        if isinstance(elem, Symbol):
+            used.add(elem)
         else:
-            raise TypeError(f"unsupported statement {type(stmt).__name__}; only assignments are allowed")
-        if lhs not in names:
-            raise TypeError(f"unknown parameter {lhs!r}")
-        translator.used_names.add(lhs)
-        rhs = translator.translate(stmt.value)
-        assigns.append(AssignExpr(names[lhs], rhs, op))
+            todo.extend(elem.subexpressions())
+    return used
 
-    if len(assigns) == 0:
-        raise TypeError("the function body contains no assignments")
-    return params, translator.used_names, assigns
+
+def _infer_params(fn: Callable) -> tuple[str, ...]:
+    try:
+        signature = inspect.signature(fn)
+    except ValueError as e:
+        raise TypeError(f"cannot determine the signature of {fn!r}") from e
+    params: list[str] = []
+    for name, p in signature.parameters.items():
+        if p.kind is p.VAR_POSITIONAL or p.kind is p.VAR_KEYWORD:
+            raise TypeError(f"variable-length parameter {name!r} is not supported")
+        if p.kind is p.KEYWORD_ONLY:
+            raise TypeError(f"keyword-only parameter {name!r} is not supported")
+        if p.default is not inspect.Parameter.empty:
+            raise TypeError(f"default value on parameter {name!r} is not supported")
+        params.append(name)
+    return tuple(params)
 
 
 class _JittedFunction:
     """The callable produced by ``Wrapper.jit``."""
 
-    def __init__(self, wrapper: 'Wrapper', fn: Callable, assigns: list[AssignExpr], params: tuple[str, ...], used_names: set[str]) -> None:
+    def __init__(self, wrapper: 'Wrapper', fn: Callable, params: tuple[str, ...]) -> None:
         self._wrapper = wrapper
-        self._assigns = assigns
+        self._fn = fn
         self._params = params
-        self._used_names = used_names
         self._names = {name: symbol(name) for name in params}
+        self._assigns: list[AssignExpr] | None = None
+        self._used_symbols: set[Symbol] | None = None
         self._cache: dict[tuple[tuple[LowerType, int], ...], CompiledWrapper] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
+
+    def _trace(self) -> tuple[list[AssignExpr], set[Symbol]]:
+        if self._assigns is None:
+            trace = _Trace(self._names)
+            probes = [trace.make_param_probe(name) for name in self._params]
+            result = self._fn(*probes)
+            if result is not None:
+                raise TypeError(
+                    f"{self.__name__}() must not return values; mutate the input arrays in place "
+                    "(e.g. with += or a[:] = ...)"
+                )
+            if len(trace.assigns) == 0:
+                raise TypeError(f"{self.__name__}() must contain at least one in-place assignment")
+            used: set[Symbol] = set()
+            for assign in trace.assigns:
+                used |= _collect_symbols(assign.lhs)
+                used |= _collect_symbols(assign.rhs)
+            self._assigns = trace.assigns
+            self._used_symbols = used
+        assert self._assigns is not None and self._used_symbols is not None
+        return self._assigns, self._used_symbols
 
     def _infer_arg_type(self, value) -> tuple[LowerType, int]:
         if isinstance(value, np.ndarray):
@@ -187,6 +297,7 @@ class _JittedFunction:
         raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
     def _compile(self, signature: tuple[tuple[LowerType, int], ...]) -> CompiledWrapper:
+        assigns, _ = self._trace()
         context = TypeContext()
         for name, (lower_type, dim) in zip(self._params, signature):
             context.set_symbol(self._names[name], lower_type, dim)
@@ -195,7 +306,7 @@ class _JittedFunction:
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
         )
-        return compiler.compile_assignments(self._assigns, context)
+        return compiler.compile_assignments(assigns, context)
 
     def __call__(self, *args, **kwargs):
         if len(kwargs) > 0:
@@ -209,7 +320,8 @@ class _JittedFunction:
         if compiled is None:
             compiled = self._compile(signature)
             self._cache[signature] = compiled
-        arg_map = {self._names[n]: v for n, v in zip(self._params, args) if n in self._used_names}
+        _, used = self._trace()
+        arg_map = {self._names[n]: v for n, v in zip(self._params, args) if self._names[n] in used}
         return compiled.call(arg_map)
 
     def print_all(self):
@@ -256,8 +368,7 @@ class Wrapper:
     def jit(self, fn: Callable | None = None):
         """Decorator that compiles a function of element-wise array assignments."""
         def decorator(f: Callable) -> _JittedFunction:
-            params, used_names, assigns = _parse_fn(f)
-            return _JittedFunction(self, f, assigns, params, used_names)
+            return _JittedFunction(self, f, _infer_params(f))
         if fn is not None:
             return decorator(fn)
         return decorator
