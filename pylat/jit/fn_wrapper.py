@@ -14,7 +14,8 @@ functions defined in interactive sessions all work.
 
 import inspect
 from collections.abc import Callable, Mapping
-from typing import Any
+from inspect import Parameter
+from typing import Any, Literal
 
 import numpy as np
 from llvmlite import binding as llvm
@@ -306,46 +307,70 @@ def _determine_layout(values) -> StandardLayoutMode:
     return StandardLayoutMode.NONE
 
 
-def _infer_params(fn: Callable) -> tuple[str, ...]:
+ParamKind = Literal['arg', 'varargs', 'kwargs']
+
+def _infer_params(fn: Callable) -> tuple[tuple[str, ParamKind], ...]:
     try:
         signature = inspect.signature(fn)
     except ValueError as e:
         raise TypeError(f"cannot determine the signature of {fn!r}") from e
-    params: list[str] = []
+    params: list[tuple[str, ParamKind]] = []
     for name, p in signature.parameters.items():
-        if p.kind is p.VAR_POSITIONAL or p.kind is p.VAR_KEYWORD:
-            raise TypeError(f"variable-length parameter {name!r} is not supported")
-        if p.kind is p.KEYWORD_ONLY:
+        if p.kind is Parameter.KEYWORD_ONLY:
             raise TypeError(f"keyword-only parameter {name!r} is not supported")
         if p.default is not inspect.Parameter.empty:
             raise TypeError(f"default value on parameter {name!r} is not supported")
-        params.append(name)
+        if p.kind is Parameter.VAR_POSITIONAL:
+            kind: ParamKind = 'varargs'
+        elif p.kind is Parameter.VAR_KEYWORD:
+            kind = 'kwargs'
+        else:
+            kind = 'arg'
+        params.append((name, kind))
     return tuple(params)
 
 
 class _JittedFunction:
     """The callable produced by ``Wrapper.jit``."""
 
-    def __init__(self, wrapper: 'Wrapper', fn: Callable, params: tuple[str, ...], comptime_args: set[str | int] | None = None) -> None:
+    def __init__(self, wrapper: 'Wrapper', fn: Callable, params: tuple[tuple[str, ParamKind], ...], comptime_args: set[str | int] | None = None) -> None:
         self._wrapper = wrapper
         self._fn = fn
         self._params = params
-        self._names = {name: symbol(name) for name in params}
+        self._names = {name: symbol(name) for name, _ in params}
+        self._param_positions = {
+            name: index
+            for index, (name, kind) in enumerate(params)
+            if kind == 'arg'
+        }
         self._comptime_args = comptime_args
         self._cache: dict[
-            tuple[tuple[tuple[LowerType, int], ...], StandardLayoutMode, tuple[tuple[str, Any], ...]],
+            tuple[
+                tuple[tuple[LowerType, int], ...],  # runtime signature
+                tuple[str, ...],  # keyword argument names
+                StandardLayoutMode,
+                tuple[tuple[str, Any], ...],  # compile-time values
+            ],
             tuple[CompiledWrapper, set[Symbol]],
         ] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
-    def _trace(self, comptime: dict[str, Any]) -> tuple[list[AssignExpr], set[Symbol]]:
+    def _trace(self, comptime: dict[str, Any], positional_names: tuple[str, ...], keyword_names: tuple[str, ...]) -> tuple[list[AssignExpr], set[Symbol]]:
         # compile-time parameters are traced with their constant value, so they are
         # baked into the expression trees (which also enables compile-time control
         # flow); the other parameters are traced with probes
         trace = _Trace(self._names)
-        args = [comptime.get(name, trace.make_param_probe(name)) for name in self._params]
-        result = self._fn(*args)
+
+        def make(name: str):
+            if name in comptime:
+                return comptime[name]
+            if name in self._names:
+                return trace.make_param_probe(name)
+            # variadic elements use synthesized symbols
+            return _Probe(trace, symbol(name))
+
+        result = self._fn(*[make(name) for name in positional_names], **{name: make(name) for name in keyword_names})
         if result is not None:
             raise TypeError(
                 f"{self.__name__}() must not return values; mutate the input arrays in place "
@@ -375,11 +400,12 @@ class _JittedFunction:
             return self._wrapper._index_type, 0
         raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
-    def _is_comptime_arg(self, name: str, index: int, value) -> bool:
+    def _is_comptime_arg(self, name: str, value) -> bool:
         """Whether an argument is a compile-time constant: either explicitly declared
-        in ``comptime_args`` (by name or position), or an unsupported runtime type
-        that is hashable (e.g. tuples used with ``np.roll``)."""
-        if self._comptime_args is not None and (name in self._comptime_args or index in self._comptime_args):
+        in ``comptime_args`` (by name or parameter position), or an unsupported runtime
+        type that is hashable (e.g. tuples used with ``np.roll``)."""
+        index = self._param_positions.get(name)
+        if index is not None and self._comptime_args is not None and (name in self._comptime_args or index in self._comptime_args):
             return True
         if isinstance(value, _Probe):
             # nested jitted calls are rejected by _infer_arg_type with a clear message
@@ -397,23 +423,53 @@ class _JittedFunction:
             return True
         return False
 
-    def _classify_args(self, args) -> tuple[tuple[tuple[LowerType, int], ...], dict[str, Any]]:
-        """Split the arguments into a runtime signature and a map of compile-time
-        parameter names to their constant values."""
-        signature: list[tuple[LowerType, int]] = []
+    def _classify_args(self, bound: list[tuple[str, Any]]) -> tuple[list[tuple[str, tuple[LowerType, int]]], dict[str, Any]]:
+        """Split the bound arguments into runtime (name, type) pairs and a map of
+        compile-time names to their constant values."""
+        runtime: list[tuple[str, tuple[LowerType, int]]] = []
         comptime: dict[str, Any] = {}
-        for index, (name, value) in enumerate(zip(self._params, args)):
-            if self._is_comptime_arg(name, index, value):
+        for name, value in bound:
+            if self._is_comptime_arg(name, value):
                 comptime[name] = value
             else:
-                signature.append(self._infer_arg_type(value))
-        return tuple(signature), comptime
+                runtime.append((name, self._infer_arg_type(value)))
+        return runtime, comptime
 
-    def _compile(self, comptime: dict[str, Any], signature: tuple[tuple[LowerType, int], ...], layout: StandardLayoutMode, assigns: list[AssignExpr]) -> CompiledWrapper:
+    def _bind_args(self, args, kwargs) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
+        """Bind the call arguments to the parameters.  Returns ``(name, value)`` pairs
+        for the positional arguments (named parameters use their parameter name,
+        variadic elements use ``<param>[i]``) and for the keyword arguments (using
+        their keyword as the name)."""
+        fixed = [name for name, kind in self._params if kind == 'arg']
+        varargs_name = next((name for name, kind in self._params if kind == 'varargs'), None)
+        kwargs_name = next((name for name, kind in self._params if kind == 'kwargs'), None)
+        if len(args) < len(fixed):
+            raise TypeError(
+                f"{self.__name__}() missing {len(fixed) - len(args)} required positional argument(s)"
+            )
+        positional: list[tuple[str, Any]] = list(zip(fixed, args))
+        rest = args[len(fixed):]
+        if varargs_name is None:
+            if len(rest) > 0:
+                raise TypeError(
+                    f"{self.__name__}() takes {len(fixed)} positional arguments but {len(args)} were given"
+                )
+        else:
+            positional.extend((f"{varargs_name}[{i}]", value) for i, value in enumerate(rest))
+        if kwargs_name is None:
+            if len(kwargs) > 0:
+                raise TypeError(
+                    f"{self.__name__}() got an unexpected keyword argument {next(iter(kwargs))!r}"
+                )
+            keyword: list[tuple[str, Any]] = []
+        else:
+            keyword = list(kwargs.items())
+        return positional, keyword
+
+    def _compile(self, runtime: list[tuple[str, tuple[LowerType, int]]], layout: StandardLayoutMode, assigns: list[AssignExpr]) -> CompiledWrapper:
         context = TypeContext()
-        runtime_names = [name for name in self._params if name not in comptime]
-        for name, (lower_type, dim) in zip(runtime_names, signature):
-            context.set_symbol(self._names[name], lower_type, dim)
+        for name, (lower_type, dim) in runtime:
+            context.set_symbol(self._names.get(name, symbol(name)), lower_type, dim)
         compiler = JitCompiler(
             self._wrapper._backend,
             real_type=self._wrapper._real_type,
@@ -422,13 +478,11 @@ class _JittedFunction:
         return compiler.compile_assignments(assigns, context, standard_layout=layout)
 
     def __call__(self, *args, **kwargs):
-        if len(kwargs) > 0:
-            raise TypeError(f"{self.__name__}() does not support keyword arguments")
-        if len(args) != len(self._params):
-            raise TypeError(
-                f"{self.__name__}() takes {len(self._params)} positional arguments but {len(args)} were given"
-            )
-        signature, comptime = self._classify_args(args)
+        positional, keyword = self._bind_args(args, kwargs)
+        bound = positional + keyword
+        kwarg_names = tuple(name for name, _ in keyword)
+        runtime, comptime = self._classify_args(bound)
+        signature = tuple(ty for _, ty in runtime)
         comptime_key = tuple(comptime.items())
         try:
             hash(comptime_key)
@@ -436,16 +490,21 @@ class _JittedFunction:
             raise TypeError(
                 "comptime arguments must be hashable (they are part of the JIT cache key)"
             ) from e
-        layout = _determine_layout(args)
-        key = (signature, layout, comptime_key)
+        layout = _determine_layout([value for _, value in bound])
+        key = (signature, kwarg_names, layout, comptime_key)
         entry = self._cache.get(key)
         if entry is None:
-            assigns, used = self._trace(comptime)
-            compiled = self._compile(comptime, signature, layout, assigns)
+            positional_names = tuple(name for name, _ in positional)
+            assigns, used = self._trace(comptime, positional_names, kwarg_names)
+            compiled = self._compile(runtime, layout, assigns)
             entry = (compiled, used)
             self._cache[key] = entry
         compiled, used = entry
-        arg_map = {self._names[n]: v for n, v in zip(self._params, args) if self._names[n] in used}
+        arg_map = {}
+        for name, value in bound:
+            sym = symbol(name)
+            if sym in used:
+                arg_map[sym] = value
         return compiled.call(arg_map)
 
     def print_all(self):

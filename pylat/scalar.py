@@ -3,8 +3,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pylat.jit.fn_wrapper import Wrapper
+
 from .expr import Expr
 
+lax = Wrapper()
+
+@lax.jit()
+def _plus_assign_dt(a, b, dt):
+    a += b * dt
 
 @dataclass
 class ScalarField:

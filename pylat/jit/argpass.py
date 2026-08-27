@@ -290,9 +290,18 @@ class TypeResolver:
             expr2 = t
 
         if isinstance(expr1, SymbolShape):
-            assert expr1 not in self.resolved_shapes
-            self.resolved_shapes[expr1] = expr2
-            return
+            # a symbol may already be constrained (e.g. by a previous assignment);
+            # follow the chain to its root so that assignments sharing a shape do
+            # not conflict
+            while isinstance(expr1, SymbolShape) and expr1 in self.resolved_shapes:
+                expr1 = self.resolved_shapes[expr1]
+            while isinstance(expr2, SymbolShape) and expr2 in self.resolved_shapes:
+                expr2 = self.resolved_shapes[expr2]
+            if expr1 == expr2:
+                return
+            if isinstance(expr1, SymbolShape):
+                self.resolved_shapes[expr1] = expr2
+                return
 
         raise ValueError(f"cannot resolve equal constrain {expr1} === {expr2}")
 

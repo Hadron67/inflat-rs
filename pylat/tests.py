@@ -135,6 +135,29 @@ class JitTest(TestCase):
         assert_almost_equal(phi0, mom_phi0 * mom_phi0 * dt0)
         assert_almost_equal(result, np.sum(mom_phi0))
 
+    def test_multiple_assignments_same_shape(self):
+        # regression: several assignments accumulating into the same array must
+        # resolve the shared shape constraints transitively instead of failing
+        a, b, c, d = symbols('a', 'b', 'c', 'd')
+        context = TypeContext()
+        for s in (a, b, c, d):
+            context.set_symbol(s, FloatType(64), 1)
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_assignments([
+            AssignExpr(a, b, '+'),
+            AssignExpr(a, c, '+'),
+            AssignExpr(a, d, '+'),
+        ], context)
+
+        np.random.seed(40)
+        a0 = np.zeros(5)
+        b0 = np.random.rand(5)
+        c0 = np.random.rand(5)
+        d0 = np.random.rand(5)
+        fn.call({a: a0, b: b0, c: c0, d: d0})  # type: ignore
+        assert_almost_equal(a0, b0 + c0 + d0)
+
 class JitWrapperTest(TestCase):
     def test_usage_example(self):
         wrapper = Wrapper()
@@ -578,6 +601,127 @@ class JitWrapperTest(TestCase):
 
         with self.assertRaises(TypeError):
             f(np.zeros((3, 3)), [1, 2])
+
+    def test_varargs(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, *rest):
+            for x in rest:
+                a += x
+
+        np.random.seed(30)
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        f(a, b)
+        assert_almost_equal(a, b)
+        a = np.zeros(5)
+        c = np.random.rand(5)
+        f(a, b, c)
+        assert_almost_equal(a, b + c)
+        a = np.zeros(5)
+        f(a, b, c, b)
+        assert_almost_equal(a, b + c + b)
+        # different numbers of variadic arguments compile separate kernels
+        self.assertEqual(len(f._cache), 3)
+
+    def test_varargs_indexing(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, *rest):
+            a += rest[0]
+            a += rest[1] * 2
+
+        np.random.seed(31)
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        c = np.random.rand(5)
+        f(a, b, c)
+        assert_almost_equal(a, b + c * 2)
+
+    def test_kwargs(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, **kw):
+            a += kw['x'] * kw['y']
+
+        np.random.seed(32)
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        c = np.random.rand(5)
+        f(a, x=b, y=c)
+        assert_almost_equal(a, b * c)
+
+    def test_kwargs_variants_compile_separately(self):
+        # different keyword names are part of the JIT cache key
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, **kw):
+            for x in kw.values():
+                a += x
+
+        np.random.seed(33)
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        f(a, u=b)
+        assert_almost_equal(a, b)
+        a = np.zeros(5)
+        c = np.random.rand(5)
+        f(a, v=c)
+        assert_almost_equal(a, c)
+        self.assertEqual(len(f._cache), 2)
+
+    def test_varargs_and_kwargs(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, *rest, **kw):
+            for x in rest:
+                a += x
+            a += kw['k']
+
+        np.random.seed(34)
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        c = np.random.rand(5)
+        d = np.random.rand(5)
+        f(a, b, c, k=d)
+        assert_almost_equal(a, b + c + d)
+        a = np.zeros(5)
+        f(a, b, k=d)
+        assert_almost_equal(a, b + d)
+        self.assertEqual(len(f._cache), 2)
+
+    def test_unexpected_kwargs_rejected(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a):
+            a += 1
+
+        with self.assertRaises(TypeError):
+            f(np.zeros((3, 3)), dt=1.0)
+
+    def test_varargs_comptime_fallback(self):
+        # hashable arguments that cannot be passed at runtime are compile-time,
+        # even when they arrive through *varargs
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, *rest):
+            a += np.roll(b, rest[0], axis=0)
+
+        a = np.zeros((5, 6))
+        b = np.random.rand(5, 6)
+        f(a, b, (1,))
+        assert_almost_equal(a, np.roll(b, 1, axis=0))
+        a = np.zeros((5, 6))
+        f(a, b, (2,))
+        assert_almost_equal(a, np.roll(b, 2, axis=0))
+        self.assertEqual(len(f._cache), 2)
 
     def test_trace_errors(self):
         wrapper = Wrapper()
