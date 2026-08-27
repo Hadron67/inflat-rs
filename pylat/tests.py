@@ -631,7 +631,9 @@ class SimdLayoutTests(TestCase):
         assert_almost_equal(a, b[:, 1])
         self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
 
-    def test_3d_slices(self):
+    def test_multi_axis_slices_fall_back_to_generic(self):
+        # multi-axis slices are nested slices; the sliced sub-expression is not
+        # standard layout, so they are compiled by the generic kernel
         wrapper = Wrapper()
 
         @wrapper.jit()
@@ -642,7 +644,7 @@ class SimdLayoutTests(TestCase):
         b = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
         f(a, b)
         assert_almost_equal(a, b[1, 2])
-        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
 
         @wrapper.jit()
         def g(a, b):
@@ -713,9 +715,9 @@ class SimdLayoutTests(TestCase):
         ir = '\n'.join(self._last_compiled(f).print_all())
         self.assertNotIn('urem', ir)
 
-    def test_slice_of_compound_expression_single_array_only(self):
-        # a slice over an expression with several distinct arrays cannot be
-        # linearized with a single flat offset; it falls back to the generic kernel
+    def test_compound_expression_slice_uses_flat_kernel(self):
+        # a slice over an expression with several distinct arrays is linear too: each
+        # base array gets the fixed index applied with its own stride
         wrapper = Wrapper()
 
         @wrapper.jit()
@@ -728,9 +730,10 @@ class SimdLayoutTests(TestCase):
         c = np.random.rand(5, 6)
         f(a, b, c)
         assert_almost_equal(a, (b + c)[1])
-        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
 
-        # the same expression with non-contiguous arrays must also stay correct
+        # the same expression with non-contiguous arrays must stay correct via the
+        # generic kernel
         @wrapper.jit()
         def g(a, b):
             a += np.sin(b)[2]
