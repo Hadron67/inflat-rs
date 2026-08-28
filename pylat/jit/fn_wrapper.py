@@ -370,12 +370,15 @@ class _JitCacheKey:
     signature: tuple[tuple[str, SignatureNode], ...]
     layout: StandardLayoutMode
 
-class _JittedFunction:
-    """The callable produced by ``Wrapper.jit``."""
+class _FormalArgsInfo:
+    """Description of a jitted function's formal parameters.
 
-    def __init__(self, wrapper: 'Wrapper', fn: Callable, params: tuple[tuple[str, ParamKind], ...], comptime_args: set[str | int] | None = None) -> None:
-        self._wrapper = wrapper
-        self._fn = fn
+    Holds the parameter list inferred from the source function together with the
+    declared compile-time arguments, and answers how call arguments bind to the
+    parameters.
+    """
+
+    def __init__(self, params: tuple[tuple[str, ParamKind], ...], comptime_args: set[str | int] | None = None) -> None:
         self._params = params
         self._names = {name: symbol(name) for name, _ in params}
         self._param_positions = {
@@ -384,6 +387,82 @@ class _JittedFunction:
             if kind == 'arg'
         }
         self._comptime_args = comptime_args
+
+    # --- formal parameter introspection --------------------------------
+
+    @property
+    def fixed_names(self) -> list[str]:
+        """Names of the fixed positional parameters, in declaration order."""
+        return [name for name, kind in self._params if kind == 'arg']
+
+    @property
+    def varargs_name(self) -> str | None:
+        """Name of the ``*varargs`` parameter, or ``None`` when there is none."""
+        return next((name for name, kind in self._params if kind == 'varargs'), None)
+
+    @property
+    def kwargs_name(self) -> str | None:
+        """Name of the ``**kwargs`` parameter, or ``None`` when there is none."""
+        return next((name for name, kind in self._params if kind == 'kwargs'), None)
+
+    def symbol_of(self, name: str) -> Symbol:
+        """Symbol bound to a formal parameter; synthetic names (``<param>[i]``
+        varargs elements, ``**kwargs`` keys) get a freshly created symbol."""
+        return self._names.get(name, symbol(name))
+
+    def make_trace(self) -> _Trace:
+        return _Trace(self._names)
+
+    def is_explicit_comptime(self, name: str) -> bool:
+        """Whether a fixed positional parameter is declared in ``comptime_args``,
+        matched by name or by parameter position."""
+        if self._comptime_args is None:
+            return False
+        index = self._param_positions.get(name)
+        return index is not None and (name in self._comptime_args or index in self._comptime_args)
+
+    def bind_args(self, args, kwargs, func_name: str) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]], dict[str, Any]]:
+        """Bind the call arguments to the formal parameters.
+
+        Returns ``(fixed, variadic, keyword)``: ``fixed`` and ``variadic`` are
+        ``(name, value)`` pairs for the fixed positional parameters (named with the
+        parameter name) and the ``*varargs`` elements (named ``<param>[i]``);
+        ``keyword`` maps keyword names to values for the ``**kwargs`` parameter.
+        """
+        fixed = self.fixed_names
+        varargs_name = self.varargs_name
+        kwargs_name = self.kwargs_name
+        if len(args) < len(fixed):
+            raise TypeError(
+                f"{func_name}() missing {len(fixed) - len(args)} required positional argument(s)"
+            )
+        fixed_args = list(zip(fixed, args))
+        rest = args[len(fixed):]
+        if varargs_name is None:
+            if len(rest) > 0:
+                raise TypeError(
+                    f"{func_name}() takes {len(fixed)} positional arguments but {len(args)} were given"
+                )
+            variadic: list[tuple[str, Any]] = []
+        else:
+            variadic = [(f"{varargs_name}[{i}]", value) for i, value in enumerate(rest)]
+        if kwargs_name is None:
+            if len(kwargs) > 0:
+                raise TypeError(
+                    f"{func_name}() got an unexpected keyword argument {next(iter(kwargs))!r}"
+                )
+            keyword: dict[str, Any] = {}
+        else:
+            keyword = dict(kwargs)
+        return fixed_args, variadic, keyword
+
+class _JittedFunction:
+    """The callable produced by ``Wrapper.jit``."""
+
+    def __init__(self, wrapper: 'Wrapper', fn: Callable, params: tuple[tuple[str, ParamKind], ...], comptime_args: set[str | int] | None = None) -> None:
+        self._wrapper = wrapper
+        self._fn = fn
+        self._args_info = _FormalArgsInfo(params, comptime_args)
         self._cache: dict[_JitCacheKey, CompiledWrapper] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
@@ -392,7 +471,7 @@ class _JittedFunction:
         # compile-time arguments are traced with their constant value, so they are
         # baked into the expression trees (which also enables compile-time control
         # flow); the other arguments are traced with probes
-        trace = _Trace(self._names)
+        trace = self._args_info.make_trace()
         positional: list[Any] = []
         keyword: dict[str, Any] = {}
         for name, node in key.signature:
@@ -443,8 +522,7 @@ class _JittedFunction:
         """Whether an argument is a compile-time constant: either explicitly declared
         in ``comptime_args`` (by name or parameter position), or an unsupported runtime
         type that is hashable (e.g. tuples used with ``np.roll``)."""
-        index = self._param_positions.get(name)
-        if index is not None and self._comptime_args is not None and (name in self._comptime_args or index in self._comptime_args):
+        if self._args_info.is_explicit_comptime(name):
             try:
                 hash(value)
             except TypeError as e:
@@ -479,41 +557,6 @@ class _JittedFunction:
             return ScalarArgNode(lower_type, runtime_arg_pos)
         return ArrayArgNode(lower_type, dim, runtime_arg_pos)
 
-    def _bind_args(self, args, kwargs) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]], dict[str, Any]]:
-        """Bind the call arguments to the formal parameters.
-
-        Returns ``(fixed, variadic, keyword)``: ``fixed`` and ``variadic`` are
-        ``(name, value)`` pairs for the fixed positional parameters (named with the
-        parameter name) and the ``*varargs`` elements (named ``<param>[i]``);
-        ``keyword`` maps keyword names to values for the ``**kwargs`` parameter.
-        """
-        fixed = [name for name, kind in self._params if kind == 'arg']
-        varargs_name = next((name for name, kind in self._params if kind == 'varargs'), None)
-        kwargs_name = next((name for name, kind in self._params if kind == 'kwargs'), None)
-        if len(args) < len(fixed):
-            raise TypeError(
-                f"{self.__name__}() missing {len(fixed) - len(args)} required positional argument(s)"
-            )
-        fixed_args = list(zip(fixed, args))
-        rest = args[len(fixed):]
-        if varargs_name is None:
-            if len(rest) > 0:
-                raise TypeError(
-                    f"{self.__name__}() takes {len(fixed)} positional arguments but {len(args)} were given"
-                )
-            variadic: list[tuple[str, Any]] = []
-        else:
-            variadic = [(f"{varargs_name}[{i}]", value) for i, value in enumerate(rest)]
-        if kwargs_name is None:
-            if len(kwargs) > 0:
-                raise TypeError(
-                    f"{self.__name__}() got an unexpected keyword argument {next(iter(kwargs))!r}"
-                )
-            keyword: dict[str, Any] = {}
-        else:
-            keyword = dict(kwargs)
-        return fixed_args, variadic, keyword
-
     def _build_signature(self, fixed: list[tuple[str, Any]], variadic: list[tuple[str, Any]], keyword: dict[str, Any]) -> tuple[tuple[str, SignatureNode], ...]:
         """Build the cache-key signature: one ``(name, node)`` entry per formal
         parameter, in declaration order.  ``*varargs`` elements are collected into a
@@ -532,8 +575,8 @@ class _JittedFunction:
             return node
 
         signature.extend((name, add(name, value)) for name, value in fixed)
-        varargs_name = next((name for name, kind in self._params if kind == 'varargs'), None)
-        kwargs_name = next((name for name, kind in self._params if kind == 'kwargs'), None)
+        varargs_name = self._args_info.varargs_name
+        kwargs_name = self._args_info.kwargs_name
         if varargs_name is not None:
             signature.append((varargs_name, TupleArgNode(tuple(add(n, v) for n, v in variadic))))
         if kwargs_name is not None:
@@ -559,11 +602,11 @@ class _JittedFunction:
                     if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
                         yield elem.runtime_arg_pos, kw_name, elem.dtype, dim_of(elem)
 
-    def _compile(self, key: _JitCacheKey, assigns: list[AssignExpr]) -> CompiledWrapper:
+    def _compile(self, key: _JitCacheKey) -> CompiledWrapper:
         context = TypeContext()
         args_by_pos: dict[int, Symbol] = {}
         for pos, name, lower_type, dim in self._iter_runtime_args(key):
-            sym = self._names.get(name, symbol(name))
+            sym = self._args_info.symbol_of(name)
             args_by_pos[pos] = sym
             context.set_symbol(sym, lower_type, dim)
         args = [args_by_pos[i] for i in range(len(args_by_pos))]
@@ -572,10 +615,11 @@ class _JittedFunction:
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
         )
+        assigns = self._trace(key)
         return compiler.compile_assignments(args, assigns, context, standard_layout=key.layout)
 
     def __call__(self, *args, **kwargs):
-        fixed, variadic, keyword = self._bind_args(args, kwargs)
+        fixed, variadic, keyword = self._args_info.bind_args(args, kwargs, self.__name__)
         signature = self._build_signature(fixed, variadic, keyword)
         layout = _determine_layout(
             [v for _, v in fixed] + [v for _, v in variadic] + list(keyword.values())
@@ -583,8 +627,7 @@ class _JittedFunction:
         key = _JitCacheKey(signature=signature, layout=layout)
         compiled = self._cache.get(key)
         if compiled is None:
-            assigns = self._trace(key)
-            compiled = self._compile(key, assigns)
+            compiled = self._compile(key)
             self._cache[key] = compiled
         bound = dict(fixed + variadic)
         bound.update(keyword)
