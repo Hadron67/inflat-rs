@@ -567,7 +567,13 @@ class _JittedFunction:
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
-    def __get__(self, instance: Any, owner: type | None = None):
+    @overload
+    def __get__(self, instance: None, owner: type | None = None) -> '_JittedFunction': ...
+
+    @overload
+    def __get__(self, instance: Any, owner: type | None = None) -> Callable[..., Any]: ...
+
+    def __get__(self, instance: Any, owner: type | None = None) -> '_JittedFunction | Callable[..., Any]':
         """Support jitted methods: ``obj.f(...)`` binds ``obj`` as the first
         argument (which is then inlined as a :class:`DictArgNode`)."""
         if instance is None:

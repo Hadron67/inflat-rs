@@ -1012,24 +1012,6 @@ class SimdLayoutTests(TestCase):
             {StandardLayoutMode.ROW_MAJOR, StandardLayoutMode.COLUMN_MAJOR},
         )
 
-    def test_object_inlining(self):
-        wrapper = Wrapper()
-
-        class Test:
-            def __init__(self, a: np.ndarray, b: np.ndarray):
-                self.a = a
-                self.b = b
-
-            @wrapper.jit()
-            def run(self, dt: float):
-                self.a += self.b * dt
-
-        np.random.seed(0)
-        a = np.zeros((4, 5))
-        b = np.random.rand(4, 5)
-        Test(a, b).run(2.0)
-        assert_almost_equal(a, b * 2.0)
-
     def test_flat_reduction(self):
         a, = symbols('a')
         context = TypeContext()
@@ -1136,4 +1118,123 @@ class SimdLayoutTests(TestCase):
         fn5.call(a5, b50)
         assert_almost_equal(a5, b50[:, 2, 3][:, :4])
 
-all_tests = [TestExpr, JitTest, JitWrapperTest, SimdLayoutTests]
+class ObjectInliningTest(TestCase):
+    def __init__(self, methodName: str = "test_object_inlining") -> None:
+        super().__init__(methodName)
+
+    def test_object_inlining(self):
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+
+            @wrapper.jit()
+            def run(self, dt: float):
+                self.a += self.b * dt
+
+        np.random.seed(0)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        Test(a, b).run(2.0)
+        assert_almost_equal(a, b * 2.0)
+
+    def test_object_inlining_with_varargs(self):
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+
+            @wrapper.jit()
+            def run(self, *rest):
+                self.a += self.b * rest[0] + rest[1]
+
+        np.random.seed(1)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        c = np.random.rand(4, 5)
+        Test(a, b).run(2.0, c)
+        assert_almost_equal(a, b * 2.0 + c)
+
+    def test_object_inlining_with_kwargs(self):
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+
+            @wrapper.jit()
+            def run(self, **kw):
+                self.a += self.b * kw['dt']
+
+        np.random.seed(2)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        Test(a, b).run(dt=2.0)
+        assert_almost_equal(a, b * 2.0)
+
+    def test_object_inlining_with_varargs_and_kwargs(self):
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+
+            @wrapper.jit()
+            def run(self, *rest, **kw):
+                self.a += self.b * rest[0] + kw['c']
+
+        np.random.seed(3)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        c = np.random.rand(4, 5)
+        Test(a, b).run(2.0, c=c)
+        assert_almost_equal(a, b * 2.0 + c)
+        self.assertEqual(len(Test.run._cache), 1)
+
+    def test_object_inlining_in_varargs(self):
+        # an object arriving through *varargs is inlined as well
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+
+        @wrapper.jit()
+        def f(x, *rest):
+            x += rest[0].a * rest[0].b
+
+        np.random.seed(4)
+        x = np.zeros(6)
+        a = np.random.rand(6)
+        b = np.random.rand(6)
+        f(x, Test(a, b))
+        assert_almost_equal(x, a * b)
+
+    def test_object_inlining_in_kwargs(self):
+        # an object arriving as a **kwargs value is inlined as well
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+
+        @wrapper.jit()
+        def f(x, **kw):
+            x += kw['obj'].a * kw['obj'].b
+
+        np.random.seed(5)
+        x = np.zeros(6)
+        a = np.random.rand(6)
+        b = np.random.rand(6)
+        f(x, obj=Test(a, b))
+        assert_almost_equal(x, a * b)
+
+all_tests = [TestExpr, JitTest, JitWrapperTest, SimdLayoutTests, ObjectInliningTest]
