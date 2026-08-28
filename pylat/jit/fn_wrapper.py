@@ -16,7 +16,7 @@ import inspect
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from inspect import Parameter
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 import numpy as np
 from llvmlite import binding as llvm
@@ -669,6 +669,8 @@ class _JittedFunction:
         layout = _determine_layout(fixed + variadic + list(keyword.values()))
         key = _JitCacheKey(signature=signature, layout=layout)
         cached = self._cache.get(key)
+        compiled = None
+        converter = None
         if cached is None:
             compiled = self._compile(key)
             converter = _gen_args_converter(signature)
@@ -725,7 +727,11 @@ class Wrapper:
         self._real_type = real_type if real_type is not None else FloatType(64)
         self._index_type = index_type if index_type is not None else IntType(64, False)
 
-    def jit(self, fn: Callable | None = None, comptime_args: set[str | int] | None = None):
+    @overload
+    def jit(self, fn: Callable, comptime_args: set[str | int] | None = None) -> _JittedFunction: ...
+    @overload
+    def jit(self, fn: None = None, comptime_args: set[str | int] | None = None) -> Callable[[Callable], _JittedFunction]: ...
+    def jit(self, fn: Callable | None = None, comptime_args: set[str | int] | None = None) -> _JittedFunction | Callable[[Callable], _JittedFunction]:
         """Decorator that compiles a function of element-wise array assignments.
 
         ``comptime_args`` lists parameters whose values are baked into the kernel as
