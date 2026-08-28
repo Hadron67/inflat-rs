@@ -6,10 +6,10 @@ from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
 from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, symbols
-from .jit.argpass import ComplexFloatType, FloatType, TypeContext
 from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .jit.fn_wrapper import Wrapper
 from .jit.openmp import OpenMPBackend
+from .jit.type import ComplexFloatType, FloatType, TypeContext
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()

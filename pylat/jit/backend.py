@@ -3,8 +3,8 @@
 import ctypes
 from abc import abstractmethod
 
-from pylat.jit.argpass import LowerType
 from pylat.jit.helper import MaybeComplexValue
+from pylat.jit.type import LowerType
 
 from .llvm import BasicBlock, IntType, Ordering, Value
 

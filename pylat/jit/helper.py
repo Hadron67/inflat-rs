@@ -2,8 +2,7 @@ import ctypes
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from . import argpass as ap
-from .argpass import ComplexFloatType, LowerType, TypesConfig
+from . import type as ap
 from .llvm import (
     F64,
     I8,
@@ -19,6 +18,7 @@ from .llvm import (
     PointerType,
     Value,
 )
+from .type import ComplexFloatType, LowerType, TypesConfig
 
 
 @dataclass
@@ -29,10 +29,6 @@ class ComplexValue:
 MaybeComplexValue: TypeAlias = ComplexValue | Value
 
 class CompileHelper:
-    parent: TypesConfig
-    llvm_index_type: IntType
-    llvm_real_type: FloatType
-
     def __init__(self, parent: TypesConfig) -> None:
         self.parent = parent
         self.llvm_index_type = IntType(parent.index_type.bits)

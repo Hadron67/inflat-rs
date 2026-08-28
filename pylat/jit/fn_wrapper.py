@@ -39,7 +39,10 @@ from ..expr import (
     Symbol,
     Times,
 )
-from .argpass import (
+from .backend import Backend
+from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
+from .openmp import OpenMPBackend
+from .type import (
     ComplexFloatType,
     FloatType,
     IntType,
@@ -47,9 +50,6 @@ from .argpass import (
     TypeContext,
     TypeResolver,
 )
-from .backend import Backend
-from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
-from .openmp import OpenMPBackend
 
 # placeholder symbol namespace for reduction results; ``Sum`` nodes in the traced
 # assignments are replaced by symbols in this namespace before compilation

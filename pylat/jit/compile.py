@@ -24,19 +24,7 @@ from ..expr import (
     SymbolShape,
     Times,
 )
-from . import argpass as ap
-from .argpass import (
-    ArrayArgInfo,
-    ComplexFloatType,
-    LowerType,
-    ScalarArgInfo,
-    SymbolArgInfo,
-    TypeContext,
-    TypedAssignExpr,
-    TypeResolver,
-    TypesConfig,
-    get_peer_types,
-)
+from . import type as ap
 from .backend import (
     Backend,
     CompiledBackendFunction,
@@ -56,6 +44,18 @@ from .llvm import (
     Ordering,
     Value,
     VoidValue,
+)
+from .type import (
+    ArrayArgInfo,
+    ComplexFloatType,
+    LowerType,
+    ScalarArgInfo,
+    SymbolArgInfo,
+    TypeContext,
+    TypedAssignExpr,
+    TypeResolver,
+    TypesConfig,
+    get_peer_types,
 )
 
 
@@ -690,9 +690,6 @@ class CompiledWrapper:
         return self._inner.print_all()
 
 class TypedReductionExpr:
-    expr: Expr
-    shape: tuple[Expr, ...]
-
     def __init__(self, expr: Expr, ctx: TypeResolver) -> None:
         self.expr = expr
         shape = ctx.get_shape(expr)
@@ -853,9 +850,6 @@ class _AssignmentsKernel(LoopKernel):
         return begin, value
 
 class SumReductionKernel(ReductionKernel):
-    type: LowerType
-    _helper: CompileHelper
-
     @override
     def __init__(self, type: LowerType, helper: CompileHelper) -> None:
         self.type = type
@@ -905,8 +899,6 @@ _F64 = ap.FloatType(64)
 _U64 = ap.IntType(64, False)
 
 class JitCompiler(TypesConfig):
-    _backend: Backend
-
     def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64):
         self._backend = backend
         self.real_type = real_type

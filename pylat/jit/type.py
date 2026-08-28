@@ -228,22 +228,14 @@ def get_peer_types(*types: LowerType) -> LowerType:
     return ret
 
 class TypeContext:
-    _symbol_types: dict[Symbol, LowerType]
-    _symbol_shapes: dict[Symbol, tuple[Expr, ...]]
-    _symbol_dimension: dict[Symbol, int]
-
     def __init__(self) -> None:
-        self._symbol_types = {}
-        self._symbol_shapes = {}
-        self._symbol_dimension = {}
+        self._symbol_types: dict[Symbol, LowerType] = {}
+        self._symbol_dimension: dict[Symbol, int] = {}
 
-    def set_symbol(self, expr: Symbol, type: LowerType | None = None, dimension: int | None = None, shape: tuple[Expr, ...] | None = None):
+    def set_symbol(self, expr: Symbol, type: LowerType | None = None, dimension: int | None = None):
         if type is not None:
             assert expr not in self._symbol_types
             self._symbol_types[expr] = type
-        if shape is not None:
-            assert expr not in self._symbol_shapes
-            self._symbol_shapes[expr] = shape
         if dimension is not None:
             assert expr not in self._symbol_dimension
             self._symbol_dimension[expr] = dimension
@@ -251,30 +243,19 @@ class TypeContext:
     def get_type(self, expr: Symbol):
         return self._symbol_types[expr]
 
-    def get_shape(self, expr: Symbol):
-        return self._symbol_shapes[expr]
-
     def get_dimension(self, expr: Symbol):
         return self._symbol_dimension[expr]
 
 class TypeResolver:
-    type_config: TypesConfig
-    resolved_shapes: dict[SymbolShape, Expr]
-    _ctx: TypeContext
-    _shape_cache: dict[Expr, tuple[Expr, ...]]
-
     def __init__(self, ctx: TypeContext, type_config: TypesConfig) -> None:
         self._ctx = ctx
-        self._type_cache = {}
-        self._shape_cache = {}
-        self.resolved_shapes = {}
+        self._type_cache: dict[Expr, LowerType] = {}
+        self._shape_cache: dict[Expr, tuple[Expr, ...]] = {}
+        self.resolved_shapes: dict[SymbolShape, Expr] = {}
         self.type_config = type_config
 
     def get_symbol_type(self, expr: Symbol):
         return self._ctx.get_type(expr)
-
-    def get_symbol_shape(self, expr: Symbol):
-        return self._ctx.get_shape(expr)
 
     def get_symbol_dimension(self, expr: Symbol):
         return self._ctx.get_dimension(expr)
@@ -409,9 +390,6 @@ class TypeResolver:
                 raise ValueError(f"cannot get type of {expr}")
 
 class TypedAssignExpr:
-    expr: AssignExpr
-    shape: tuple[Expr, ...]
-
     def __init__(self, expr: AssignExpr, ctx: TypeResolver) -> None:
         self.expr = expr
 
