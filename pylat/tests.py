@@ -777,7 +777,7 @@ class SimdLayoutTests(TestCase):
 
     @staticmethod
     def _last_compiled(f) -> CompiledWrapper:
-        return list(f._cache.values())[-1]
+        return list(f._cache.values())[-1][0]
 
     def test_row_major_uses_flat_kernel(self):
         wrapper = Wrapper()
@@ -1008,7 +1008,7 @@ class SimdLayoutTests(TestCase):
         f(a, b)
         self.assertEqual(len(f._cache), 2)
         self.assertEqual(
-            {w.standard_layout for w in f._cache.values()},
+            {w.standard_layout for w, _ in f._cache.values()},
             {StandardLayoutMode.ROW_MAJOR, StandardLayoutMode.COLUMN_MAJOR},
         )
 

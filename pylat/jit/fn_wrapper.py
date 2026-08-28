@@ -370,6 +370,48 @@ class _JitCacheKey:
     signature: tuple[tuple[str, SignatureNode], ...]
     layout: StandardLayoutMode
 
+def _gen_fill_one_arg(snode: SignatureNode, value_str: str, runtime_args: dict[int, str]):
+    """Record the runtime arguments reachable through one signature node.
+
+    ``value_str`` is a Python expression (e.g. ``args[3][0]``) that yields the
+    argument's value at kernel-call time; the compiled kernel receives the
+    runtime arguments in the order of their ``runtime_arg_pos``."""
+    todo = [(snode, value_str)]
+    while todo:
+        snode, value_str = todo.pop()
+        match snode:
+            case ScalarArgNode() | ArrayArgNode():
+                assert snode.runtime_arg_pos not in runtime_args
+                runtime_args[snode.runtime_arg_pos] = value_str
+            case ComptimeValueArgNode():
+                pass  # baked into the expression trees, not passed at runtime
+            case TupleArgNode():
+                for child, item in zip(snode.elements, (f"{value_str}[{i}]" for i in range(len(snode.elements)))):
+                    todo.append((child, item))
+            case DictArgNode():
+                for k, v in snode.values:
+                    todo.append((v, f'{value_str}["{k}"]'))
+            case _:
+                raise ValueError(f"Unexpected node type: {snode}")
+
+def _gen_args_converter(signature: tuple[tuple[str, SignatureNode], ...]) -> Callable:
+    """Generate a ``__invoke(fn, args)`` function that unpacks the raw call
+    arguments into the compiled kernel's positional argument list.
+
+    ``args`` holds one element per signature entry: the fixed and variadic
+    values in order, then the ``**kwargs`` dict when there is such a parameter.
+    The generated function is specialised per signature, so the (positional)
+    unpacking done per call reduces to plain indexing."""
+    runtime_args: dict[int, str] = {}
+    for i, (_, snode) in enumerate(signature):
+        _gen_fill_one_arg(snode, f'args[{i}]', runtime_args)
+
+    fname = '__invoke'
+    source = f"def {fname}(fn, args):\n    return fn.call({', '.join(runtime_args[i] for i in range(len(runtime_args)))})"
+    globals = {}
+    exec(source, globals)  # noqa: S102
+    return globals[fname]
+
 class _FormalArgsInfo:
     """Description of a jitted function's formal parameters.
 
@@ -386,9 +428,13 @@ class _FormalArgsInfo:
             for index, (name, kind) in enumerate(params)
             if kind == 'arg'
         }
-        self._comptime_args = comptime_args
-
-    # --- formal parameter introspection --------------------------------
+        self._comptime_poses: set[int] = set()
+        if comptime_args is not None:
+            for arg in comptime_args:
+                if isinstance(arg, int):
+                    self._comptime_poses.add(arg)
+                elif isinstance(arg, str) and arg in self._param_positions:
+                    self._comptime_poses.add(self._param_positions[arg])
 
     @property
     def fixed_names(self) -> list[str]:
@@ -413,21 +459,15 @@ class _FormalArgsInfo:
     def make_trace(self) -> _Trace:
         return _Trace(self._names)
 
-    def is_explicit_comptime(self, name: str) -> bool:
+    def is_explicit_comptime(self, pos: int) -> bool:
         """Whether a fixed positional parameter is declared in ``comptime_args``,
         matched by name or by parameter position."""
-        if self._comptime_args is None:
-            return False
-        index = self._param_positions.get(name)
-        return index is not None and (name in self._comptime_args or index in self._comptime_args)
+        return pos in self._comptime_poses
 
-    def bind_args(self, args, kwargs, func_name: str) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]], dict[str, Any]]:
+    def bind_args(self, args, kwargs, func_name: str) -> tuple[list[Any], list[Any], dict[str, Any]]:
         """Bind the call arguments to the formal parameters.
 
-        Returns ``(fixed, variadic, keyword)``: ``fixed`` and ``variadic`` are
-        ``(name, value)`` pairs for the fixed positional parameters (named with the
-        parameter name) and the ``*varargs`` elements (named ``<param>[i]``);
-        ``keyword`` maps keyword names to values for the ``**kwargs`` parameter.
+        Returns fixed_args, var_args, kwargs.
         """
         fixed = self.fixed_names
         varargs_name = self.varargs_name
@@ -436,16 +476,16 @@ class _FormalArgsInfo:
             raise TypeError(
                 f"{func_name}() missing {len(fixed) - len(args)} required positional argument(s)"
             )
-        fixed_args = list(zip(fixed, args))
+        fixed_args = list(args[:len(fixed)])
         rest = args[len(fixed):]
         if varargs_name is None:
             if len(rest) > 0:
                 raise TypeError(
                     f"{func_name}() takes {len(fixed)} positional arguments but {len(args)} were given"
                 )
-            variadic: list[tuple[str, Any]] = []
+            variadic: list[Any] = []
         else:
-            variadic = [(f"{varargs_name}[{i}]", value) for i, value in enumerate(rest)]
+            variadic = list(rest)
         if kwargs_name is None:
             if len(kwargs) > 0:
                 raise TypeError(
@@ -463,7 +503,7 @@ class _JittedFunction:
         self._wrapper = wrapper
         self._fn = fn
         self._args_info = _FormalArgsInfo(params, comptime_args)
-        self._cache: dict[_JitCacheKey, CompiledWrapper] = {}
+        self._cache: dict[_JitCacheKey, tuple[CompiledWrapper, Callable]] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
@@ -518,16 +558,16 @@ class _JittedFunction:
             return self._wrapper._index_type, 0
         raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
-    def _is_comptime_arg(self, name: str, value) -> bool:
+    def _is_comptime_arg(self, pos: int, value) -> bool:
         """Whether an argument is a compile-time constant: either explicitly declared
         in ``comptime_args`` (by name or parameter position), or an unsupported runtime
         type that is hashable (e.g. tuples used with ``np.roll``)."""
-        if self._args_info.is_explicit_comptime(name):
+        if self._args_info.is_explicit_comptime(pos):
             try:
                 hash(value)
             except TypeError as e:
                 raise TypeError(
-                    f"comptime argument {name!r} must be hashable (it is part of the JIT cache key)"
+                    f"comptime argument at position {pos} must be hashable (it is part of the JIT cache key)"
                 ) from e
             return True
         if isinstance(value, _Probe):
@@ -546,18 +586,20 @@ class _JittedFunction:
             return True
         return False
 
-    def _classify(self, name: str, value, runtime_arg_pos: int) -> SignatureNode:
+    def _classify(self, pos: int, value, runtime_arg_pos: int) -> SignatureNode:
         """Classify a bound argument into its signature node for the cache key.
+        ``pos`` is the formal parameter position (``-1`` for ``*varargs``
+        elements and ``**kwargs`` values, which cannot be declared compile-time);
         ``runtime_arg_pos`` is the position of the argument in the compiled
         kernel's positional argument list; it is recorded on runtime nodes only."""
-        if self._is_comptime_arg(name, value):
+        if self._is_comptime_arg(pos, value):
             return ComptimeValueArgNode(value)
         lower_type, dim = self._infer_arg_type(value)
         if dim == 0:
             return ScalarArgNode(lower_type, runtime_arg_pos)
         return ArrayArgNode(lower_type, dim, runtime_arg_pos)
 
-    def _build_signature(self, fixed: list[tuple[str, Any]], variadic: list[tuple[str, Any]], keyword: dict[str, Any]) -> tuple[tuple[str, SignatureNode], ...]:
+    def _build_signature(self, fixed: list[Any], variadic: list[Any], keyword: dict[str, Any]) -> tuple[tuple[str, SignatureNode], ...]:
         """Build the cache-key signature: one ``(name, node)`` entry per formal
         parameter, in declaration order.  ``*varargs`` elements are collected into a
         :class:`TupleArgNode` and ``**kwargs`` values into a :class:`DictArgNode`,
@@ -567,22 +609,25 @@ class _JittedFunction:
         signature: list[tuple[str, SignatureNode]] = []
         runtime_pos = 0
 
-        def add(name: str, value: Any) -> SignatureNode:
+        def add(pos: int, value: Any) -> SignatureNode:
             nonlocal runtime_pos
-            node = self._classify(name, value, runtime_pos)
+            node = self._classify(pos, value, runtime_pos)
             if not isinstance(node, ComptimeValueArgNode):
                 runtime_pos += 1
             return node
 
-        signature.extend((name, add(name, value)) for name, value in fixed)
+        signature.extend(
+            (name, add(i, value))
+            for i, (name, value) in enumerate(zip(self._args_info.fixed_names, fixed))
+        )
         varargs_name = self._args_info.varargs_name
         kwargs_name = self._args_info.kwargs_name
         if varargs_name is not None:
-            signature.append((varargs_name, TupleArgNode(tuple(add(n, v) for n, v in variadic))))
+            signature.append((varargs_name, TupleArgNode(tuple(add(-1, v) for v in variadic))))
         if kwargs_name is not None:
             # sort the keywords so the runtime positions are deterministic even
             # though DictArgNode stores them in an unordered frozenset
-            signature.append((kwargs_name, DictArgNode(frozenset((n, add(n, v)) for n, v in sorted(keyword.items())))))
+            signature.append((kwargs_name, DictArgNode(frozenset((n, add(-1, v)) for n, v in sorted(keyword.items())))))
         return tuple(signature)
 
     def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[int, str, LowerType, int]]:
@@ -621,27 +666,29 @@ class _JittedFunction:
     def __call__(self, *args, **kwargs):
         fixed, variadic, keyword = self._args_info.bind_args(args, kwargs, self.__name__)
         signature = self._build_signature(fixed, variadic, keyword)
-        layout = _determine_layout(
-            [v for _, v in fixed] + [v for _, v in variadic] + list(keyword.values())
-        )
+        layout = _determine_layout(fixed + variadic + list(keyword.values()))
         key = _JitCacheKey(signature=signature, layout=layout)
-        compiled = self._cache.get(key)
-        if compiled is None:
+        cached = self._cache.get(key)
+        if cached is None:
             compiled = self._compile(key)
-            self._cache[key] = compiled
-        bound = dict(fixed + variadic)
-        bound.update(keyword)
-        values_by_pos: dict[int, Any] = {}
-        for pos, name, _, _ in self._iter_runtime_args(key):
-            values_by_pos[pos] = bound[name]
-        values = [values_by_pos[i] for i in range(len(values_by_pos))]
-        return compiled.call(*values)
+            converter = _gen_args_converter(signature)
+            self._cache[key] = compiled, converter
+        else:
+            compiled, converter = cached
+        # the converter expects one element per signature entry: the fixed
+        # values, then the variadic list and the keyword dict (when present)
+        invoke_args: list[Any] = list(fixed)
+        if self._args_info.varargs_name is not None:
+            invoke_args.append(variadic)
+        if self._args_info.kwargs_name is not None:
+            invoke_args.append(keyword)
+        return converter(compiled, invoke_args)
 
     def print_all(self):
         """Print the LLVM IR of the most recently compiled kernel."""
         if len(self._cache) == 0:
             return []
-        return list(self._cache.values())[-1].print_all()
+        return list(self._cache.values())[-1][0].print_all()
 
     def __repr__(self) -> str:
         return f"<jitted {self.__name__}>"
