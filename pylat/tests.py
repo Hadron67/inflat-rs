@@ -5,12 +5,11 @@ import numpy as np
 from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
-from pylat.jit.argpass import ComplexFloatType, FloatType, TypeContext
-from pylat.jit.fn_wrapper import Wrapper
-from pylat.jit.openmp import OpenMPBackend
-
 from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, symbols
+from .jit.argpass import ComplexFloatType, FloatType, TypeContext
 from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
+from .jit.fn_wrapper import Wrapper
+from .jit.openmp import OpenMPBackend
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
@@ -336,6 +335,81 @@ class JitWrapperTest(TestCase):
         @wrapper.jit()
         def f2(a, b):
             a += b[1:3]  # range slices are not supported
+
+        with self.assertRaises(TypeError):
+            f2(np.zeros((3, 3)), np.zeros((3, 3)))
+
+    def test_sum(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sum(b)
+
+        np.random.seed(40)
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        f(a, b)
+        assert_almost_equal(a, np.full(5, np.sum(b)))
+        a = np.zeros((3, 4))
+        b = np.random.rand(3, 4)
+        f(a, b)
+        assert_almost_equal(a, np.full((3, 4), np.sum(b)))
+
+    def test_sum_of_expression(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, c):
+            a += np.sum(b * 2) + np.sum(c)
+
+        np.random.seed(41)
+        a = np.zeros(6)
+        b = np.random.rand(6)
+        c = np.random.rand(6)
+        f(a, b, c)
+        assert_almost_equal(a, np.full(6, np.sum(b * 2) + np.sum(c)))
+
+    def test_sum_with_roll(self):
+        # a reduction whose summand needs the generic (non-standard-layout) kernel
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sum(np.roll(b, 1, axis=0))
+
+        np.random.seed(42)
+        a = np.zeros((5, 6))
+        b = np.random.rand(5, 6)
+        f(a, b)
+        assert_almost_equal(a, np.full((5, 6), np.sum(np.roll(b, 1, axis=0))))
+
+    def test_sum_int(self):
+        # integer sums follow the C convention of being signed
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sum(b)
+
+        a = np.zeros(4)
+        b = np.array([1, 2, 3, 4])
+        f(a, b)
+        assert_almost_equal(a, np.full(4, np.sum(b)))
+
+    def test_sum_errors(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f1(a, b):
+            a += np.sum(b, axis=0)  # only the sum over all axes is supported
+
+        with self.assertRaises(TypeError):
+            f1(np.zeros((3, 3)), np.zeros((3, 3)))
+
+        @wrapper.jit()
+        def f2(a, b):
+            a += np.sum(np.sum(b))  # nested sums are not supported
 
         with self.assertRaises(TypeError):
             f2(np.zeros((3, 3)), np.zeros((3, 3)))
@@ -777,7 +851,8 @@ class SimdLayoutTests(TestCase):
 
     @staticmethod
     def _last_compiled(f) -> CompiledWrapper:
-        return list(f._cache.values())[-1][0]
+        # the cached value is (main_kernel, *sum_kernels), converter
+        return list(f._cache.values())[-1][0][0]
 
     def test_row_major_uses_flat_kernel(self):
         wrapper = Wrapper()
@@ -1007,8 +1082,9 @@ class SimdLayoutTests(TestCase):
         b = np.asfortranarray(np.random.rand(4, 5))
         f(a, b)
         self.assertEqual(len(f._cache), 2)
+        # the cached value is (main_kernel, *sum_kernels), converter
         self.assertEqual(
-            {w.standard_layout for w, _ in f._cache.values()},
+            {w[0].standard_layout for w, _ in f._cache.values()},
             {StandardLayoutMode.ROW_MAJOR, StandardLayoutMode.COLUMN_MAJOR},
         )
 

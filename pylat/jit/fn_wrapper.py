@@ -35,13 +35,25 @@ from ..expr import (
     Roll,
     Sin,
     Slice,
+    Sum,
     Symbol,
     Times,
 )
-from .argpass import ComplexFloatType, FloatType, IntType, LowerType, TypeContext
+from .argpass import (
+    ComplexFloatType,
+    FloatType,
+    IntType,
+    LowerType,
+    TypeContext,
+    TypeResolver,
+)
 from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .openmp import OpenMPBackend
+
+# placeholder symbol namespace for reduction results; ``Sum`` nodes in the traced
+# assignments are replaced by symbols in this namespace before compilation
+_SUM_PREFIX = ('__sum',)
 
 _FUNC_MAP = {
     'sin': Sin,
@@ -79,6 +91,17 @@ class _Trace:
 
     def __init__(self) -> None:
         self.assigns: list[AssignExpr] = []
+        # each ``np.sum`` in the traced body is recorded here as a placeholder
+        # symbol (in first-seen order); the reductions are compiled from this
+        # registry and the placeholders take their place in the expressions
+        self.sums: dict[Sum, Symbol] = {}
+
+    def sum_placeholder(self, sum_node: Sum) -> Symbol:
+        """Return the placeholder symbol assigned to a ``Sum`` node, creating
+        one (and registering the node) on first use."""
+        if sum_node not in self.sums:
+            self.sums[sum_node] = Symbol(_SUM_PREFIX + (str(len(self.sums)),))
+        return self.sums[sum_node]
 
     def make_param_probe(self, name: tuple[str, ...]) -> '_Probe':
         return _Probe(self, Symbol(name))
@@ -185,11 +208,28 @@ class _Probe:
             expr = Slice(expr, axis, index)
         return self._new(expr)
 
-    # --- numpy functions (np.roll, ...) ---------------------------------
+    # --- numpy functions (np.roll, np.sum, ...) --------------------------
     def __array_function__(self, func, types, args, kwargs):
         if func is np.roll:
             return self._np_roll(*args, **kwargs)
+        if func is np.sum:
+            return self._np_sum(*args, **kwargs)
         return NotImplemented
+
+    def _np_sum(self, array, **kwargs):
+        if not isinstance(array, _Probe):
+            raise TypeError("np.sum requires a traced array in jitted functions")
+        if kwargs.get('axis', None) is not None:
+            raise TypeError("only np.sum over all axes is supported in jitted functions")
+        unsupported = [name for name, value in kwargs.items()
+                       if name != 'axis' and value is not None and not isinstance(value, bool)]
+        if unsupported:
+            raise TypeError(f"unsupported np.sum argument(s): {unsupported} in jitted functions")
+        if isinstance(array._expr, Sum) or array._expr in self._trace.sums.values():
+            raise TypeError("nested np.sum is not supported in jitted functions")
+        # the compiled kernels cannot lower a Sum node, so it is replaced by a
+        # placeholder scalar symbol now and compiled as a reduction later
+        return self._new(self._trace.sum_placeholder(Sum(array._expr)))
 
     def _np_roll(self, array, shift, axis=None):
         if not isinstance(array, _Probe):
@@ -412,21 +452,32 @@ def _gen_fill_one_arg(snode: SignatureNode, value_str: str, runtime_args: dict[i
                 raise ValueError(f"Unexpected node type: {snode}")
 
 def _gen_args_converter(signature: Signature) -> Callable:
-    """Generate a ``__invoke(fn, args)`` function that unpacks the raw call
-    arguments into the compiled kernel's positional argument list.
+    """Generate a ``__invoke(wrappers, args)`` function that unpacks the raw
+    call arguments and drives the compiled kernels.
 
     ``args`` holds one element per signature entry (``Signature.all_nodes``):
     the fixed values, then the variadic list and the keyword dict (when such
-    parameters exist).  The generated function is specialised per signature, so
-    the (positional) unpacking done per call reduces to plain indexing."""
+    parameters exist).  ``wrappers`` is ``(main, *sums)``: the sum kernels are
+    called first with the runtime arguments, and their scalar results are passed
+    to the main kernel after the runtime arguments.  The generated function is
+    specialised per signature, so the (positional) unpacking done per call
+    reduces to plain indexing."""
     runtime_args: dict[int, str] = {}
     for i, snode in enumerate(signature.all_nodes()):
         _gen_fill_one_arg(snode, f'args[{i}]', runtime_args)
+    exprs = [runtime_args[i] for i in range(len(runtime_args))]
 
     fname = '__invoke'
-    source = f"def {fname}(fn, args):\n    return fn.call({', '.join(runtime_args[i] for i in range(len(runtime_args)))})"
+    lines = [
+        f"def {fname}(wrappers, args):",
+        "    main = wrappers[0]",
+        "    sums = wrappers[1:]",
+        *[f"    v{i} = {expr}" for i, expr in enumerate(exprs)],
+        f"    svals = [s.call({', '.join(f'v{i}' for i in range(len(exprs)))}) for s in sums]",
+        f"    return main.call({', '.join([*(f'v{i}' for i in range(len(exprs))), '*svals'])})",
+    ]
     globals = {}
-    exec(source, globals)  # noqa: S102
+    exec('\n'.join(lines), globals)  # noqa: S102
     return globals[fname]
 
 def _create_one_probe_arg(trace: _Trace, snode: SignatureNode, name: tuple[str, ...]) -> Any:
@@ -563,7 +614,7 @@ class _JittedFunction:
         self._wrapper = wrapper
         self._fn = fn
         self._args_info = _FormalArgsInfo(params, comptime_args)
-        self._cache: dict[_JitCacheKey, tuple[CompiledWrapper, Callable]] = {}
+        self._cache: dict[_JitCacheKey, tuple[tuple[CompiledWrapper, ...], Callable]] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
@@ -580,10 +631,13 @@ class _JittedFunction:
             return self
         return functools.partial(self.__call__, instance)
 
-    def _trace(self, key: _JitCacheKey) -> list[AssignExpr]:
-        # compile-time arguments are traced with their constant value, so they are
-        # baked into the expression trees (which also enables compile-time control
-        # flow); the other arguments are traced with probes
+    def _trace(self, key: _JitCacheKey) -> tuple[list[AssignExpr], dict[Sum, Symbol]]:
+        """Trace the function body; returns the recorded assignments together
+        with the ``Sum`` -> placeholder symbol registry (in first-seen order).
+
+        Compile-time arguments are traced with their constant value, so they are
+        baked into the expression trees (which also enables compile-time control
+        flow); the other arguments are traced with probes."""
         trace = _Trace()
         positional, keyword = _create_probe_args(trace, key.signature, self._args_info)
         result = self._fn(*positional, **keyword)
@@ -594,7 +648,7 @@ class _JittedFunction:
             )
         if len(trace.assigns) == 0:
             raise TypeError(f"{self.__name__}() must contain at least one in-place assignment")
-        return trace.assigns
+        return trace.assigns, trace.sums
 
     def _infer_arg_type(self, value) -> tuple[LowerType, int]:
         if isinstance(value, _Probe):
@@ -750,7 +804,16 @@ class _JittedFunction:
             walk(signature.kwargs, (kwargs_name,))
         return result
 
-    def _compile(self, key: _JitCacheKey) -> CompiledWrapper:
+    def _compile(self, key: _JitCacheKey) -> tuple[CompiledWrapper, tuple[CompiledWrapper, ...]]:
+        """Compile the traced assignments into kernels.
+
+        ``_FunctionCompiler`` cannot lower :class:`Sum` nodes, so every ``Sum``
+        recorded while tracing is compiled as a separate reduction kernel and the
+        traced assignments (which already reference the placeholder symbols)
+        become the main kernel; the main kernel takes the reduction results as
+        additional scalar arguments.  Returns ``(main, sums)`` where ``sums``
+        holds one reduction kernel per ``Sum``, in the same order as the
+        placeholders."""
         context = TypeContext()
         args_by_pos: dict[int, Symbol] = {}
         for pos, sym, lower_type, dim in self._runtime_args(key):
@@ -762,8 +825,32 @@ class _JittedFunction:
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
         )
-        assigns = self._trace(key)
-        return compiler.compile_assignments(args, assigns, context, standard_layout=key.layout)
+        assigns, sums = self._trace(key)
+        if len(sums) == 0:
+            main = compiler.compile_assignments(args, assigns, context, standard_layout=key.layout)
+            return main, ()
+        resolver = TypeResolver(context, compiler)
+        placeholder_symbols = list(sums.values())
+        sum_types: dict[Sum, LowerType] = {}
+        for sum_node in sums:
+            sum_type = resolver.get_type(sum_node.expr)
+            if isinstance(sum_type, IntType):
+                # integer sums follow the C convention of being signed
+                sum_type = IntType(sum_type.bits, True)
+            sum_types[sum_node] = sum_type
+        sum_wrappers = tuple(
+            compiler.compile_reduction(args, sum_node.expr, context, standard_layout=key.layout)
+            for sum_node in sums
+        )
+        for sum_node, sym in zip(sums, placeholder_symbols):
+            context.set_symbol(sym, sum_types[sum_node], 0)
+        main = compiler.compile_assignments(
+            args + placeholder_symbols,
+            assigns,
+            context,
+            standard_layout=key.layout,
+        )
+        return main, sum_wrappers
 
     def __call__(self, *args, **kwargs):
         fixed, variadic, keyword = self._args_info.bind_args(args, kwargs, self.__name__)
@@ -771,14 +858,15 @@ class _JittedFunction:
         layout = _determine_layout(fixed + variadic + list(keyword.values()))
         key = _JitCacheKey(signature=signature, layout=layout)
         cached = self._cache.get(key)
-        compiled = None
+        wrappers = None
         converter = None
         if cached is None:
-            compiled = self._compile(key)
+            main, sums = self._compile(key)
+            wrappers = (main, *sums)
             converter = _gen_args_converter(signature)
-            self._cache[key] = compiled, converter
+            self._cache[key] = wrappers, converter
         else:
-            compiled, converter = cached
+            wrappers, converter = cached
         # the converter expects one element per signature entry: the fixed
         # values, then the variadic list and the keyword dict (when present)
         invoke_args: list[Any] = list(fixed)
@@ -786,13 +874,13 @@ class _JittedFunction:
             invoke_args.append(variadic)
         if self._args_info.has_kwargs():
             invoke_args.append(keyword)
-        return converter(compiled, invoke_args)
+        return converter(wrappers, invoke_args)
 
     def print_all(self):
         """Print the LLVM IR of the most recently compiled kernel."""
         if len(self._cache) == 0:
             return []
-        return list(self._cache.values())[-1][0].print_all()
+        return list(self._cache.values())[-1][0][0].print_all()
 
     def __repr__(self) -> str:
         return f"<jitted {self.__name__}>"

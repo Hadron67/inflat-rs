@@ -806,6 +806,14 @@ class Slice(Expr):
         return f"({self.expr.input_form()} [{self.axis}, {self.index}])"
 
 @exprclass
+class Sum(Expr):
+    expr: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"sum({self.expr.input_form()})"
+
+@exprclass
 class SymbolShape(Expr):
     symbol: Symbol
     index: int

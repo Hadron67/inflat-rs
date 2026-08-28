@@ -3,9 +3,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pylat.jit.fn_wrapper import Wrapper
-
 from .expr import Expr
+from .jit.fn_wrapper import Wrapper
 
 lax = Wrapper()
 
