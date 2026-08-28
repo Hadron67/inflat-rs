@@ -326,6 +326,7 @@ class SignatureNode:
 class ArrayArgNode(SignatureNode):
     dtype: LowerType
     rank: int
+    runtime_arg_pos: int
 
     @override
     def __str__(self) -> str:
@@ -358,6 +359,7 @@ class DictArgNode(SignatureNode):
 @dataclass(frozen=True)
 class ScalarArgNode(SignatureNode):
     dtype: LowerType
+    runtime_arg_pos: int
 
     @override
     def __str__(self) -> str:
@@ -466,14 +468,16 @@ class _JittedFunction:
             return True
         return False
 
-    def _classify(self, name: str, value) -> SignatureNode:
-        """Classify a bound argument into its signature node for the cache key."""
+    def _classify(self, name: str, value, runtime_arg_pos: int) -> SignatureNode:
+        """Classify a bound argument into its signature node for the cache key.
+        ``runtime_arg_pos`` is the position of the argument in the compiled
+        kernel's positional argument list; it is recorded on runtime nodes only."""
         if self._is_comptime_arg(name, value):
             return ComptimeValueArgNode(value)
         lower_type, dim = self._infer_arg_type(value)
         if dim == 0:
-            return ScalarArgNode(lower_type)
-        return ArrayArgNode(lower_type, dim)
+            return ScalarArgNode(lower_type, runtime_arg_pos)
+        return ArrayArgNode(lower_type, dim, runtime_arg_pos)
 
     def _bind_args(self, args, kwargs) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]], dict[str, Any]]:
         """Bind the call arguments to the formal parameters.
@@ -515,42 +519,54 @@ class _JittedFunction:
         parameter, in declaration order.  ``*varargs`` elements are collected into a
         :class:`TupleArgNode` and ``**kwargs`` values into a :class:`DictArgNode`,
         so the signature determines the runtime argument types, the compile-time
-        values and how the call arguments map to symbols."""
-        signature: list[tuple[str, SignatureNode]] = [
-            (name, self._classify(name, value)) for name, value in fixed
-        ]
+        values and how the call arguments map to symbols.  Every runtime node also
+        records its position in the compiled kernel's positional argument list."""
+        signature: list[tuple[str, SignatureNode]] = []
+        runtime_pos = 0
+
+        def add(name: str, value: Any) -> SignatureNode:
+            nonlocal runtime_pos
+            node = self._classify(name, value, runtime_pos)
+            if not isinstance(node, ComptimeValueArgNode):
+                runtime_pos += 1
+            return node
+
+        signature.extend((name, add(name, value)) for name, value in fixed)
         varargs_name = next((name for name, kind in self._params if kind == 'varargs'), None)
         kwargs_name = next((name for name, kind in self._params if kind == 'kwargs'), None)
         if varargs_name is not None:
-            signature.append((varargs_name, TupleArgNode(tuple(self._classify(n, v) for n, v in variadic))))
+            signature.append((varargs_name, TupleArgNode(tuple(add(n, v) for n, v in variadic))))
         if kwargs_name is not None:
-            signature.append((kwargs_name, DictArgNode(frozenset((n, self._classify(n, v)) for n, v in keyword.items()))))
+            # sort the keywords so the runtime positions are deterministic even
+            # though DictArgNode stores them in an unordered frozenset
+            signature.append((kwargs_name, DictArgNode(frozenset((n, add(n, v)) for n, v in sorted(keyword.items())))))
         return tuple(signature)
 
-    def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[str, LowerType, int]]:
-        """Yield ``(name, lower_type, dim)`` for every runtime argument in the key, in
-        the order the compiled kernel takes its positional arguments."""
+    def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[int, str, LowerType, int]]:
+        """Yield ``(runtime_arg_pos, name, lower_type, dim)`` for every runtime
+        argument in the key, using the positions recorded in the signature nodes."""
         def dim_of(node: SignatureNode) -> int:
             return node.rank if isinstance(node, ArrayArgNode) else 0
         for name, node in key.signature:
             if isinstance(node, (ArrayArgNode, ScalarArgNode)):
-                yield name, node.dtype, dim_of(node)
+                yield node.runtime_arg_pos, name, node.dtype, dim_of(node)
             elif isinstance(node, TupleArgNode):
                 for i, elem in enumerate(node.elements):
                     if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
-                        yield f"{name}[{i}]", elem.dtype, dim_of(elem)
+                        yield elem.runtime_arg_pos, f"{name}[{i}]", elem.dtype, dim_of(elem)
             elif isinstance(node, DictArgNode):
-                for kw_name, elem in sorted(node.values, key=lambda kv: kv[0]):
+                for kw_name, elem in node.values:
                     if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
-                        yield kw_name, elem.dtype, dim_of(elem)
+                        yield elem.runtime_arg_pos, kw_name, elem.dtype, dim_of(elem)
 
     def _compile(self, key: _JitCacheKey, assigns: list[AssignExpr]) -> CompiledWrapper:
         context = TypeContext()
-        args: list[Symbol] = []
-        for name, lower_type, dim in self._iter_runtime_args(key):
+        args_by_pos: dict[int, Symbol] = {}
+        for pos, name, lower_type, dim in self._iter_runtime_args(key):
             sym = self._names.get(name, symbol(name))
-            args.append(sym)
+            args_by_pos[pos] = sym
             context.set_symbol(sym, lower_type, dim)
+        args = [args_by_pos[i] for i in range(len(args_by_pos))]
         compiler = JitCompiler(
             self._wrapper._backend,
             real_type=self._wrapper._real_type,
@@ -572,7 +588,10 @@ class _JittedFunction:
             self._cache[key] = compiled
         bound = dict(fixed + variadic)
         bound.update(keyword)
-        values = [bound[name] for name, _, _ in self._iter_runtime_args(key)]
+        values_by_pos: dict[int, Any] = {}
+        for pos, name, _, _ in self._iter_runtime_args(key):
+            values_by_pos[pos] = bound[name]
+        values = [values_by_pos[i] for i in range(len(values_by_pos))]
         return compiled.call(*values)
 
     def print_all(self):
