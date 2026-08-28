@@ -27,4 +27,4 @@ class Params:
     v: Callable[[Expr], Expr]
 
     def _apply_k1(self, field: ScalarField, dt: float):
-        field.b += field.mom_b
+        _plus_assign_dt(field.b, field.mom_b, dt)

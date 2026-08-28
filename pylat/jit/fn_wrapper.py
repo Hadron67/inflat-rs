@@ -13,12 +13,14 @@ functions defined in interactive sessions all work.
 """
 
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from inspect import Parameter
 from typing import Any, Literal
 
 import numpy as np
 from llvmlite import binding as llvm
+from typing_extensions import override
 
 from ..expr import (
     AssignExpr,
@@ -329,6 +331,54 @@ def _infer_params(fn: Callable) -> tuple[tuple[str, ParamKind], ...]:
         params.append((name, kind))
     return tuple(params)
 
+class SignatureNode:
+    pass
+
+@dataclass(frozen=True)
+class ArrayArgNode(SignatureNode):
+    dtype: LowerType
+    rank: int
+
+    @override
+    def __str__(self) -> str:
+        return f"Array[{self.dtype}, {self.rank}]"
+
+@dataclass(frozen=True)
+class ComptimeValueArgNode(SignatureNode):
+    value: Any
+
+    @override
+    def __str__(self) -> str:
+        return str(self.value)
+
+@dataclass(frozen=True)
+class TupleArgNode(SignatureNode):
+    elements: tuple[SignatureNode, ...]
+
+    @override
+    def __str__(self) -> str:
+        return f"Tuple[{', '.join(str(e) for e in self.elements)}]"
+
+@dataclass(frozen=True)
+class DictArgNode(SignatureNode):
+    values: frozenset[tuple[str, SignatureNode]]
+
+    @override
+    def __str__(self) -> str:
+        return f"Dict[{', '.join(f'{k} -> {v}' for k, v in self.values)}]"
+
+@dataclass(frozen=True)
+class ScalarArgNode(SignatureNode):
+    dtype: LowerType
+
+    @override
+    def __str__(self) -> str:
+        return f"Scalar[{self.dtype}]"
+
+@dataclass(frozen=True)
+class _JitCacheKey:
+    signature: tuple[tuple[str, SignatureNode], ...]
+    layout: StandardLayoutMode
 
 class _JittedFunction:
     """The callable produced by ``Wrapper.jit``."""
@@ -344,33 +394,36 @@ class _JittedFunction:
             if kind == 'arg'
         }
         self._comptime_args = comptime_args
-        self._cache: dict[
-            tuple[
-                tuple[tuple[LowerType, int], ...],  # runtime signature
-                tuple[str, ...],  # keyword argument names
-                StandardLayoutMode,
-                tuple[tuple[str, Any], ...],  # compile-time values
-            ],
-            tuple[CompiledWrapper, set[Symbol]],
-        ] = {}
+        self._cache: dict[_JitCacheKey, tuple[CompiledWrapper, set[Symbol]]] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
-    def _trace(self, comptime: dict[str, Any], positional_names: tuple[str, ...], keyword_names: tuple[str, ...]) -> tuple[list[AssignExpr], set[Symbol]]:
-        # compile-time parameters are traced with their constant value, so they are
+    def _trace(self, key: _JitCacheKey) -> tuple[list[AssignExpr], set[Symbol]]:
+        # compile-time arguments are traced with their constant value, so they are
         # baked into the expression trees (which also enables compile-time control
-        # flow); the other parameters are traced with probes
+        # flow); the other arguments are traced with probes
         trace = _Trace(self._names)
-
-        def make(name: str):
-            if name in comptime:
-                return comptime[name]
-            if name in self._names:
-                return trace.make_param_probe(name)
-            # variadic elements use synthesized symbols
-            return _Probe(trace, symbol(name))
-
-        result = self._fn(*[make(name) for name in positional_names], **{name: make(name) for name in keyword_names})
+        positional: list[Any] = []
+        keyword: dict[str, Any] = {}
+        for name, node in key.signature:
+            if isinstance(node, ComptimeValueArgNode):
+                positional.append(node.value)
+            elif isinstance(node, TupleArgNode):
+                for i, elem in enumerate(node.elements):
+                    elem_name = f"{name}[{i}]"
+                    if isinstance(elem, ComptimeValueArgNode):
+                        positional.append(elem.value)
+                    else:
+                        positional.append(_Probe(trace, symbol(elem_name)))
+            elif isinstance(node, DictArgNode):
+                for kw_name, elem in node.values:
+                    if isinstance(elem, ComptimeValueArgNode):
+                        keyword[kw_name] = elem.value
+                    else:
+                        keyword[kw_name] = _Probe(trace, symbol(kw_name))
+            else:
+                positional.append(trace.make_param_probe(name))
+        result = self._fn(*positional, **keyword)
         if result is not None:
             raise TypeError(
                 f"{self.__name__}() must not return values; mutate the input arrays in place "
@@ -406,6 +459,12 @@ class _JittedFunction:
         type that is hashable (e.g. tuples used with ``np.roll``)."""
         index = self._param_positions.get(name)
         if index is not None and self._comptime_args is not None and (name in self._comptime_args or index in self._comptime_args):
+            try:
+                hash(value)
+            except TypeError as e:
+                raise TypeError(
+                    f"comptime argument {name!r} must be hashable (it is part of the JIT cache key)"
+                ) from e
             return True
         if isinstance(value, _Probe):
             # nested jitted calls are rejected by _infer_arg_type with a clear message
@@ -423,23 +482,23 @@ class _JittedFunction:
             return True
         return False
 
-    def _classify_args(self, bound: list[tuple[str, Any]]) -> tuple[list[tuple[str, tuple[LowerType, int]]], dict[str, Any]]:
-        """Split the bound arguments into runtime (name, type) pairs and a map of
-        compile-time names to their constant values."""
-        runtime: list[tuple[str, tuple[LowerType, int]]] = []
-        comptime: dict[str, Any] = {}
-        for name, value in bound:
-            if self._is_comptime_arg(name, value):
-                comptime[name] = value
-            else:
-                runtime.append((name, self._infer_arg_type(value)))
-        return runtime, comptime
+    def _classify(self, name: str, value) -> SignatureNode:
+        """Classify a bound argument into its signature node for the cache key."""
+        if self._is_comptime_arg(name, value):
+            return ComptimeValueArgNode(value)
+        lower_type, dim = self._infer_arg_type(value)
+        if dim == 0:
+            return ScalarArgNode(lower_type)
+        return ArrayArgNode(lower_type, dim)
 
-    def _bind_args(self, args, kwargs) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
-        """Bind the call arguments to the parameters.  Returns ``(name, value)`` pairs
-        for the positional arguments (named parameters use their parameter name,
-        variadic elements use ``<param>[i]``) and for the keyword arguments (using
-        their keyword as the name)."""
+    def _bind_args(self, args, kwargs) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]], dict[str, Any]]:
+        """Bind the call arguments to the formal parameters.
+
+        Returns ``(fixed, variadic, keyword)``: ``fixed`` and ``variadic`` are
+        ``(name, value)`` pairs for the fixed positional parameters (named with the
+        parameter name) and the ``*varargs`` elements (named ``<param>[i]``);
+        ``keyword`` maps keyword names to values for the ``**kwargs`` parameter.
+        """
         fixed = [name for name, kind in self._params if kind == 'arg']
         varargs_name = next((name for name, kind in self._params if kind == 'varargs'), None)
         kwargs_name = next((name for name, kind in self._params if kind == 'kwargs'), None)
@@ -447,61 +506,90 @@ class _JittedFunction:
             raise TypeError(
                 f"{self.__name__}() missing {len(fixed) - len(args)} required positional argument(s)"
             )
-        positional: list[tuple[str, Any]] = list(zip(fixed, args))
+        fixed_args = list(zip(fixed, args))
         rest = args[len(fixed):]
         if varargs_name is None:
             if len(rest) > 0:
                 raise TypeError(
                     f"{self.__name__}() takes {len(fixed)} positional arguments but {len(args)} were given"
                 )
+            variadic: list[tuple[str, Any]] = []
         else:
-            positional.extend((f"{varargs_name}[{i}]", value) for i, value in enumerate(rest))
+            variadic = [(f"{varargs_name}[{i}]", value) for i, value in enumerate(rest)]
         if kwargs_name is None:
             if len(kwargs) > 0:
                 raise TypeError(
                     f"{self.__name__}() got an unexpected keyword argument {next(iter(kwargs))!r}"
                 )
-            keyword: list[tuple[str, Any]] = []
+            keyword: dict[str, Any] = {}
         else:
-            keyword = list(kwargs.items())
-        return positional, keyword
+            keyword = dict(kwargs)
+        return fixed_args, variadic, keyword
 
-    def _compile(self, runtime: list[tuple[str, tuple[LowerType, int]]], layout: StandardLayoutMode, assigns: list[AssignExpr]) -> CompiledWrapper:
+    def _build_signature(self, fixed: list[tuple[str, Any]], variadic: list[tuple[str, Any]], keyword: dict[str, Any]) -> tuple[tuple[str, SignatureNode], ...]:
+        """Build the cache-key signature: one ``(name, node)`` entry per formal
+        parameter, in declaration order.  ``*varargs`` elements are collected into a
+        :class:`TupleArgNode` and ``**kwargs`` values into a :class:`DictArgNode`,
+        so the signature determines the runtime argument types, the compile-time
+        values and how the call arguments map to symbols."""
+        signature: list[tuple[str, SignatureNode]] = [
+            (name, self._classify(name, value)) for name, value in fixed
+        ]
+        varargs_name = next((name for name, kind in self._params if kind == 'varargs'), None)
+        kwargs_name = next((name for name, kind in self._params if kind == 'kwargs'), None)
+        if varargs_name is not None:
+            signature.append((varargs_name, TupleArgNode(tuple(self._classify(n, v) for n, v in variadic))))
+        if kwargs_name is not None:
+            signature.append((kwargs_name, DictArgNode(frozenset((n, self._classify(n, v)) for n, v in keyword.items()))))
+        return tuple(signature)
+
+    def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[str, LowerType, int]]:
+        """Yield ``(name, lower_type, dim)`` for every runtime argument in the key."""
+        def dim_of(node: SignatureNode) -> int:
+            return node.rank if isinstance(node, ArrayArgNode) else 0
+        for name, node in key.signature:
+            if isinstance(node, (ArrayArgNode, ScalarArgNode)):
+                yield name, node.dtype, dim_of(node)
+            elif isinstance(node, TupleArgNode):
+                for i, elem in enumerate(node.elements):
+                    if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
+                        yield f"{name}[{i}]", elem.dtype, dim_of(elem)
+            elif isinstance(node, DictArgNode):
+                for kw_name, elem in node.values:
+                    if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
+                        yield kw_name, elem.dtype, dim_of(elem)
+
+    def _compile(self, key: _JitCacheKey, assigns: list[AssignExpr]) -> CompiledWrapper:
         context = TypeContext()
-        for name, (lower_type, dim) in runtime:
+        for name, lower_type, dim in self._iter_runtime_args(key):
             context.set_symbol(self._names.get(name, symbol(name)), lower_type, dim)
         compiler = JitCompiler(
             self._wrapper._backend,
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
         )
-        return compiler.compile_assignments(assigns, context, standard_layout=layout)
+        return compiler.compile_assignments(assigns, context, standard_layout=key.layout)
 
     def __call__(self, *args, **kwargs):
-        positional, keyword = self._bind_args(args, kwargs)
-        bound = positional + keyword
-        kwarg_names = tuple(name for name, _ in keyword)
-        runtime, comptime = self._classify_args(bound)
-        signature = tuple(ty for _, ty in runtime)
-        comptime_key = tuple(comptime.items())
-        try:
-            hash(comptime_key)
-        except TypeError as e:
-            raise TypeError(
-                "comptime arguments must be hashable (they are part of the JIT cache key)"
-            ) from e
-        layout = _determine_layout([value for _, value in bound])
-        key = (signature, kwarg_names, layout, comptime_key)
+        fixed, variadic, keyword = self._bind_args(args, kwargs)
+        signature = self._build_signature(fixed, variadic, keyword)
+        layout = _determine_layout(
+            [v for _, v in fixed] + [v for _, v in variadic] + list(keyword.values())
+        )
+        key = _JitCacheKey(signature=signature, layout=layout)
         entry = self._cache.get(key)
         if entry is None:
-            positional_names = tuple(name for name, _ in positional)
-            assigns, used = self._trace(comptime, positional_names, kwarg_names)
-            compiled = self._compile(runtime, layout, assigns)
+            assigns, used = self._trace(key)
+            compiled = self._compile(key, assigns)
             entry = (compiled, used)
             self._cache[key] = entry
         compiled, used = entry
-        arg_map = {}
-        for name, value in bound:
+        arg_map: dict[Symbol, Any] = {}
+        for name, value in fixed + variadic:
+            sym = symbol(name)
+            if sym in used:
+                arg_map[sym] = value
+        for name, value in keyword.items():
             sym = symbol(name)
             if sym in used:
                 arg_map[sym] = value

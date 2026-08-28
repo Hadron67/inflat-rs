@@ -672,11 +672,6 @@ class _FunctionCompiler:
         return self._block
 
 class CompiledWrapper:
-    _parent: 'JitCompiler'
-    _symbols: _SymbolScope
-    _inner: CompiledBackendFunction
-    standard_layout: StandardLayoutMode
-
     @override
     def __init__(self, parent: 'JitCompiler', symbols: _SymbolScope, inner: CompiledBackendFunction, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
         self._parent = parent
@@ -707,6 +702,7 @@ class CompiledWrapper:
             info = self._symbols.get_symbol(symbol)
             lower_type = self._symbols.type_cache.get_symbol_type(symbol)
             lower_type_ctype = lower_type.to_ctype()
+            lower_type_size = ctypes.sizeof(lower_type_ctype)
             match info:
                 case ScalarArgInfo():
                     if info.is_ref:
@@ -724,7 +720,8 @@ class CompiledWrapper:
                     for index, shape in zip(info.shape, value_shape):
                         converted_args[index] = index_type(shape)
                     for index, stride in zip(info.strides, value_strides):
-                        converted_args[index] = index_type(stride // ctypes.sizeof(lower_type_ctype))
+                        assert stride % lower_type_size == 0
+                        converted_args[index] = index_type(stride // lower_type_size)
 
         for symbol in self._symbols._symbol_values:
             if symbol not in seen_symbols:
