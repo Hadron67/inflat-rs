@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import dataclass_transform, override
 
-from pylat.util import SubExprFnBuilder
+from .util import SubExprFnBuilder
 
 
 class Expr:

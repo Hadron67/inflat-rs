@@ -13,7 +13,7 @@ functions defined in interactive sessions all work.
 """
 
 import inspect
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from inspect import Parameter
 from typing import Any, Literal, overload
@@ -36,7 +36,6 @@ from ..expr import (
     Slice,
     Symbol,
     Times,
-    symbol,
 )
 from .argpass import ComplexFloatType, FloatType, IntType, LowerType, TypeContext
 from .backend import Backend
@@ -77,12 +76,11 @@ def _as_expr(value) -> Expr:
 class _Trace:
     """Records the assignments performed while the function is being traced."""
 
-    def __init__(self, names: Mapping[str, Symbol]) -> None:
-        self._names = names
+    def __init__(self) -> None:
         self.assigns: list[AssignExpr] = []
 
-    def make_param_probe(self, name: str) -> '_Probe':
-        return _Probe(self, self._names[name])
+    def make_param_probe(self, name: tuple[str, ...]) -> '_Probe':
+        return _Probe(self, Symbol(name))
 
     def record(self, target: '_Probe', op: str, value) -> None:
         if not isinstance(target._expr, Symbol):
@@ -323,20 +321,6 @@ class SignatureNode:
     pass
 
 @dataclass(frozen=True)
-class Signature:
-    fixed_args: tuple[SignatureNode, ...]
-    varargs: 'TupleArgNode | None'
-    kwargs: 'DictArgNode | None'
-
-    def all_nodes(self) -> tuple[SignatureNode, ...]:
-        ret = self.fixed_args
-        if self.varargs is not None:
-            ret += (self.varargs,)
-        if self.kwargs is not None:
-            ret += (self.kwargs,)
-        return ret
-
-@dataclass(frozen=True)
 class ArrayArgNode(SignatureNode):
     dtype: LowerType
     rank: int
@@ -378,6 +362,20 @@ class ScalarArgNode(SignatureNode):
     @override
     def __str__(self) -> str:
         return f"Scalar[{self.dtype}]"
+
+@dataclass(frozen=True)
+class Signature:
+    fixed_args: tuple[SignatureNode, ...]
+    varargs: TupleArgNode | None
+    kwargs: DictArgNode | None
+
+    def all_nodes(self) -> tuple[SignatureNode, ...]:
+        ret = self.fixed_args
+        if self.varargs is not None:
+            ret += (self.varargs,)
+        if self.kwargs is not None:
+            ret += (self.kwargs,)
+        return ret
 
 @dataclass(frozen=True)
 class _JitCacheKey:
@@ -426,6 +424,19 @@ def _gen_args_converter(signature: Signature) -> Callable:
     exec(source, globals)  # noqa: S102
     return globals[fname]
 
+def _create_one_probe_arg(trace: _Trace, snode: SignatureNode, name: tuple[str, ...]) -> Any:
+    match snode:
+        case ArrayArgNode() | ScalarArgNode():
+            return trace.make_param_probe(name)
+        case ComptimeValueArgNode():
+            return snode.value
+        case TupleArgNode():
+            return tuple(_create_one_probe_arg(trace, elem, name + (str(i),)) for i, elem in enumerate(snode.elements))
+        case DictArgNode():
+            return {k: _create_one_probe_arg(trace, v, name + (k,)) for k, v in snode.values}
+        case _:
+            raise TypeError(f"unexpected signature node type: {snode}")
+
 def _create_probe_args(trace: _Trace, signature: Signature, args_info: '_FormalArgsInfo') -> tuple[list[Any], dict[str, Any]]:
     """Build the arguments used to trace the function body.
 
@@ -434,24 +445,19 @@ def _create_probe_args(trace: _Trace, signature: Signature, args_info: '_FormalA
     as probes that record the operations performed on them."""
     positional: list[Any] = []
     keyword: dict[str, Any] = {}
+    ns = '__trace'
     for name, node in zip(args_info.fixed_names, signature.fixed_args):
-        if isinstance(node, ComptimeValueArgNode):
-            positional.append(node.value)
-        else:
-            positional.append(trace.make_param_probe(name))
+        positional.append(_create_one_probe_arg(trace, node, (ns, name)))
     if signature.varargs is not None:
-        varargs_name = args_info.varargs_name
-        for i, elem in enumerate(signature.varargs.elements):
-            if isinstance(elem, ComptimeValueArgNode):
-                positional.append(elem.value)
-            else:
-                positional.append(_Probe(trace, symbol(f"{varargs_name}[{i}]")))
+        name = args_info.varargs_name
+        assert name is not None
+        # *varargs elements are passed as separate positional arguments
+        positional.extend(_create_one_probe_arg(trace, signature.varargs, (ns, name)))
     if signature.kwargs is not None:
-        for kw_name, elem in signature.kwargs.values:
-            if isinstance(elem, ComptimeValueArgNode):
-                keyword[kw_name] = elem.value
-            else:
-                keyword[kw_name] = _Probe(trace, symbol(kw_name))
+        name = args_info.kwargs_name
+        assert name is not None
+        # **kwargs values are passed as keyword arguments
+        keyword.update(_create_one_probe_arg(trace, signature.kwargs, (ns, name)))
     return positional, keyword
 
 
@@ -465,7 +471,6 @@ class _FormalArgsInfo:
 
     def __init__(self, params: tuple[tuple[str, ParamKind], ...], comptime_args: set[str | int] | None = None) -> None:
         self._params = params
-        self._names = {name: symbol(name) for name, _ in params}
         self._param_positions = {
             name: index
             for index, (name, kind) in enumerate(params)
@@ -501,14 +506,6 @@ class _FormalArgsInfo:
     def kwargs_name(self) -> str | None:
         """Name of the ``**kwargs`` parameter, or ``None`` when there is none."""
         return next((name for name, kind in self._params if kind == 'kwargs'), None)
-
-    def symbol_of(self, name: str) -> Symbol:
-        """Symbol bound to a formal parameter; synthetic names (``<param>[i]``
-        varargs elements, ``**kwargs`` keys) get a freshly created symbol."""
-        return self._names.get(name, symbol(name))
-
-    def make_trace(self) -> _Trace:
-        return _Trace(self._names)
 
     def is_explicit_comptime(self, pos: int) -> bool:
         """Whether a fixed positional parameter is declared in ``comptime_args``,
@@ -562,7 +559,7 @@ class _JittedFunction:
         # compile-time arguments are traced with their constant value, so they are
         # baked into the expression trees (which also enables compile-time control
         # flow); the other arguments are traced with probes
-        trace = self._args_info.make_trace()
+        trace = _Trace()
         positional, keyword = _create_probe_args(trace, key.signature, self._args_info)
         result = self._fn(*positional, **keyword)
         if result is not None:
@@ -660,32 +657,39 @@ class _JittedFunction:
             kwargs_node = DictArgNode(frozenset((n, add(-1, v)) for n, v in sorted(keyword.items())))
         return Signature(fixed_args=fixed_nodes, varargs=varargs_node, kwargs=kwargs_node)
 
-    def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[int, str, LowerType, int]]:
-        """Yield ``(runtime_arg_pos, name, lower_type, dim)`` for every runtime
+    def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[int, Symbol, LowerType, int]]:
+        """Yield ``(runtime_arg_pos, symbol, lower_type, dim)`` for every runtime
         argument in the key, using the positions recorded in the signature nodes.
-        Parameter names are recovered from the formal parameter list, since the
-        signature itself stores nodes only."""
+        Symbols are named after the probe path used while tracing (the ``__trace``
+        namespace followed by the parameter path), so that they match the symbols
+        recorded in the traced assignments."""
         def dim_of(node: SignatureNode) -> int:
             return node.rank if isinstance(node, ArrayArgNode) else 0
+
+        def probe_symbol(path: tuple[str, ...]) -> Symbol:
+            return Symbol(('__trace',) + path)
+
         signature = key.signature
         for name, node in zip(self._args_info.fixed_names, signature.fixed_args):
             if isinstance(node, (ArrayArgNode, ScalarArgNode)):
-                yield node.runtime_arg_pos, name, node.dtype, dim_of(node)
+                yield node.runtime_arg_pos, probe_symbol((name,)), node.dtype, dim_of(node)
         if signature.varargs is not None:
             varargs_name = self._args_info.varargs_name
+            assert varargs_name is not None
             for i, elem in enumerate(signature.varargs.elements):
                 if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
-                    yield elem.runtime_arg_pos, f"{varargs_name}[{i}]", elem.dtype, dim_of(elem)
+                    yield elem.runtime_arg_pos, probe_symbol((varargs_name, str(i))), elem.dtype, dim_of(elem)
         if signature.kwargs is not None:
+            kwargs_name = self._args_info.kwargs_name
+            assert kwargs_name is not None
             for kw_name, elem in signature.kwargs.values:
                 if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
-                    yield elem.runtime_arg_pos, kw_name, elem.dtype, dim_of(elem)
+                    yield elem.runtime_arg_pos, probe_symbol((kwargs_name, kw_name)), elem.dtype, dim_of(elem)
 
     def _compile(self, key: _JitCacheKey) -> CompiledWrapper:
         context = TypeContext()
         args_by_pos: dict[int, Symbol] = {}
-        for pos, name, lower_type, dim in self._iter_runtime_args(key):
-            sym = self._args_info.symbol_of(name)
+        for pos, sym, lower_type, dim in self._iter_runtime_args(key):
             args_by_pos[pos] = sym
             context.set_symbol(sym, lower_type, dim)
         args = [args_by_pos[i] for i in range(len(args_by_pos))]
