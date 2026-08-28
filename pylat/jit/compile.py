@@ -100,18 +100,18 @@ class StandardLayoutMode(Enum):
     ROW_MAJOR = "row"
 
 class _SymbolScope:
-    type_cache: TypeResolver
-    _symbol_values: dict[Symbol, SymbolArgInfo]
-    _args: list[LowerType]
-
     def __init__(self, type_cache: TypeResolver) -> None:
-        self._symbol_values = {}
-        self._args = []
+        self._symbol_values: dict[Symbol, SymbolArgInfo] = {}
+        self._symbol_order: list[Symbol] = []
+        self._args: list[LowerType] = []
         self.type_cache = type_cache
-        self._symbol_shapes = {}
 
     def get_symbol(self, symbol: Symbol):
         return self._symbol_values[symbol]
+
+    def get_symbol_order(self) -> tuple[Symbol, ...]:
+        """The symbols in the order the compiled function takes its positional arguments."""
+        return tuple(self._symbol_order)
 
     def get_args(self) -> tuple[LowerType, ...]:
         return tuple(self._args)
@@ -119,32 +119,21 @@ class _SymbolScope:
     def get_arg_count(self) -> int:
         return len(self._args)
 
-    def items(self):
-        return self._symbol_values.items()
-
     def _add_arg(self, type: LowerType):
         ret = len(self._args)
         self._args.append(type)
         return ret
 
-    def _add_symbol(self, expr: Symbol, is_ref: bool):
-        if expr in self._symbol_values:
-            return
-        lower_type = self.type_cache.get_symbol_type(expr)
-        dim = self.type_cache.get_symbol_dimension(expr)
+    def add_symbol(self, symbol: Symbol):
+        """Register one function argument.  The registration order is the positional
+        argument order of the compiled function."""
+        if symbol in self._symbol_values:
+            raise ValueError(f"duplicate symbol {symbol} in function arguments")
+        lower_type = self.type_cache.get_symbol_type(symbol)
+        dim = self.type_cache.get_symbol_dimension(symbol)
         if dim == 0:
-            if is_ref:
-                ret = ScalarArgInfo(
-                    self._add_arg(ap.PointerType(lower_type)),
-                    True,
-                )
-                self._symbol_values[expr] = ret
-            else:
-                ret = ScalarArgInfo(
-                    self._add_arg(lower_type),
-                    False,
-                )
-                self._symbol_values[expr] = ret
+            # scalar arguments are passed by value
+            ret = ScalarArgInfo(self._add_arg(lower_type))
         else:
             # TODO: check indices types
             ret = ArrayArgInfo(
@@ -152,40 +141,8 @@ class _SymbolScope:
                 tuple(self._add_arg(self.type_cache.type_config.index_type) for _ in range(dim)),
                 tuple(self._add_arg(self.type_cache.type_config.index_type) for _ in range(dim)),
             )
-            self._symbol_values[expr] = ret
-
-    def scan_lvalue_symbols(self, expr: Expr):
-        match expr:
-            case Symbol():
-                self._add_symbol(expr, True)
-            case Roll():
-                self.scan_lvalue_symbols(expr.expr)
-            case Slice():
-                self.scan_lvalue_symbols(expr.expr)
-
-    def scan_symbols(self, expr: Expr):
-        todo = [expr]
-        while len(todo) > 0:
-            elem = todo.pop()
-            if isinstance(elem, Symbol):
-                self._add_symbol(elem, False)
-            else:
-                children = elem.subexpressions()
-                children.reverse()
-                todo.extend(children)
-
-    def scan_assignment(self, typed_expr: TypedAssignExpr):
-        expr = typed_expr.expr
-        self.scan_lvalue_symbols(expr.lhs)
-        self.scan_symbols(expr.lhs)
-        self.scan_symbols(expr.rhs)
-
-        for e in typed_expr.shape:
-            self.scan_symbols(e)
-
-    def scan_assignments(self, exprs: list[TypedAssignExpr]):
-        for expr in exprs:
-            self.scan_assignment(expr)
+        self._symbol_values[symbol] = ret
+        self._symbol_order.append(symbol)
 
     @override
     def __str__(self):
@@ -193,7 +150,7 @@ class _SymbolScope:
         for sym, info in self._symbol_values.items():
             match info:
                 case ScalarArgInfo():
-                    elems.append(f"%{info.value}: {'&' if info.is_ref else ''}Scalar = {sym}")
+                    elems.append(f"%{info.value}: Scalar = {sym}")
                 case ArrayArgInfo():
                     strides = ', '.join(f"%{s}" for s in info.strides)
                     elems.append(f"%{info.ptr}: Array(strides=({strides})) = {sym}")
@@ -461,7 +418,7 @@ class _FunctionCompiler:
                 ret = None
                 match sym:
                     case ScalarArgInfo():
-                        ret = self._block.load(self._args[sym.value]) if sym.is_ref else self._args[sym.value]
+                        ret = self._args[sym.value]
                     case ArrayArgInfo():
                         match subscripts:
                             case _RealSubscriptsInfo(s):
@@ -583,10 +540,7 @@ class _FunctionCompiler:
                 assert sym is not None
                 match sym:
                     case ScalarArgInfo():
-                        if sym.is_ref:
-                            return self._args[sym.value], lower_type
-                        else:
-                            raise TypeError(f"cannot use {expr} as left-value")
+                        raise TypeError(f"cannot use {expr} as left-value")
                     case ArrayArgInfo():
                         match subscripts:
                             case _RealSubscriptsInfo(s):
@@ -679,36 +633,38 @@ class CompiledWrapper:
         self._inner = inner
         self.standard_layout = standard_layout
 
-    def _check_layout(self, arg: dict[Symbol, Any]) -> bool:
+    def _check_layout(self, values) -> bool:
         """Verify that every array argument matches the layout the kernel was compiled for."""
         flag = 'C_CONTIGUOUS' if self.standard_layout is StandardLayoutMode.ROW_MAJOR else 'F_CONTIGUOUS'
-        for value in arg.values():
+        for value in values:
             if isinstance(value, np.ndarray) and not value.flags[flag]:
                 return False
         return True
 
-    def call(self, arg: dict[Symbol, Any]) -> Any:
-        if self.standard_layout is not StandardLayoutMode.NONE and not self._check_layout(arg):
+    def call(self, *values: Any) -> Any:
+        """Call the compiled kernel with the arguments in the order of the symbols
+        passed to ``compile_assignments``/``compile_reduction``."""
+        arg_count = len(self._symbols.get_symbol_order())
+        if len(values) != arg_count:
+            raise TypeError(
+                f"the kernel expects {arg_count} positional argument(s), got {len(values)}"
+            )
+        if self.standard_layout is not StandardLayoutMode.NONE and not self._check_layout(values):
             raise ValueError(
                 f"the kernel was compiled for {self.standard_layout.value} layout but the array "
                 "arguments do not match; pass contiguous arrays of the expected layout or recompile "
                 "with standard_layout=StandardLayoutMode.NONE"
             )
         index_type = self._parent.index_type.to_ctype()
-        seen_symbols: set[Symbol] = set()
         converted_args: list[ctypes._CDataType | None] = [None for _ in range(self._symbols.get_arg_count())]
-        for symbol, value in arg.items():
-            seen_symbols.add(symbol)
+        for symbol, value in zip(self._symbols.get_symbol_order(), values):
             info = self._symbols.get_symbol(symbol)
             lower_type = self._symbols.type_cache.get_symbol_type(symbol)
             lower_type_ctype = lower_type.to_ctype()
             lower_type_size = ctypes.sizeof(lower_type_ctype)
             match info:
                 case ScalarArgInfo():
-                    if info.is_ref:
-                        raise NotImplementedError
-                    else:
-                        converted_args[info.value] = lower_type_ctype(value)
+                    converted_args[info.value] = lower_type_ctype(value)
                 case ArrayArgInfo():
                     value_shape = value.shape
                     ptr_type = ctypes.POINTER(lower_type_ctype)
@@ -722,10 +678,6 @@ class CompiledWrapper:
                     for index, stride in zip(info.strides, value_strides):
                         assert stride % lower_type_size == 0
                         converted_args[index] = index_type(stride // lower_type_size)
-
-        for symbol in self._symbols._symbol_values:
-            if symbol not in seen_symbols:
-                raise ValueError(f"Symbol {symbol} not found in arg")
         for a in converted_args:
             assert a is not None
         return self._inner.call(*converted_args) # type: ignore
@@ -756,24 +708,14 @@ class TypedReductionExpr:
         return Times.make(self.shape).normalize()
 
 class _AssignmentsKernel(LoopKernel):
-    _parent: 'JitCompiler'
-    _exprs: list[TypedAssignExpr]
-    symbol_scope: _SymbolScope
-    _total_size: Expr
-    _helper: CompileHelper
-    _reduction: TypedReductionExpr | None
-    reduction_type: LowerType | None
-    _type_cache: TypeResolver
-    _standard_layout: StandardLayoutMode
-
     @override
-    def __init__(self, parent: 'JitCompiler', exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
+    def __init__(self, parent: 'JitCompiler', args: list[Symbol], exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
         type_cache = TypeResolver(type_context, parent)
         self._parent = parent
         self._type_cache = type_cache
-        self._exprs = [TypedAssignExpr(a, type_cache) for a in exprs]
-        self._reduction = None
-        self.reduction_type = None
+        self._exprs: list[TypedAssignExpr] = [TypedAssignExpr(a, type_cache) for a in exprs]
+        self._reduction: TypedReductionExpr | None = None
+        self.reduction_type: LowerType | None = None
         if reduction is not None:
             self._reduction = TypedReductionExpr(reduction, type_cache)
             reduction_type = type_cache.get_type(reduction)
@@ -784,11 +726,8 @@ class _AssignmentsKernel(LoopKernel):
         self._total_size = _check_and_get_total_size(self._exprs, self._reduction, type_cache)
         self._helper = CompileHelper(parent)
         self.symbol_scope = _SymbolScope(type_cache)
-        self.symbol_scope.scan_assignments(self._exprs)
-        if self._reduction is not None:
-            self.symbol_scope.scan_symbols(self._reduction.expr)
-            for e in self._reduction.shape:
-                self.symbol_scope.scan_symbols(e)
+        for symbol in args:
+            self.symbol_scope.add_symbol(symbol)
         self._standard_layout = self._check_standard_layout(standard_layout)
 
     @staticmethod
@@ -973,8 +912,8 @@ class JitCompiler(TypesConfig):
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_assignments(self, exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
-        kernel = _AssignmentsKernel(self, exprs, type_context, reduction, standard_layout)
+    def compile_assignments(self, args: list[Symbol], exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        kernel = _AssignmentsKernel(self, args, exprs, type_context, reduction, standard_layout)
         reduction_kernel: ReductionKernel | None = None
         if reduction is not None:
             assert kernel.reduction_type is not None
@@ -983,5 +922,5 @@ class JitCompiler(TypesConfig):
 
         return CompiledWrapper(self, kernel.symbol_scope, compiled, standard_layout=kernel._standard_layout)
 
-    def compile_reduction(self, expr: Expr, type_context: TypeContext, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
-        return self.compile_assignments([], type_context, expr, standard_layout=standard_layout)
+    def compile_reduction(self, args: list[Symbol], expr: Expr, type_context: TypeContext, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        return self.compile_assignments(args, [], type_context, reduction=expr, standard_layout=standard_layout)

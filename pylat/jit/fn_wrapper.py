@@ -275,18 +275,6 @@ class _Probe:
         raise TypeError("comparisons are not supported in jitted functions")
 
 
-def _collect_symbols(expr: Expr) -> set[Symbol]:
-    used: set[Symbol] = set()
-    todo = [expr]
-    while todo:
-        elem = todo.pop()
-        if isinstance(elem, Symbol):
-            used.add(elem)
-        else:
-            todo.extend(elem.subexpressions())
-    return used
-
-
 def _determine_layout(values) -> StandardLayoutMode:
     """Pick the kernel layout that matches the actual array arguments.
 
@@ -394,11 +382,11 @@ class _JittedFunction:
             if kind == 'arg'
         }
         self._comptime_args = comptime_args
-        self._cache: dict[_JitCacheKey, tuple[CompiledWrapper, set[Symbol]]] = {}
+        self._cache: dict[_JitCacheKey, CompiledWrapper] = {}
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
-    def _trace(self, key: _JitCacheKey) -> tuple[list[AssignExpr], set[Symbol]]:
+    def _trace(self, key: _JitCacheKey) -> list[AssignExpr]:
         # compile-time arguments are traced with their constant value, so they are
         # baked into the expression trees (which also enables compile-time control
         # flow); the other arguments are traced with probes
@@ -431,11 +419,7 @@ class _JittedFunction:
             )
         if len(trace.assigns) == 0:
             raise TypeError(f"{self.__name__}() must contain at least one in-place assignment")
-        used: set[Symbol] = set()
-        for assign in trace.assigns:
-            used |= _collect_symbols(assign.lhs)
-            used |= _collect_symbols(assign.rhs)
-        return trace.assigns, used
+        return trace.assigns
 
     def _infer_arg_type(self, value) -> tuple[LowerType, int]:
         if isinstance(value, _Probe):
@@ -544,7 +528,8 @@ class _JittedFunction:
         return tuple(signature)
 
     def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[str, LowerType, int]]:
-        """Yield ``(name, lower_type, dim)`` for every runtime argument in the key."""
+        """Yield ``(name, lower_type, dim)`` for every runtime argument in the key, in
+        the order the compiled kernel takes its positional arguments."""
         def dim_of(node: SignatureNode) -> int:
             return node.rank if isinstance(node, ArrayArgNode) else 0
         for name, node in key.signature:
@@ -555,20 +540,23 @@ class _JittedFunction:
                     if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
                         yield f"{name}[{i}]", elem.dtype, dim_of(elem)
             elif isinstance(node, DictArgNode):
-                for kw_name, elem in node.values:
+                for kw_name, elem in sorted(node.values, key=lambda kv: kv[0]):
                     if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
                         yield kw_name, elem.dtype, dim_of(elem)
 
     def _compile(self, key: _JitCacheKey, assigns: list[AssignExpr]) -> CompiledWrapper:
         context = TypeContext()
+        args: list[Symbol] = []
         for name, lower_type, dim in self._iter_runtime_args(key):
-            context.set_symbol(self._names.get(name, symbol(name)), lower_type, dim)
+            sym = self._names.get(name, symbol(name))
+            args.append(sym)
+            context.set_symbol(sym, lower_type, dim)
         compiler = JitCompiler(
             self._wrapper._backend,
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
         )
-        return compiler.compile_assignments(assigns, context, standard_layout=key.layout)
+        return compiler.compile_assignments(args, assigns, context, standard_layout=key.layout)
 
     def __call__(self, *args, **kwargs):
         fixed, variadic, keyword = self._bind_args(args, kwargs)
@@ -577,30 +565,21 @@ class _JittedFunction:
             [v for _, v in fixed] + [v for _, v in variadic] + list(keyword.values())
         )
         key = _JitCacheKey(signature=signature, layout=layout)
-        entry = self._cache.get(key)
-        if entry is None:
-            assigns, used = self._trace(key)
+        compiled = self._cache.get(key)
+        if compiled is None:
+            assigns = self._trace(key)
             compiled = self._compile(key, assigns)
-            entry = (compiled, used)
-            self._cache[key] = entry
-        compiled, used = entry
-        arg_map: dict[Symbol, Any] = {}
-        for name, value in fixed + variadic:
-            sym = symbol(name)
-            if sym in used:
-                arg_map[sym] = value
-        for name, value in keyword.items():
-            sym = symbol(name)
-            if sym in used:
-                arg_map[sym] = value
-        return compiled.call(arg_map)
+            self._cache[key] = compiled
+        bound = dict(fixed + variadic)
+        bound.update(keyword)
+        values = [bound[name] for name, _, _ in self._iter_runtime_args(key)]
+        return compiled.call(*values)
 
     def print_all(self):
         """Print the LLVM IR of the most recently compiled kernel."""
         if len(self._cache) == 0:
             return []
-        compiled, _ = list(self._cache.values())[-1]
-        return compiled.print_all()
+        return list(self._cache.values())[-1].print_all()
 
     def __repr__(self) -> str:
         return f"<jitted {self.__name__}>"

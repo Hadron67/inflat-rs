@@ -431,11 +431,10 @@ class SymbolArgInfo:
 @dataclass
 class ScalarArgInfo(SymbolArgInfo):
     value: int
-    is_ref: bool
 
     @override
     def __str__(self) -> str:
-        return f"%{self.value}: {'&' if self.is_ref else ''}Scalar"
+        return f"%{self.value}: Scalar"
 
 @dataclass
 class ArrayArgInfo(SymbolArgInfo):

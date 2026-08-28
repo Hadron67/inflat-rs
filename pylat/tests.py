@@ -49,7 +49,7 @@ class JitTest(TestCase):
         context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
+        fn = compiler.compile_assignments([phi, mom_phi, dt], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
         ], context)
 
@@ -58,7 +58,7 @@ class JitTest(TestCase):
         mom_phi0 = np.random.randn(10, 10, 10) + np.random.randn(10, 10, 10) * 1j
         dt0 = 2.0
 
-        fn.call({phi: phi0, mom_phi: mom_phi0, dt: dt0})  # type: ignore
+        fn.call(phi0, mom_phi0, dt0)
 
         assert_almost_equal(phi0, mom_phi0 * mom_phi0 * dt0)
 
@@ -72,7 +72,7 @@ class JitTest(TestCase):
         context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
+        fn = compiler.compile_assignments([phi, mom_phi, dt], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
         ], context)
 
@@ -81,7 +81,7 @@ class JitTest(TestCase):
         mom_phi0 = np.random.randn(8, 9, 10) + np.random.randn(8, 9, 10) * 1j
         dt0 = 2.0
 
-        fn.call({phi: phi0, mom_phi: mom_phi0, dt: dt0})  # type: ignore
+        fn.call(phi0, mom_phi0, dt0)
 
         assert_almost_equal(phi0, mom_phi0 * mom_phi0 * dt0)
 
@@ -91,11 +91,11 @@ class JitTest(TestCase):
         context.set_symbol(a, FloatType(64), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction(a, context)
+        fn = compiler.compile_reduction([a], a, context)
 
         np.random.seed(114514)
         a0 = np.random.randn(10, 10, 10)
-        result = fn.call({a: a0})  # type: ignore
+        result = fn.call(a0)
         assert_almost_equal(result, np.sum(a0))
 
     def test_sum_complex(self):
@@ -105,12 +105,12 @@ class JitTest(TestCase):
         context.set_symbol(b, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction(a * b + a, context)
+        fn = compiler.compile_reduction([a, b], a * b + a, context)
 
         np.random.seed(42)
         a0 = np.random.randn(10, 10, 10) + 1j * np.random.randn(10, 10, 10)
         b0 = np.random.randn(10, 10, 10) + 1j * np.random.randn(10, 10, 10)
-        result = fn.call({a: a0, b: b0})  # type: ignore
+        result = fn.call(a0, b0)
         assert_almost_equal(result, np.sum(a0 * b0 + a0))
 
     def test_sum_with_assignment(self):
@@ -121,7 +121,7 @@ class JitTest(TestCase):
         context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
+        fn = compiler.compile_assignments([phi, mom_phi, dt], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
         ], context, reduction=mom_phi)
 
@@ -130,7 +130,7 @@ class JitTest(TestCase):
         mom_phi0 = np.random.randn(8, 9, 10) + np.random.randn(8, 9, 10) * 1j
         dt0 = 2.0
 
-        result = fn.call({phi: phi0, mom_phi: mom_phi0, dt: dt0})  # type: ignore
+        result = fn.call(phi0, mom_phi0, dt0)
 
         assert_almost_equal(phi0, mom_phi0 * mom_phi0 * dt0)
         assert_almost_equal(result, np.sum(mom_phi0))
@@ -144,7 +144,7 @@ class JitTest(TestCase):
             context.set_symbol(s, FloatType(64), 1)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
+        fn = compiler.compile_assignments([a, b, c, d], [
             AssignExpr(a, b, '+'),
             AssignExpr(a, c, '+'),
             AssignExpr(a, d, '+'),
@@ -155,7 +155,7 @@ class JitTest(TestCase):
         b0 = np.random.rand(5)
         c0 = np.random.rand(5)
         d0 = np.random.rand(5)
-        fn.call({a: a0, b: b0, c: c0, d: d0})  # type: ignore
+        fn.call(a0, b0, c0, d0)
         assert_almost_equal(a0, b0 + c0 + d0)
 
 class JitWrapperTest(TestCase):
@@ -777,7 +777,7 @@ class SimdLayoutTests(TestCase):
 
     @staticmethod
     def _last_compiled(f) -> CompiledWrapper:
-        return list(f._cache.values())[-1][0]
+        return list(f._cache.values())[-1]
 
     def test_row_major_uses_flat_kernel(self):
         wrapper = Wrapper()
@@ -1008,7 +1008,7 @@ class SimdLayoutTests(TestCase):
         f(a, b)
         self.assertEqual(len(f._cache), 2)
         self.assertEqual(
-            {w[0].standard_layout for w in f._cache.values()},
+            {w.standard_layout for w in f._cache.values()},
             {StandardLayoutMode.ROW_MAJOR, StandardLayoutMode.COLUMN_MAJOR},
         )
 
@@ -1018,12 +1018,12 @@ class SimdLayoutTests(TestCase):
         context.set_symbol(a, FloatType(64), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction(a, context, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([a], a, context, standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(7)
         a0 = np.random.rand(10, 10, 10)
-        assert_almost_equal(fn.call({a: a0}), np.sum(a0))  # type: ignore
+        assert_almost_equal(fn.call(a0), np.sum(a0))
 
     def test_flat_reduction_column_major(self):
         a, = symbols('a')
@@ -1031,26 +1031,25 @@ class SimdLayoutTests(TestCase):
         context.set_symbol(a, FloatType(64), 2)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction(a, context, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
+        fn = compiler.compile_reduction([a], a, context, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.COLUMN_MAJOR)
 
         np.random.seed(8)
         a0 = np.asfortranarray(np.random.rand(10, 10))
-        assert_almost_equal(fn.call({a: a0}), np.sum(a0))  # type: ignore
+        assert_almost_equal(fn.call(a0), np.sum(a0))
 
     def test_flat_reduction_with_slice(self):
-        a, b = symbols('a', 'b')
+        b, = symbols('b')
         context = TypeContext()
-        context.set_symbol(a, FloatType(64), 1)
         context.set_symbol(b, FloatType(64), 2)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction(Slice(b, 0, 1), context, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([b], Slice(b, 0, 1), context, standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(9)
         b0 = np.random.rand(5, 6)
-        assert_almost_equal(fn.call({b: b0}), np.sum(b0[1]))  # type: ignore
+        assert_almost_equal(fn.call(b0), np.sum(b0[1]))
 
     def test_mismatched_layout_raises(self):
         # the direct JitCompiler API verifies the layout of the arguments at call time
@@ -1061,12 +1060,12 @@ class SimdLayoutTests(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments(
-            [AssignExpr(a, b, '+')], context, standard_layout=StandardLayoutMode.ROW_MAJOR
+            [a, b], [AssignExpr(a, b, '+')], context, standard_layout=StandardLayoutMode.ROW_MAJOR
         )
         a0 = np.zeros((4, 5))
         b0 = np.asfortranarray(np.random.rand(4, 5))
         with self.assertRaises(ValueError):
-            fn.call({a: a0, b: b0})  # type: ignore
+            fn.call(a0, b0)
 
     def test_generic_rank_mismatched_slices(self):
         # regression: the generic kernel must handle sliced arrays whose rank is
@@ -1077,10 +1076,10 @@ class SimdLayoutTests(TestCase):
         context.set_symbol(b, FloatType(64), 2)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([AssignExpr(a, Slice(b, 0, 1), '+')], context)
+        fn = compiler.compile_assignments([a, b], [AssignExpr(a, Slice(b, 0, 1), '+')], context)
         a0 = np.zeros(6)
         b0 = np.arange(30).reshape(5, 6).astype(float)
-        fn.call({a: a0, b: b0})  # type: ignore
+        fn.call(a0, b0)
         assert_almost_equal(a0, b0[1])
 
         context3 = TypeContext()
@@ -1088,11 +1087,11 @@ class SimdLayoutTests(TestCase):
         b3, = symbols('b3')
         context3.set_symbol(b3, FloatType(64), 3)
         fn3 = compiler.compile_assignments(
-            [AssignExpr(a, Slice(Slice(b3, 2, 2), 0, 1), '+')], context3
+            [a, b3], [AssignExpr(a, Slice(Slice(b3, 2, 2), 0, 1), '+')], context3
         )
         a3 = np.zeros(4)
         b30 = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
-        fn3.call({a: a3, b3: b30})  # type: ignore
+        fn3.call(a3, b30)
         assert_almost_equal(a3, b30[1, :, 2])
 
         # a sliced array that is broadcast into a higher-rank loop (base rank is
@@ -1101,10 +1100,10 @@ class SimdLayoutTests(TestCase):
         context4 = TypeContext()
         context4.set_symbol(a, FloatType(64), 3)
         context4.set_symbol(b, FloatType(64), 2)
-        fn4 = compiler.compile_assignments([AssignExpr(a, Slice(b, 0, 1), '+')], context4)
+        fn4 = compiler.compile_assignments([a, b], [AssignExpr(a, Slice(b, 0, 1), '+')], context4)
         a4 = np.zeros((2, 3, 6))
         b40 = np.arange(30).reshape(5, 6).astype(float)
-        fn4.call({a: a4, b: b40})  # type: ignore
+        fn4.call(a4, b40)
         assert_almost_equal(a4, np.broadcast_to(b40[1], a4.shape))
 
         context5 = TypeContext()
@@ -1112,11 +1111,11 @@ class SimdLayoutTests(TestCase):
         b5, = symbols('b5')
         context5.set_symbol(b5, FloatType(64), 4)
         fn5 = compiler.compile_assignments(
-            [AssignExpr(a, Slice(Slice(b5, 2, 3), 1, 2), '+')], context5
+            [a, b5], [AssignExpr(a, Slice(Slice(b5, 2, 3), 1, 2), '+')], context5
         )
         a5 = np.zeros((2, 4))
         b50 = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5).astype(float)
-        fn5.call({a: a5, b5: b50})  # type: ignore
+        fn5.call(a5, b50)
         assert_almost_equal(a5, b50[:, 2, 3][:, :4])
 
 all_tests = [TestExpr, JitTest, JitWrapperTest, SimdLayoutTests]
