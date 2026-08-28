@@ -13,7 +13,7 @@ functions defined in interactive sessions all work.
 """
 
 import inspect
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from inspect import Parameter
 from typing import Any, Literal, overload
@@ -657,8 +657,8 @@ class _JittedFunction:
             kwargs_node = DictArgNode(frozenset((n, add(-1, v)) for n, v in sorted(keyword.items())))
         return Signature(fixed_args=fixed_nodes, varargs=varargs_node, kwargs=kwargs_node)
 
-    def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[int, Symbol, LowerType, int]]:
-        """Yield ``(runtime_arg_pos, symbol, lower_type, dim)`` for every runtime
+    def _runtime_args(self, key: _JitCacheKey) -> list[tuple[int, Symbol, LowerType, int]]:
+        """Return ``(runtime_arg_pos, symbol, lower_type, dim)`` for every runtime
         argument in the key, using the positions recorded in the signature nodes.
         The traversal mirrors ``_create_one_probe_arg``: it descends into
         ``TupleArgNode``/``DictArgNode`` wherever they appear and builds symbols
@@ -671,13 +671,16 @@ class _JittedFunction:
         def probe_symbol(path: tuple[str, ...]) -> Symbol:
             return Symbol(('__trace',) + path)
 
-        def walk(node: SignatureNode, path: tuple[str, ...]) -> Iterator[tuple[int, Symbol, LowerType, int]]:
-            todo = [(node, path)]
+        result: list[tuple[int, Symbol, LowerType, int]] = []
+        todo: list[tuple[SignatureNode, tuple[str, ...]]] = []
+
+        def walk(node: SignatureNode, path: tuple[str, ...]) -> None:
+            todo.append((node, path))
             while todo:
                 snode, spath = todo.pop()
                 match snode:
                     case ArrayArgNode() | ScalarArgNode():
-                        yield snode.runtime_arg_pos, probe_symbol(spath), snode.dtype, dim_of(snode)
+                        result.append((snode.runtime_arg_pos, probe_symbol(spath), snode.dtype, dim_of(snode)))
                     case ComptimeValueArgNode():
                         pass  # baked into the expression trees, not passed at runtime
                     case TupleArgNode():
@@ -689,20 +692,21 @@ class _JittedFunction:
 
         signature = key.signature
         for name, node in zip(self._args_info.fixed_names, signature.fixed_args):
-            yield from walk(node, (name,))
+            walk(node, (name,))
         if signature.varargs is not None:
             varargs_name = self._args_info.varargs_name
             assert varargs_name is not None
-            yield from walk(signature.varargs, (varargs_name,))
+            walk(signature.varargs, (varargs_name,))
         if signature.kwargs is not None:
             kwargs_name = self._args_info.kwargs_name
             assert kwargs_name is not None
-            yield from walk(signature.kwargs, (kwargs_name,))
+            walk(signature.kwargs, (kwargs_name,))
+        return result
 
     def _compile(self, key: _JitCacheKey) -> CompiledWrapper:
         context = TypeContext()
         args_by_pos: dict[int, Symbol] = {}
-        for pos, sym, lower_type, dim in self._iter_runtime_args(key):
+        for pos, sym, lower_type, dim in self._runtime_args(key):
             args_by_pos[pos] = sym
             context.set_symbol(sym, lower_type, dim)
         args = [args_by_pos[i] for i in range(len(args_by_pos))]
