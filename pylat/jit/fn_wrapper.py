@@ -660,31 +660,44 @@ class _JittedFunction:
     def _iter_runtime_args(self, key: _JitCacheKey) -> Iterator[tuple[int, Symbol, LowerType, int]]:
         """Yield ``(runtime_arg_pos, symbol, lower_type, dim)`` for every runtime
         argument in the key, using the positions recorded in the signature nodes.
-        Symbols are named after the probe path used while tracing (the ``__trace``
-        namespace followed by the parameter path), so that they match the symbols
-        recorded in the traced assignments."""
+        The traversal mirrors ``_create_one_probe_arg``: it descends into
+        ``TupleArgNode``/``DictArgNode`` wherever they appear and builds symbols
+        from the same probe paths used while tracing (the ``__trace`` namespace
+        followed by the parameter path), so that they match the symbols recorded
+        in the traced assignments."""
         def dim_of(node: SignatureNode) -> int:
             return node.rank if isinstance(node, ArrayArgNode) else 0
 
         def probe_symbol(path: tuple[str, ...]) -> Symbol:
             return Symbol(('__trace',) + path)
 
+        def walk(node: SignatureNode, path: tuple[str, ...]) -> Iterator[tuple[int, Symbol, LowerType, int]]:
+            todo = [(node, path)]
+            while todo:
+                snode, spath = todo.pop()
+                match snode:
+                    case ArrayArgNode() | ScalarArgNode():
+                        yield snode.runtime_arg_pos, probe_symbol(spath), snode.dtype, dim_of(snode)
+                    case ComptimeValueArgNode():
+                        pass  # baked into the expression trees, not passed at runtime
+                    case TupleArgNode():
+                        todo.extend((elem, spath + (str(i),)) for i, elem in enumerate(snode.elements))
+                    case DictArgNode():
+                        todo.extend((v, spath + (k,)) for k, v in snode.values)
+                    case _:
+                        raise TypeError(f"unexpected signature node type: {snode}")
+
         signature = key.signature
         for name, node in zip(self._args_info.fixed_names, signature.fixed_args):
-            if isinstance(node, (ArrayArgNode, ScalarArgNode)):
-                yield node.runtime_arg_pos, probe_symbol((name,)), node.dtype, dim_of(node)
+            yield from walk(node, (name,))
         if signature.varargs is not None:
             varargs_name = self._args_info.varargs_name
             assert varargs_name is not None
-            for i, elem in enumerate(signature.varargs.elements):
-                if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
-                    yield elem.runtime_arg_pos, probe_symbol((varargs_name, str(i))), elem.dtype, dim_of(elem)
+            yield from walk(signature.varargs, (varargs_name,))
         if signature.kwargs is not None:
             kwargs_name = self._args_info.kwargs_name
             assert kwargs_name is not None
-            for kw_name, elem in signature.kwargs.values:
-                if isinstance(elem, (ArrayArgNode, ScalarArgNode)):
-                    yield elem.runtime_arg_pos, probe_symbol((kwargs_name, kw_name)), elem.dtype, dim_of(elem)
+            yield from walk(signature.kwargs, (kwargs_name,))
 
     def _compile(self, key: _JitCacheKey) -> CompiledWrapper:
         context = TypeContext()
