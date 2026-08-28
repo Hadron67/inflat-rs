@@ -814,11 +814,13 @@ class _JittedFunction:
         additional scalar arguments.  Returns ``(main, sums)`` where ``sums``
         holds one reduction kernel per ``Sum``, in the same order as the
         placeholders."""
-        context = TypeContext()
-        args_by_pos: dict[int, Symbol] = {}
-        for pos, sym, lower_type, dim in self._runtime_args(key):
-            args_by_pos[pos] = sym
-            context.set_symbol(sym, lower_type, dim)
+        runtime = self._runtime_args(key)
+        # sort by runtime_arg_pos: the walk order is not necessarily the position
+        # order (the traversal uses a stack), and the converter passes values in
+        # position order
+        args_by_pos: dict[int, tuple[Symbol, LowerType, int]] = {
+            pos: (sym, lower_type, dim) for pos, sym, lower_type, dim in runtime
+        }
         args = [args_by_pos[i] for i in range(len(args_by_pos))]
         compiler = JitCompiler(
             self._wrapper._backend,
@@ -827,8 +829,11 @@ class _JittedFunction:
         )
         assigns, sums = self._trace(key)
         if len(sums) == 0:
-            main = compiler.compile_assignments(args, assigns, context, standard_layout=key.layout)
+            main = compiler.compile_assignments(args, assigns, standard_layout=key.layout)
             return main, ()
+        context = TypeContext()
+        for _, sym, lower_type, dim in runtime:
+            context.set_symbol(sym, lower_type, dim)
         resolver = TypeResolver(context, compiler)
         placeholder_symbols = list(sums.values())
         sum_types: dict[Sum, LowerType] = {}
@@ -839,15 +844,12 @@ class _JittedFunction:
                 sum_type = IntType(sum_type.bits, True)
             sum_types[sum_node] = sum_type
         sum_wrappers = tuple(
-            compiler.compile_reduction(args, sum_node.expr, context, standard_layout=key.layout)
+            compiler.compile_reduction(args, sum_node.expr, standard_layout=key.layout)
             for sum_node in sums
         )
-        for sum_node, sym in zip(sums, placeholder_symbols):
-            context.set_symbol(sym, sum_types[sum_node], 0)
         main = compiler.compile_assignments(
-            args + placeholder_symbols,
+            args + [(sym, sum_types[sum_node], 0) for sum_node, sym in zip(sums, placeholder_symbols)],
             assigns,
-            context,
             standard_layout=key.layout,
         )
         return main, sum_wrappers

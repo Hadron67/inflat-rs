@@ -9,7 +9,7 @@ from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, symbols
 from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .jit.fn_wrapper import Wrapper
 from .jit.openmp import OpenMPBackend
-from .jit.type import ComplexFloatType, FloatType, TypeContext
+from .jit.type import ComplexFloatType, FloatType
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
@@ -42,15 +42,15 @@ class JitTest(TestCase):
 
     def test_assignment(self):
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
-        context = TypeContext()
-        context.set_symbol(dt, FloatType(64), 0)
-        context.set_symbol(phi, ComplexFloatType(FloatType(64)), 3)
-        context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([phi, mom_phi, dt], [
+        fn = compiler.compile_assignments([
+            (phi, ComplexFloatType(FloatType(64)), 3),
+            (mom_phi, ComplexFloatType(FloatType(64)), 3),
+            (dt, FloatType(64), 0),
+        ], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
-        ], context)
+        ])
 
         np.random.seed(114514)
         phi0 = np.zeros((10, 10, 10), dtype=np.complex128)
@@ -65,15 +65,15 @@ class JitTest(TestCase):
         # regression test: subscripts were unpacked from the shape in the wrong
         # order when the shape was not symmetric under reversal
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
-        context = TypeContext()
-        context.set_symbol(dt, FloatType(64), 0)
-        context.set_symbol(phi, ComplexFloatType(FloatType(64)), 3)
-        context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([phi, mom_phi, dt], [
+        fn = compiler.compile_assignments([
+            (phi, ComplexFloatType(FloatType(64)), 3),
+            (mom_phi, ComplexFloatType(FloatType(64)), 3),
+            (dt, FloatType(64), 0),
+        ], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
-        ], context)
+        ])
 
         np.random.seed(114514)
         phi0 = np.zeros((8, 9, 10), dtype=np.complex128)
@@ -86,11 +86,9 @@ class JitTest(TestCase):
 
     def test_sum(self):
         a, = symbols('a')
-        context = TypeContext()
-        context.set_symbol(a, FloatType(64), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([a], a, context)
+        fn = compiler.compile_reduction([(a, FloatType(64), 3)], a)
 
         np.random.seed(114514)
         a0 = np.random.randn(10, 10, 10)
@@ -99,12 +97,12 @@ class JitTest(TestCase):
 
     def test_sum_complex(self):
         a, b = symbols('a', 'b')
-        context = TypeContext()
-        context.set_symbol(a, ComplexFloatType(FloatType(64)), 3)
-        context.set_symbol(b, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([a, b], a * b + a, context)
+        fn = compiler.compile_reduction([
+            (a, ComplexFloatType(FloatType(64)), 3),
+            (b, ComplexFloatType(FloatType(64)), 3),
+        ], a * b + a)
 
         np.random.seed(42)
         a0 = np.random.randn(10, 10, 10) + 1j * np.random.randn(10, 10, 10)
@@ -114,15 +112,15 @@ class JitTest(TestCase):
 
     def test_sum_with_assignment(self):
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
-        context = TypeContext()
-        context.set_symbol(dt, FloatType(64), 0)
-        context.set_symbol(phi, ComplexFloatType(FloatType(64)), 3)
-        context.set_symbol(mom_phi, ComplexFloatType(FloatType(64)), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([phi, mom_phi, dt], [
+        fn = compiler.compile_assignments([
+            (phi, ComplexFloatType(FloatType(64)), 3),
+            (mom_phi, ComplexFloatType(FloatType(64)), 3),
+            (dt, FloatType(64), 0),
+        ], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
-        ], context, reduction=mom_phi)
+        ], reduction=mom_phi)
 
         np.random.seed(114514)
         phi0 = np.zeros((8, 9, 10), dtype=np.complex128)
@@ -138,16 +136,18 @@ class JitTest(TestCase):
         # regression: several assignments accumulating into the same array must
         # resolve the shared shape constraints transitively instead of failing
         a, b, c, d = symbols('a', 'b', 'c', 'd')
-        context = TypeContext()
-        for s in (a, b, c, d):
-            context.set_symbol(s, FloatType(64), 1)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([a, b, c, d], [
+        fn = compiler.compile_assignments([
+            (a, FloatType(64), 1),
+            (b, FloatType(64), 1),
+            (c, FloatType(64), 1),
+            (d, FloatType(64), 1),
+        ], [
             AssignExpr(a, b, '+'),
             AssignExpr(a, c, '+'),
             AssignExpr(a, d, '+'),
-        ], context)
+        ])
 
         np.random.seed(40)
         a0 = np.zeros(5)
@@ -1090,11 +1090,9 @@ class SimdLayoutTests(TestCase):
 
     def test_flat_reduction(self):
         a, = symbols('a')
-        context = TypeContext()
-        context.set_symbol(a, FloatType(64), 3)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([a], a, context, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([(a, FloatType(64), 3)], a, standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(7)
@@ -1103,11 +1101,9 @@ class SimdLayoutTests(TestCase):
 
     def test_flat_reduction_column_major(self):
         a, = symbols('a')
-        context = TypeContext()
-        context.set_symbol(a, FloatType(64), 2)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([a], a, context, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
+        fn = compiler.compile_reduction([(a, FloatType(64), 2)], a, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.COLUMN_MAJOR)
 
         np.random.seed(8)
@@ -1116,11 +1112,9 @@ class SimdLayoutTests(TestCase):
 
     def test_flat_reduction_with_slice(self):
         b, = symbols('b')
-        context = TypeContext()
-        context.set_symbol(b, FloatType(64), 2)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([b], Slice(b, 0, 1), context, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([(b, FloatType(64), 2)], Slice(b, 0, 1), standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(9)
@@ -1130,13 +1124,11 @@ class SimdLayoutTests(TestCase):
     def test_mismatched_layout_raises(self):
         # the direct JitCompiler API verifies the layout of the arguments at call time
         a, b = symbols('a', 'b')
-        context = TypeContext()
-        context.set_symbol(a, FloatType(64), 2)
-        context.set_symbol(b, FloatType(64), 2)
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments(
-            [a, b], [AssignExpr(a, b, '+')], context, standard_layout=StandardLayoutMode.ROW_MAJOR
+            [(a, FloatType(64), 2), (b, FloatType(64), 2)], [AssignExpr(a, b, '+')],
+            standard_layout=StandardLayoutMode.ROW_MAJOR,
         )
         a0 = np.zeros((4, 5))
         b0 = np.asfortranarray(np.random.rand(4, 5))
@@ -1147,23 +1139,20 @@ class SimdLayoutTests(TestCase):
         # regression: the generic kernel must handle sliced arrays whose rank is
         # higher than the loop rank (e.g. a += b[1] with a one-dimensional a)
         a, b = symbols('a', 'b')
-        context = TypeContext()
-        context.set_symbol(a, FloatType(64), 1)
-        context.set_symbol(b, FloatType(64), 2)
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([a, b], [AssignExpr(a, Slice(b, 0, 1), '+')], context)
+        fn = compiler.compile_assignments(
+            [(a, FloatType(64), 1), (b, FloatType(64), 2)], [AssignExpr(a, Slice(b, 0, 1), '+')]
+        )
         a0 = np.zeros(6)
         b0 = np.arange(30).reshape(5, 6).astype(float)
         fn.call(a0, b0)
         assert_almost_equal(a0, b0[1])
 
-        context3 = TypeContext()
-        context3.set_symbol(a, FloatType(64), 1)
         b3, = symbols('b3')
-        context3.set_symbol(b3, FloatType(64), 3)
         fn3 = compiler.compile_assignments(
-            [a, b3], [AssignExpr(a, Slice(Slice(b3, 2, 2), 0, 1), '+')], context3
+            [(a, FloatType(64), 1), (b3, FloatType(64), 3)],
+            [AssignExpr(a, Slice(Slice(b3, 2, 2), 0, 1), '+')],
         )
         a3 = np.zeros(4)
         b30 = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
@@ -1173,21 +1162,18 @@ class SimdLayoutTests(TestCase):
         # a sliced array that is broadcast into a higher-rank loop (base rank is
         # smaller than the loop rank) must align its surviving axis with the
         # trailing loop axes
-        context4 = TypeContext()
-        context4.set_symbol(a, FloatType(64), 3)
-        context4.set_symbol(b, FloatType(64), 2)
-        fn4 = compiler.compile_assignments([a, b], [AssignExpr(a, Slice(b, 0, 1), '+')], context4)
+        fn4 = compiler.compile_assignments(
+            [(a, FloatType(64), 3), (b, FloatType(64), 2)], [AssignExpr(a, Slice(b, 0, 1), '+')]
+        )
         a4 = np.zeros((2, 3, 6))
         b40 = np.arange(30).reshape(5, 6).astype(float)
         fn4.call(a4, b40)
         assert_almost_equal(a4, np.broadcast_to(b40[1], a4.shape))
 
-        context5 = TypeContext()
-        context5.set_symbol(a, FloatType(64), 2)
         b5, = symbols('b5')
-        context5.set_symbol(b5, FloatType(64), 4)
         fn5 = compiler.compile_assignments(
-            [a, b5], [AssignExpr(a, Slice(Slice(b5, 2, 3), 1, 2), '+')], context5
+            [(a, FloatType(64), 2), (b5, FloatType(64), 4)],
+            [AssignExpr(a, Slice(Slice(b5, 2, 3), 1, 2), '+')],
         )
         a5 = np.zeros((2, 4))
         b50 = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5).astype(float)

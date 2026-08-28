@@ -904,8 +904,11 @@ class JitCompiler(TypesConfig):
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_assignments(self, args: list[Symbol], exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
-        kernel = _AssignmentsKernel(self, args, exprs, type_context, reduction, standard_layout)
+    def compile_assignments(self, args: list[tuple[Symbol, LowerType, int]], exprs: list[AssignExpr], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        type_context = TypeContext()
+        for arg, type, dim in args:
+            type_context.set_symbol(arg, type, dim)
+        kernel = _AssignmentsKernel(self, [a[0] for a in args], exprs, type_context, reduction, standard_layout)
         reduction_kernel: ReductionKernel | None = None
         if reduction is not None:
             assert kernel.reduction_type is not None
@@ -914,5 +917,5 @@ class JitCompiler(TypesConfig):
 
         return CompiledWrapper(self, kernel.symbol_scope, compiled, standard_layout=kernel._standard_layout)
 
-    def compile_reduction(self, args: list[Symbol], expr: Expr, type_context: TypeContext, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
-        return self.compile_assignments(args, [], type_context, reduction=expr, standard_layout=standard_layout)
+    def compile_reduction(self, args: list[tuple[Symbol, LowerType, int]], expr: Expr, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        return self.compile_assignments(args, [], reduction=expr, standard_layout=standard_layout)
