@@ -12,6 +12,7 @@ calling it, it never needs to be source-inspectable: closures, lambdas and
 functions defined in interactive sessions all work.
 """
 
+import functools
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -349,10 +350,11 @@ class TupleArgNode(SignatureNode):
 @dataclass(frozen=True)
 class DictArgNode(SignatureNode):
     values: frozenset[tuple[str, SignatureNode]]
+    type: type = dict
 
     @override
     def __str__(self) -> str:
-        return f"Dict[{', '.join(f'{k} -> {v}' for k, v in self.values)}]"
+        return f"Dict[{', '.join(f'{k} -> {v}' for k, v in self.values)}, type={self.type}]"
 
 @dataclass(frozen=True)
 class ScalarArgNode(SignatureNode):
@@ -402,7 +404,10 @@ def _gen_fill_one_arg(snode: SignatureNode, value_str: str, runtime_args: dict[i
                     todo.append((child, item))
             case DictArgNode():
                 for k, v in snode.values:
-                    todo.append((v, f'{value_str}["{k}"]'))
+                    if snode.type is dict:
+                        todo.append((v, f'{value_str}["{k}"]'))
+                    else:
+                        todo.append((v, f'getattr({value_str}, "{k}")'))
             case _:
                 raise ValueError(f"Unexpected node type: {snode}")
 
@@ -433,7 +438,14 @@ def _create_one_probe_arg(trace: _Trace, snode: SignatureNode, name: tuple[str, 
         case TupleArgNode():
             return tuple(_create_one_probe_arg(trace, elem, name + (str(i),)) for i, elem in enumerate(snode.elements))
         case DictArgNode():
-            return {k: _create_one_probe_arg(trace, v, name + (k,)) for k, v in snode.values}
+            values = {k: _create_one_probe_arg(trace, v, name + (k,)) for k, v in snode.values}
+            if snode.type is dict:
+                return values
+            # rebuild the object with probe attributes so that attribute access in
+            # the traced body records operations on the individual fields
+            obj = object.__new__(snode.type)
+            obj.__dict__.update(values)
+            return obj
         case _:
             raise TypeError(f"unexpected signature node type: {snode}")
 
@@ -555,6 +567,13 @@ class _JittedFunction:
         self.__name__ = getattr(fn, '__name__', 'jitted')
         self.__doc__ = getattr(fn, '__doc__', None)
 
+    def __get__(self, instance: Any, owner: type | None = None):
+        """Support jitted methods: ``obj.f(...)`` binds ``obj`` as the first
+        argument (which is then inlined as a :class:`DictArgNode`)."""
+        if instance is None:
+            return self
+        return functools.partial(self.__call__, instance)
+
     def _trace(self, key: _JitCacheKey) -> list[AssignExpr]:
         # compile-time arguments are traced with their constant value, so they are
         # baked into the expression trees (which also enables compile-time control
@@ -590,7 +609,9 @@ class _JittedFunction:
     def _is_comptime_arg(self, pos: int, value) -> bool:
         """Whether an argument is a compile-time constant: either explicitly declared
         in ``comptime_args`` (by name or parameter position), or an unsupported runtime
-        type that is hashable (e.g. tuples used with ``np.roll``)."""
+        type that is hashable (e.g. tuples used with ``np.roll``).  Objects with
+        instance attributes are supported (they are inlined) and are never
+        compile-time."""
         if self._args_info.is_explicit_comptime(pos):
             try:
                 hash(value)
@@ -605,6 +626,10 @@ class _JittedFunction:
         try:
             self._infer_arg_type(value)
         except TypeError:
+            if getattr(value, '__dict__', None) is not None:
+                # general objects with instance attributes are inlined instead of
+                # being baked as compile-time constants
+                return False
             try:
                 hash(value)
             except TypeError as e:
@@ -615,18 +640,35 @@ class _JittedFunction:
             return True
         return False
 
-    def _classify(self, pos: int, value, runtime_arg_pos: int) -> SignatureNode:
+    def _classify(self, pos: int, value, runtime_arg_pos: int) -> tuple[SignatureNode, int]:
         """Classify a bound argument into its signature node for the cache key.
+
         ``pos`` is the formal parameter position (``-1`` for ``*varargs``
-        elements and ``**kwargs`` values, which cannot be declared compile-time);
-        ``runtime_arg_pos`` is the position of the argument in the compiled
-        kernel's positional argument list; it is recorded on runtime nodes only."""
+        elements, ``**kwargs`` values and inlined object attributes, which cannot
+        be declared compile-time); ``runtime_arg_pos`` is the position of the
+        argument in the compiled kernel's positional argument list; it is
+        recorded on runtime nodes only.  Returns the node together with the
+        number of runtime positions it consumes."""
         if self._is_comptime_arg(pos, value):
-            return ComptimeValueArgNode(value)
-        lower_type, dim = self._infer_arg_type(value)
-        if dim == 0:
-            return ScalarArgNode(lower_type, runtime_arg_pos)
-        return ArrayArgNode(lower_type, dim, runtime_arg_pos)
+            return ComptimeValueArgNode(value), 0
+        if isinstance(value, (np.ndarray, np.floating, np.complexfloating, np.integer, float, complex, int, _Probe)):
+            # probes reach _infer_arg_type here and are rejected with a clear
+            # "nested jitted call" error
+            lower_type, dim = self._infer_arg_type(value)
+            if dim == 0:
+                return ScalarArgNode(lower_type, runtime_arg_pos), 1
+            return ArrayArgNode(lower_type, dim, runtime_arg_pos), 1
+        # general object: inline it by classifying each attribute recursively
+        fields = getattr(value, '__dict__', None)
+        if fields is not None:
+            next_pos = runtime_arg_pos
+            entries: set[tuple[str, SignatureNode]] = set()
+            for name in sorted(fields):
+                node, count = self._classify(-1, fields[name], next_pos)
+                entries.add((name, node))
+                next_pos += count
+            return DictArgNode(frozenset(entries), type=type(value)), next_pos - runtime_arg_pos
+        raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
     def _build_signature(self, fixed: list[Any], variadic: list[Any], keyword: dict[str, Any]) -> Signature:
         """Build the cache-key signature from the bound call arguments.
@@ -641,9 +683,8 @@ class _JittedFunction:
 
         def add(pos: int, value: Any) -> SignatureNode:
             nonlocal runtime_pos
-            node = self._classify(pos, value, runtime_pos)
-            if not isinstance(node, ComptimeValueArgNode):
-                runtime_pos += 1
+            node, count = self._classify(pos, value, runtime_pos)
+            runtime_pos += count
             return node
 
         fixed_nodes = tuple(add(i, value) for i, value in enumerate(fixed))

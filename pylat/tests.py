@@ -1012,6 +1012,24 @@ class SimdLayoutTests(TestCase):
             {StandardLayoutMode.ROW_MAJOR, StandardLayoutMode.COLUMN_MAJOR},
         )
 
+    def test_object_inlining(self):
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+
+            @wrapper.jit()
+            def run(self, dt: float):
+                self.a += self.b * dt
+
+        np.random.seed(0)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        Test(a, b).run(2.0)
+        assert_almost_equal(a, b * 2.0)
+
     def test_flat_reduction(self):
         a, = symbols('a')
         context = TypeContext()
