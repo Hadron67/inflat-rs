@@ -21,7 +21,6 @@ from ..expr import (
     Sin,
     Slice,
     Symbol,
-    SymbolShape,
     Times,
 )
 from . import type as ap
@@ -51,6 +50,7 @@ from .type import (
     LowerType,
     ScalarArgInfo,
     SymbolArgInfo,
+    SymbolShape,
     TypeContext,
     TypedAssignExpr,
     TypeResolver,

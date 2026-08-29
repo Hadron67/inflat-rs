@@ -813,15 +813,6 @@ class Sum(Expr):
     def input_form(self) -> str:
         return f"sum({self.expr.input_form()})"
 
-@exprclass
-class SymbolShape(Expr):
-    symbol: Symbol
-    index: int
-
-    @override
-    def input_form(self) -> str:
-        return f"@shapeOf({self.symbol.input_form()}, {self.index})"
-
 class AssignExpr:
     lhs: Expr
     rhs: Expr

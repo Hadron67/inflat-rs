@@ -568,9 +568,6 @@ def escape_byte(b: int) -> str:
     return f"\\{b:02x}"
 
 class GlobalStringValue(GlobalValue):
-    value: bytes
-    flags: int
-
     @override
     def __init__(self, value: bytes, flags: int = GlobalValueFlags.DEFAULT) -> None:
         self.value = value
@@ -637,12 +634,10 @@ class IFunction:
         raise NotImplementedError
 
 class FunctionArgs(IFunction):
-    parent: 'FunctionArgs | None'
-    args: list[ArgValue]
 
     def __init__(self, parent: 'FunctionArgs | None' = None) -> None:
         self.parent = parent
-        self.args = []
+        self.args: list[ArgValue] = []
 
     @override
     def get_arg(self, index: int) -> Value:
@@ -655,17 +650,11 @@ class FunctionArgs(IFunction):
         return ret
 
 class Function(GlobalValue, IFunction):
-    name: str | None
-    _entry: 'BasicBlock'
-    _args: list[ArgValue]
-
-    _type: FnType | None
-
     def __init__(self, name: str | None = None, entry: 'BasicBlock | None' = None) -> None:
         self.name = name
         self._entry = entry if entry is not None else BasicBlock()
-        self._args = []
-        self._type = None
+        self._args: list[ArgValue] = []
+        self._type: FnType | None = None
 
     @property
     def entry(self):
@@ -752,13 +741,9 @@ class Nop(Inst):
         raise RuntimeError("Nop in inst block")
 
 class BasicBlock(LocalValue):
-    insts: list[Inst]
-
-    _finished: bool
-
     @override
     def __init__(self) -> None:
-        self.insts = []
+        self.insts: list[Inst] = []
         self._finished = False
 
     @override

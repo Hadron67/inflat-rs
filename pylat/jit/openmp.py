@@ -305,12 +305,6 @@ def _barrier(b: BasicBlock, gtid: Value):
 
 
 class _Compiled(CompiledBackendFunction):
-    _parent: OpenMPBackend
-    _mod: Module
-    _args_type: tuple[type[ctypes._CDataType], ...]
-    _entry: ctypes._CFunctionType
-    _engine: llvm.ExecutionEngine
-
     @override
     def __init__(self, parent: OpenMPBackend, mod: Module, entry_name: str, args_type: tuple[type[ctypes._CDataType], ...], ret_type: type[ctypes._CDataType] | None) -> None:
         self._parent = parent
@@ -352,7 +346,7 @@ class _Compiled(CompiledBackendFunction):
 
         entry_type = ctypes.CFUNCTYPE(ret_type, *self._args_type)
         addr = engine.get_function_address(entry_name)
-        self._entry = ctypes.cast(addr, entry_type)
+        self._entry: ctypes._CFunctionType = ctypes.cast(addr, entry_type)
 
     @override
     def call(self, *args):

@@ -15,7 +15,6 @@ from pylat.expr import (
     Sin,
     Slice,
     Symbol,
-    SymbolShape,
     Times,
     symbols,
 )
@@ -248,7 +247,6 @@ class ExpressionFormTests(TestCase):
         self.assertEqual(Exp(x).normalize(), Exp(x))
         self.assertEqual(Roll(x, 0, 1).normalize(), Roll(x, 0, 1))
         self.assertEqual(Slice(x, 0, 2).normalize(), Slice(x, 0, 2))
-        self.assertEqual(SymbolShape(x, 0).normalize(), SymbolShape(x, 0))
 
     def test_symbols_are_distinct_by_name(self):
         a, b = symbols('a', 'b')

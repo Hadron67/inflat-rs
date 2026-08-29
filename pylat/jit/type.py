@@ -19,9 +19,9 @@ from ..expr import (
     Sin,
     Slice,
     Symbol,
-    SymbolShape,
     Times,
     UnaryNumericFunction,
+    exprclass,
 )
 from . import llvm
 
@@ -246,6 +246,15 @@ class TypeContext:
     def get_dimension(self, expr: Symbol):
         return self._symbol_dimension[expr]
 
+@exprclass
+class SymbolShape(Expr):
+    symbol: Symbol
+    index: int
+
+    @override
+    def input_form(self) -> str:
+        return f"@shapeOf({self.symbol.input_form()}, {self.index})"
+
 class TypeResolver:
     def __init__(self, ctx: TypeContext, type_config: TypesConfig) -> None:
         self._ctx = ctx
@@ -260,9 +269,14 @@ class TypeResolver:
     def get_symbol_dimension(self, expr: Symbol):
         return self._ctx.get_dimension(expr)
 
+    def _eval_symbol_shape(self, expr: Expr):
+        while isinstance(expr, SymbolShape) and expr in self.resolved_shapes:
+            expr = self.resolved_shapes[expr]
+        return expr
+
     def _resolve_equal_constraint(self, expr1: Expr, expr2: Expr):
-        expr1 = expr1.map(lambda e: self.resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
-        expr2 = expr2.map(lambda e: self.resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
+        expr1 = self._eval_symbol_shape(expr1)
+        expr2 = self._eval_symbol_shape(expr2)
         if expr1 == expr2:
             return
         if not isinstance(expr1, SymbolShape) and isinstance(expr2, SymbolShape):
@@ -271,13 +285,6 @@ class TypeResolver:
             expr2 = t
 
         if isinstance(expr1, SymbolShape):
-            # a symbol may already be constrained (e.g. by a previous assignment);
-            # follow the chain to its root so that assignments sharing a shape do
-            # not conflict
-            while isinstance(expr1, SymbolShape) and expr1 in self.resolved_shapes:
-                expr1 = self.resolved_shapes[expr1]
-            while isinstance(expr2, SymbolShape) and expr2 in self.resolved_shapes:
-                expr2 = self.resolved_shapes[expr2]
             if expr1 == expr2:
                 return
             if isinstance(expr1, SymbolShape):
@@ -318,7 +325,7 @@ class TypeResolver:
         match expr:
             case Symbol():
                 return tuple(SymbolShape(expr, i) for i in range(self._ctx.get_dimension(expr)))
-            case Int() | Float() | Rational() | Complex():
+            case Int() | Float() | Rational() | Complex() | SymbolShape():
                 return ()
             case Plus(children) | Times(children):
                 return self.merge_shapes(*tuple(self.get_shape(a) for a in children))
