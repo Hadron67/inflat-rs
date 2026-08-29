@@ -9,6 +9,7 @@ import numpy as np
 from ..expr import (
     AssignExpr,
     Complex,
+    Coord,
     Cos,
     Exp,
     Expr,
@@ -488,6 +489,17 @@ class _FunctionCompiler:
                 assert isinstance(sym, ArrayArgInfo), "SymbolShape must be used with an array symbol"
                 assert index < len(sym.shape), "SymbolShape index out of bounds"
                 return self._args[sym.shape[index]]
+            case Coord(axis, _):
+                # the coordinate is the loop subscript along the given axis
+                match subscripts:
+                    case _RealSubscriptsInfo(s):
+                        if axis < 0 or axis >= len(s):
+                            raise IndexError(
+                                f"coord axis {axis} is out of bounds for a {len(s)}-dimensional loop"
+                            )
+                        return s[axis]
+                    case _StandardLayoutSubscriptInfo():
+                        raise TypeError("coord is not supported in standard layout kernels")
             case Roll():
                 assert isinstance(subscripts, _RealSubscriptsInfo), "cannot compile Roll in standard layout mode"
                 expr_shape = self._type_cache.get_shape(expr.expr)
@@ -865,6 +877,8 @@ class _AssignmentsKernel(LoopKernel):
         def walk(expr: Expr) -> None:
             if isinstance(expr, Roll):
                 failures.append("np.roll is not supported in standard layout kernels")
+            elif isinstance(expr, Coord):
+                failures.append("coord is not supported in standard layout kernels")
             elif isinstance(expr, Slice):
                 check_slice_chain(expr)
             elif isinstance(expr, SymbolShape):

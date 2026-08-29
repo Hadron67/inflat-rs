@@ -26,6 +26,7 @@ from typing_extensions import override
 
 from ..expr import (
     AssignExpr,
+    Coord,
     Cos,
     Exp,
     Expr,
@@ -85,6 +86,44 @@ def _as_expr(value) -> Expr:
         return Expr.as_expr(value)
     except ValueError as e:
         raise TypeError(f"unsupported operand of type {type(value).__name__} in jitted function") from e
+
+
+def _contains_coord(expr: Expr) -> bool:
+    """Whether an expression contains a ``Coord`` node."""
+    todo = [expr]
+    while todo:
+        e = todo.pop()
+        if isinstance(e, Coord):
+            return True
+        todo.extend(e.subexpressions())
+    return False
+
+
+def _fill_coord_shape(expr: Expr, rank: int) -> Expr:
+    """Fill in the shape of every shape-less ``Coord`` node in ``expr``.
+
+    ``Coord`` nodes are created without a shape (the actual sizes are runtime
+    arguments, so they are not known before compilation); the rank of the
+    surrounding loop is the only shape information available.  The axis is
+    validated against that rank, and the filled shape is a rank-sized
+    placeholder tuple whose entries are unused."""
+    def fill(e: Expr) -> Expr:
+        if not isinstance(e, Coord) or e.shape is not None:
+            return e
+        if not 0 <= e.axis < rank:
+            raise TypeError(
+                f"coord axis {e.axis} is out of bounds for a {rank}-dimensional lattice"
+            )
+        return Coord(e.axis, (0,) * rank)
+    return expr.map(fill)
+
+
+def _fill_coord_shapes(assign: AssignExpr, resolver: TypeResolver) -> AssignExpr:
+    """Fill in the ``Coord`` shapes of one assignment from its loop context."""
+    lhs_shape = resolver.get_shape(assign.lhs)
+    rhs_shape = resolver.get_shape(assign.rhs)
+    rank = len(resolver.merge_shape(lhs_shape, rhs_shape, True))
+    return AssignExpr(assign.lhs, _fill_coord_shape(assign.rhs, rank), assign.op)
 
 
 class _Trace:
@@ -843,11 +882,21 @@ class _JittedFunction:
         )
         assigns, sums = self._trace(key)
         assigns = [a.normalize() for a in assigns]
+        context = {sym: SymbolTypeDesc(lower_type, dim, is_ref) for _, sym, lower_type, dim, is_ref in runtime}
+        # reduction placeholders are rank-0 scalars; include them so that the
+        # shape resolver can handle assignments that read a reduction result
+        for sym in sums.values():
+            context[sym] = SymbolTypeDesc(self._wrapper._index_type, 0)
+        resolver = TypeResolver(context, compiler)
+        # ``Coord`` nodes are created without a shape (the actual sizes are runtime
+        # arguments); fill in the rank of their loop context before compiling
+        if any(_contains_coord(a.rhs) for a in assigns) or any(_contains_coord(s.expr) for s in sums):
+            assigns = [_fill_coord_shapes(a, resolver) for a in assigns]
+            if len(sums) > 0:
+                sums = {Sum(_fill_coord_shape(s.expr, len(resolver.get_shape(s.expr)))): sym for s, sym in sums.items()}
         if len(sums) == 0:
             main = compiler.compile_assignments(args, assigns, standard_layout=key.layout)
             return main, ()
-        context = {sym: SymbolTypeDesc(lower_type, dim, is_ref) for _, sym, lower_type, dim, is_ref in runtime}
-        resolver = TypeResolver(context, compiler)
         placeholder_symbols = list(sums.values())
         sum_types: dict[Sum, LowerType] = {}
         for sum_node in sums:

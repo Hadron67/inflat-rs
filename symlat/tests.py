@@ -6,7 +6,7 @@ import numpy as np
 from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
-from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, symbols
+from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, coord, symbols
 from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .jit.fn_wrapper import Wrapper
 from .jit.openmp import OpenMPBackend
@@ -427,6 +427,90 @@ class JitWrapperTest(TestCase):
 
         with self.assertRaises(TypeError):
             f2(np.zeros((3, 3)), np.zeros((3, 3)))
+
+    def test_coord(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b * coord(0) + coord(1)
+            b += coord(0) * coord(1)
+
+        a = np.zeros((4, 5))
+        b = np.ones((4, 5))
+        b0 = b.copy()
+        f(a, b)
+        i = np.arange(4)[:, None]
+        j = np.arange(5)[None, :]
+        assert_almost_equal(a, b0 * i + j)
+        assert_almost_equal(b, b0 + i * j)
+
+    def test_coord_rank_one(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a):
+            a += coord(0)
+
+        a = np.zeros(6)
+        f(a)
+        assert_almost_equal(a, np.arange(6))
+
+    def test_coord_in_expression(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b * coord(0) + np.roll(b, 1, axis=0) * 0.5
+            a += b[0] * coord(1)
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        b0 = b.copy()
+        f(a, b)
+        i = np.arange(4)[:, None]
+        j = np.arange(5)[None, :]
+        expected = i * b0 + np.roll(b0, 1, axis=0) * 0.5 + np.broadcast_to(b0[0], a.shape) * j
+        assert_almost_equal(a, expected)
+
+    def test_coord_left_operand(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += coord(0) * b + 2 * coord(1)
+
+        a = np.zeros((4, 5))
+        b = np.ones((4, 5))
+        b0 = b.copy()
+        f(a, b)
+        i = np.arange(4)[:, None]
+        j = np.arange(5)[None, :]
+        assert_almost_equal(a, i * b0 + 2 * j)
+
+    def test_coord_in_sum(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sum(b * coord(0))
+
+        a = np.zeros((3, 4))
+        b = np.random.rand(3, 4)
+        b0 = b.copy()
+        f(a, b)
+        i = np.arange(3)[:, None]
+        assert_almost_equal(a, np.full(a.shape, np.sum(b0 * i)))
+
+    def test_coord_axis_out_of_bounds(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a):
+            a += coord(2)
+
+        with self.assertRaises(TypeError):
+            f(np.zeros((4, 5)))
 
     def test_sum(self):
         wrapper = Wrapper()

@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from symlat.expr import (
+from .expr import (
     Complex,
     Cos,
     Exp,

@@ -7,6 +7,11 @@ from .util import SubExprFnBuilder
 
 
 class Expr:
+    """
+        Expression base class.
+
+        An expression is immutable and represents a mathematical expression.
+    """
     @staticmethod
     def as_expr(expr) -> 'Expr':
         if isinstance(expr, Expr):
@@ -63,43 +68,75 @@ class Expr:
             raise TypeError(f"cannot compare {self} with {other}")
 
     def __add__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            # not convertible (e.g. a traced probe): let the other operand's
+            # reflected operator handle the combination
+            return NotImplemented
         return Plus((self, other))
 
     def __radd__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Plus((other, self))
 
     def __sub__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Plus((self, Times((Int(-1), other))))
 
     def __rsub__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Plus((other, Times((Int(-1), self))))
 
     def __mul__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Times((self, other))
 
     def __rmul__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Times((other, self))
 
     def __truediv__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Times((self, Power(other, Int(-1))))
 
     def __rtruediv__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Times((other, Power(self, Int(-1))))
 
     def __pow__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Power(self, other)
 
     def __rpow__(self, other) -> 'Expr':
-        other = Expr.as_expr(other)
+        try:
+            other = Expr.as_expr(other)
+        except ValueError:
+            return NotImplemented
         return Power(other, self)
 
     def sqrt(self) -> 'Expr':
@@ -812,6 +849,24 @@ class Sum(Expr):
     @override
     def input_form(self) -> str:
         return f"sum({self.expr.input_form()})"
+
+@exprclass
+class Coord(Expr):
+    axis: int
+    shape: tuple[int, ...] | None
+
+    @override
+    def input_form(self) -> str:
+        return f"coord({self.axis})"
+
+def coord(axis: int) -> Coord:
+    """Create a lattice-coordinate expression.
+
+    ``coord(axis)`` evaluates to the index along ``axis`` at each lattice point
+    of the enclosing loop, e.g. ``a += coord(0)`` adds the first coordinate to
+    every element of ``a``.  The shape is filled in from the context during JIT
+    compilation."""
+    return Coord(axis, None)
 
 class AssignExpr:
     def __init__(self, lhs: Expr, rhs: Expr, op: str = '') -> None:

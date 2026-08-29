@@ -6,6 +6,7 @@ from typing import override
 from ..expr import (
     AssignExpr,
     Complex,
+    Coord,
     Cos,
     Exp,
     Expr,
@@ -312,7 +313,7 @@ class TypeResolver:
         match expr:
             case Symbol():
                 return tuple(SymbolShape(expr, i) for i in range(self.symbol_types[expr].dimension))
-            case Int() | Float() | Rational() | Complex() | SymbolShape():
+            case Int() | Float() | Rational() | Complex() | SymbolShape() | Coord():
                 return ()
             case Plus(children) | Times(children):
                 return self.merge_shapes(*tuple(self.get_shape(a) for a in children))
@@ -368,6 +369,8 @@ class TypeResolver:
             case Symbol():
                 return self._promote_type(self.symbol_types[expr].type)
             case SymbolShape():
+                return self.type_config.index_type
+            case Coord():
                 return self.type_config.index_type
             case Plus(children) | Times(children):
                 return get_peer_types(*tuple(self.get_type(a) for a in children))
