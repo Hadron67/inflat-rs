@@ -6,7 +6,7 @@ from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
 from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, symbols
-from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
+from .jit.compile import ArgType, CompiledWrapper, JitCompiler, StandardLayoutMode
 from .jit.fn_wrapper import Wrapper
 from .jit.openmp import OpenMPBackend
 from .jit.type import ComplexFloatType, FloatType
@@ -45,9 +45,9 @@ class JitTest(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments([
-            (phi, ComplexFloatType(FloatType(64)), 3),
-            (mom_phi, ComplexFloatType(FloatType(64)), 3),
-            (dt, FloatType(64), 0),
+            (phi, ArgType(ComplexFloatType(FloatType(64)), 3)),
+            (mom_phi, ArgType(ComplexFloatType(FloatType(64)), 3)),
+            (dt, ArgType(FloatType(64), 0)),
         ], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
         ])
@@ -62,15 +62,13 @@ class JitTest(TestCase):
         assert_almost_equal(phi0, mom_phi0 * mom_phi0 * dt0)
 
     def test_assignment_non_uniform_shape(self):
-        # regression test: subscripts were unpacked from the shape in the wrong
-        # order when the shape was not symmetric under reversal
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments([
-            (phi, ComplexFloatType(FloatType(64)), 3),
-            (mom_phi, ComplexFloatType(FloatType(64)), 3),
-            (dt, FloatType(64), 0),
+            (phi, ArgType(ComplexFloatType(FloatType(64)), 3)),
+            (mom_phi, ArgType(ComplexFloatType(FloatType(64)), 3)),
+            (dt, ArgType(FloatType(64), 0)),
         ], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
         ])
@@ -88,7 +86,7 @@ class JitTest(TestCase):
         a, = symbols('a')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(a, FloatType(64), 3)], a)
+        fn = compiler.compile_reduction([(a, ArgType(FloatType(64), 3))], a)
 
         np.random.seed(114514)
         a0 = np.random.randn(10, 10, 10)
@@ -100,8 +98,8 @@ class JitTest(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_reduction([
-            (a, ComplexFloatType(FloatType(64)), 3),
-            (b, ComplexFloatType(FloatType(64)), 3),
+            (a, ArgType(ComplexFloatType(FloatType(64)), 3)),
+            (b, ArgType(ComplexFloatType(FloatType(64)), 3)),
         ], a * b + a)
 
         np.random.seed(42)
@@ -115,9 +113,9 @@ class JitTest(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments([
-            (phi, ComplexFloatType(FloatType(64)), 3),
-            (mom_phi, ComplexFloatType(FloatType(64)), 3),
-            (dt, FloatType(64), 0),
+            (phi, ArgType(ComplexFloatType(FloatType(64)), 3)),
+            (mom_phi, ArgType(ComplexFloatType(FloatType(64)), 3)),
+            (dt, ArgType(FloatType(64), 0)),
         ], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
         ], reduction=mom_phi)
@@ -139,10 +137,10 @@ class JitTest(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments([
-            (a, FloatType(64), 1),
-            (b, FloatType(64), 1),
-            (c, FloatType(64), 1),
-            (d, FloatType(64), 1),
+            (a, ArgType(FloatType(64), 1)),
+            (b, ArgType(FloatType(64), 1)),
+            (c, ArgType(FloatType(64), 1)),
+            (d, ArgType(FloatType(64), 1)),
         ], [
             AssignExpr(a, b, '+'),
             AssignExpr(a, c, '+'),
@@ -1092,7 +1090,7 @@ class SimdLayoutTests(TestCase):
         a, = symbols('a')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(a, FloatType(64), 3)], a, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([(a, ArgType(FloatType(64), 3))], a, standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(7)
@@ -1103,7 +1101,7 @@ class SimdLayoutTests(TestCase):
         a, = symbols('a')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(a, FloatType(64), 2)], a, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
+        fn = compiler.compile_reduction([(a, ArgType(FloatType(64), 2))], a, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.COLUMN_MAJOR)
 
         np.random.seed(8)
@@ -1114,7 +1112,7 @@ class SimdLayoutTests(TestCase):
         b, = symbols('b')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(b, FloatType(64), 2)], Slice(b, 0, 1), standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([(b, ArgType(FloatType(64), 2))], Slice(b, 0, 1), standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(9)
@@ -1127,7 +1125,7 @@ class SimdLayoutTests(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments(
-            [(a, FloatType(64), 2), (b, FloatType(64), 2)], [AssignExpr(a, b, '+')],
+            [(a, ArgType(FloatType(64), 2)), (b, ArgType(FloatType(64), 2))], [AssignExpr(a, b, '+')],
             standard_layout=StandardLayoutMode.ROW_MAJOR,
         )
         a0 = np.zeros((4, 5))
@@ -1142,7 +1140,7 @@ class SimdLayoutTests(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments(
-            [(a, FloatType(64), 1), (b, FloatType(64), 2)], [AssignExpr(a, Slice(b, 0, 1), '+')]
+            [(a, ArgType(FloatType(64), 1)), (b, ArgType(FloatType(64), 2))], [AssignExpr(a, Slice(b, 0, 1), '+')]
         )
         a0 = np.zeros(6)
         b0 = np.arange(30).reshape(5, 6).astype(float)
@@ -1151,7 +1149,7 @@ class SimdLayoutTests(TestCase):
 
         b3, = symbols('b3')
         fn3 = compiler.compile_assignments(
-            [(a, FloatType(64), 1), (b3, FloatType(64), 3)],
+            [(a, ArgType(FloatType(64), 1)), (b3, ArgType(FloatType(64), 3))],
             [AssignExpr(a, Slice(Slice(b3, 2, 2), 0, 1), '+')],
         )
         a3 = np.zeros(4)
@@ -1163,7 +1161,7 @@ class SimdLayoutTests(TestCase):
         # smaller than the loop rank) must align its surviving axis with the
         # trailing loop axes
         fn4 = compiler.compile_assignments(
-            [(a, FloatType(64), 3), (b, FloatType(64), 2)], [AssignExpr(a, Slice(b, 0, 1), '+')]
+            [(a, ArgType(FloatType(64), 3)), (b, ArgType(FloatType(64), 2))], [AssignExpr(a, Slice(b, 0, 1), '+')]
         )
         a4 = np.zeros((2, 3, 6))
         b40 = np.arange(30).reshape(5, 6).astype(float)
@@ -1172,7 +1170,7 @@ class SimdLayoutTests(TestCase):
 
         b5, = symbols('b5')
         fn5 = compiler.compile_assignments(
-            [(a, FloatType(64), 2), (b5, FloatType(64), 4)],
+            [(a, ArgType(FloatType(64), 2)), (b5, ArgType(FloatType(64), 4))],
             [AssignExpr(a, Slice(Slice(b5, 2, 3), 1, 2), '+')],
         )
         a5 = np.zeros((2, 4))

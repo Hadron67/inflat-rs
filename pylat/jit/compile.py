@@ -898,16 +898,22 @@ class SumReductionKernel(ReductionKernel):
 _F64 = ap.FloatType(64)
 _U64 = ap.IntType(64, False)
 
+@dataclass(frozen=True)
+class ArgType:
+    type: LowerType
+    rank: int
+    is_ref: bool = False
+
 class JitCompiler(TypesConfig):
     def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64):
         self._backend = backend
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_assignments(self, args: list[tuple[Symbol, LowerType, int]], exprs: list[AssignExpr], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+    def compile_assignments(self, args: list[tuple[Symbol, ArgType]], exprs: list[AssignExpr], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         type_context = TypeContext()
-        for arg, type, dim in args:
-            type_context.set_symbol(arg, type, dim)
+        for sym, type in args:
+            type_context.set_symbol(sym, type.type, type.rank)
         kernel = _AssignmentsKernel(self, [a[0] for a in args], exprs, type_context, reduction, standard_layout)
         reduction_kernel: ReductionKernel | None = None
         if reduction is not None:
@@ -917,5 +923,5 @@ class JitCompiler(TypesConfig):
 
         return CompiledWrapper(self, kernel.symbol_scope, compiled, standard_layout=kernel._standard_layout)
 
-    def compile_reduction(self, args: list[tuple[Symbol, LowerType, int]], expr: Expr, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+    def compile_reduction(self, args: list[tuple[Symbol, ArgType]], expr: Expr, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         return self.compile_assignments(args, [], reduction=expr, standard_layout=standard_layout)

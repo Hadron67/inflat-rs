@@ -40,7 +40,7 @@ from ..expr import (
     Times,
 )
 from .backend import Backend
-from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
+from .compile import ArgType, CompiledWrapper, JitCompiler, StandardLayoutMode
 from .openmp import OpenMPBackend
 from .type import (
     ComplexFloatType,
@@ -818,8 +818,8 @@ class _JittedFunction:
         # sort by runtime_arg_pos: the walk order is not necessarily the position
         # order (the traversal uses a stack), and the converter passes values in
         # position order
-        args_by_pos: dict[int, tuple[Symbol, LowerType, int]] = {
-            pos: (sym, lower_type, dim) for pos, sym, lower_type, dim in runtime
+        args_by_pos: dict[int, tuple[Symbol, ArgType]] = {
+            pos: (sym, ArgType(lower_type, dim)) for pos, sym, lower_type, dim in runtime
         }
         args = [args_by_pos[i] for i in range(len(args_by_pos))]
         compiler = JitCompiler(
@@ -848,7 +848,7 @@ class _JittedFunction:
             for sum_node in sums
         )
         main = compiler.compile_assignments(
-            args + [(sym, sum_types[sum_node], 0) for sum_node, sym in zip(sums, placeholder_symbols)],
+            args + [(sym, ArgType(sum_types[sum_node], 0)) for sum_node, sym in zip(sums, placeholder_symbols)],
             assigns,
             standard_layout=key.layout,
         )
