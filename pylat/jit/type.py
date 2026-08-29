@@ -227,24 +227,11 @@ def get_peer_types(*types: LowerType) -> LowerType:
         ret = get_peer_type(ret, t)
     return ret
 
-class TypeContext:
-    def __init__(self) -> None:
-        self._symbol_types: dict[Symbol, LowerType] = {}
-        self._symbol_dimension: dict[Symbol, int] = {}
-
-    def set_symbol(self, expr: Symbol, type: LowerType | None = None, dimension: int | None = None):
-        if type is not None:
-            assert expr not in self._symbol_types
-            self._symbol_types[expr] = type
-        if dimension is not None:
-            assert expr not in self._symbol_dimension
-            self._symbol_dimension[expr] = dimension
-
-    def get_type(self, expr: Symbol):
-        return self._symbol_types[expr]
-
-    def get_dimension(self, expr: Symbol):
-        return self._symbol_dimension[expr]
+@dataclass(frozen=True)
+class SymbolTypeDesc:
+    type: LowerType
+    dimension: int
+    is_ref: bool = False
 
 @exprclass
 class SymbolShape(Expr):
@@ -256,18 +243,18 @@ class SymbolShape(Expr):
         return f"@shapeOf({self.symbol.input_form()}, {self.index})"
 
 class TypeResolver:
-    def __init__(self, ctx: TypeContext, type_config: TypesConfig) -> None:
-        self._ctx = ctx
+    def __init__(self, symbol_types: dict[Symbol, SymbolTypeDesc], type_config: TypesConfig) -> None:
         self._type_cache: dict[Expr, LowerType] = {}
         self._shape_cache: dict[Expr, tuple[Expr, ...]] = {}
+        self.symbol_types = symbol_types
         self.resolved_shapes: dict[SymbolShape, Expr] = {}
         self.type_config = type_config
 
     def get_symbol_type(self, expr: Symbol):
-        return self._ctx.get_type(expr)
+        return self.symbol_types[expr].type
 
     def get_symbol_dimension(self, expr: Symbol):
-        return self._ctx.get_dimension(expr)
+        return self.symbol_types[expr].dimension
 
     def _eval_symbol_shape(self, expr: Expr):
         while isinstance(expr, SymbolShape) and expr in self.resolved_shapes:
@@ -324,7 +311,7 @@ class TypeResolver:
     def _get_shape_no_cache(self, expr: Expr) -> tuple[Expr, ...]:
         match expr:
             case Symbol():
-                return tuple(SymbolShape(expr, i) for i in range(self._ctx.get_dimension(expr)))
+                return tuple(SymbolShape(expr, i) for i in range(self.symbol_types[expr].dimension))
             case Int() | Float() | Rational() | Complex() | SymbolShape():
                 return ()
             case Plus(children) | Times(children):
@@ -379,7 +366,7 @@ class TypeResolver:
             case Complex():
                 return ComplexFloatType(self.type_config.real_type)
             case Symbol():
-                return self._promote_type(self._ctx.get_type(expr))
+                return self._promote_type(self.symbol_types[expr].type)
             case SymbolShape():
                 return self.type_config.index_type
             case Plus(children) | Times(children):
@@ -407,26 +394,3 @@ class TypedAssignExpr:
 
     def total_size(self):
         return Times.make(self.shape).normalize()
-
-class SymbolArgInfo:
-    @abstractmethod
-    def write_one_arg(self, arg_value: Any, args: list[ctypes._CDataType | None], config: TypesConfig):
-        raise NotImplementedError
-
-@dataclass
-class ScalarArgInfo(SymbolArgInfo):
-    value: int
-
-    @override
-    def __str__(self) -> str:
-        return f"%{self.value}: Scalar"
-
-@dataclass
-class ArrayArgInfo(SymbolArgInfo):
-    ptr: int
-    shape: tuple[int, ...]
-    strides: tuple[int, ...]
-
-    @override
-    def __str__(self) -> str:
-        return f"%{self.ptr}: Array(strides=({", ".join(str(i) for i in self.strides)}))"

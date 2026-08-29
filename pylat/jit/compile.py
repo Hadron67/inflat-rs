@@ -1,4 +1,5 @@
 import ctypes
+from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, override
@@ -45,18 +46,39 @@ from .llvm import (
     VoidValue,
 )
 from .type import (
-    ArrayArgInfo,
     ComplexFloatType,
     LowerType,
-    ScalarArgInfo,
-    SymbolArgInfo,
     SymbolShape,
-    TypeContext,
+    SymbolTypeDesc,
     TypedAssignExpr,
     TypeResolver,
     TypesConfig,
     get_peer_types,
 )
+
+
+class SymbolArgInfo:
+    @abstractmethod
+    def write_one_arg(self, arg_value: Any, args: list[ctypes._CDataType | None], config: TypesConfig):
+        raise NotImplementedError
+
+@dataclass
+class ScalarArgInfo(SymbolArgInfo):
+    value: int
+
+    @override
+    def __str__(self) -> str:
+        return f"%{self.value}: Scalar"
+
+@dataclass
+class ArrayArgInfo(SymbolArgInfo):
+    ptr: int
+    shape: tuple[int, ...]
+    strides: tuple[int, ...]
+
+    @override
+    def __str__(self) -> str:
+        return f"%{self.ptr}: Array(strides=({", ".join(str(i) for i in self.strides)}))"
 
 
 def _check_and_get_total_size(exprs: list[TypedAssignExpr], reduction: 'TypedReductionExpr | None' = None, resolver: 'TypeResolver | None' = None):
@@ -706,7 +728,7 @@ class TypedReductionExpr:
 
 class _AssignmentsKernel(LoopKernel):
     @override
-    def __init__(self, parent: 'JitCompiler', args: list[Symbol], exprs: list[AssignExpr], type_context: TypeContext, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
+    def __init__(self, parent: 'JitCompiler', args: list[Symbol], exprs: list[AssignExpr], type_context: dict[Symbol, SymbolTypeDesc], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
         type_cache = TypeResolver(type_context, parent)
         self._parent = parent
         self._type_cache = type_cache
@@ -898,22 +920,14 @@ class SumReductionKernel(ReductionKernel):
 _F64 = ap.FloatType(64)
 _U64 = ap.IntType(64, False)
 
-@dataclass(frozen=True)
-class ArgType:
-    type: LowerType
-    rank: int
-    is_ref: bool = False
-
 class JitCompiler(TypesConfig):
     def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64):
         self._backend = backend
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_assignments(self, args: list[tuple[Symbol, ArgType]], exprs: list[AssignExpr], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
-        type_context = TypeContext()
-        for sym, type in args:
-            type_context.set_symbol(sym, type.type, type.rank)
+    def compile_assignments(self, args: list[tuple[Symbol, SymbolTypeDesc]], exprs: list[AssignExpr], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        type_context = {a: b for a, b in args}
         kernel = _AssignmentsKernel(self, [a[0] for a in args], exprs, type_context, reduction, standard_layout)
         reduction_kernel: ReductionKernel | None = None
         if reduction is not None:
@@ -923,5 +937,5 @@ class JitCompiler(TypesConfig):
 
         return CompiledWrapper(self, kernel.symbol_scope, compiled, standard_layout=kernel._standard_layout)
 
-    def compile_reduction(self, args: list[tuple[Symbol, ArgType]], expr: Expr, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+    def compile_reduction(self, args: list[tuple[Symbol, SymbolTypeDesc]], expr: Expr, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         return self.compile_assignments(args, [], reduction=expr, standard_layout=standard_layout)
