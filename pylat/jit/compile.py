@@ -533,6 +533,9 @@ class _FunctionCompiler:
                     child_value = self.compile_expr(child, subscripts)
                     child_type = self._type_cache.get_type(child)
                     ret = self._add(ret, ret_type, child_value, child_type, expr_type)
+                    # the accumulator now has the result type; use it for the next
+                    # operand instead of the stale type of the first child
+                    ret_type = expr_type
                 return ret
             case Times(children):
                 ret_type = self._type_cache.get_type(children[0])
@@ -541,6 +544,7 @@ class _FunctionCompiler:
                     child_value = self.compile_expr(child, subscripts)
                     child_type = self._type_cache.get_type(child)
                     ret = self._mul(ret, ret_type, child_value, child_type, expr_type)
+                    ret_type = expr_type
                 return ret
             case Power(_, exponent):
                 base_type = self._type_cache.get_type(expr.base)

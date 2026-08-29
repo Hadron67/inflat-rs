@@ -814,10 +814,6 @@ class Sum(Expr):
         return f"sum({self.expr.input_form()})"
 
 class AssignExpr:
-    lhs: Expr
-    rhs: Expr
-    op: str
-
     def __init__(self, lhs: Expr, rhs: Expr, op: str = '') -> None:
         self.lhs = lhs
         self.rhs = rhs
@@ -825,6 +821,9 @@ class AssignExpr:
 
     def __str__(self) -> str:
         return f"{self.lhs} {self.op}= {self.rhs}"
+
+    def normalize(self) -> 'AssignExpr':
+        return AssignExpr(self.lhs.normalize(), self.rhs.normalize(), self.op)
 
 def derivative(expr: Expr, var: Expr, default_case_handler: Callable[[Expr, Expr], Expr] | None = None) -> Expr:
     match expr:

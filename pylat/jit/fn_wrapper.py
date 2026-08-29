@@ -100,6 +100,7 @@ class _Trace:
     def sum_placeholder(self, sum_node: Sum) -> Symbol:
         """Return the placeholder symbol assigned to a ``Sum`` node, creating
         one (and registering the node) on first use."""
+        sum_node = Sum(sum_node.expr.normalize())
         if sum_node not in self.sums:
             self.sums[sum_node] = Symbol(_SUM_PREFIX + (str(len(self.sums)),))
         return self.sums[sum_node]
@@ -841,6 +842,7 @@ class _JittedFunction:
             index_type=self._wrapper._index_type,
         )
         assigns, sums = self._trace(key)
+        assigns = [a.normalize() for a in assigns]
         if len(sums) == 0:
             main = compiler.compile_assignments(args, assigns, standard_layout=key.layout)
             return main, ()
