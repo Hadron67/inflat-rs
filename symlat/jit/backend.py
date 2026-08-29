@@ -3,10 +3,9 @@
 import ctypes
 from abc import abstractmethod
 
-from pylat.jit.helper import MaybeComplexValue
-from pylat.jit.type import LowerType
-
+from .helper import MaybeComplexValue
 from .llvm import BasicBlock, IntType, Ordering, Value
+from .type import LowerType
 
 
 class CompiledBackendFunction:
