@@ -1,6 +1,6 @@
 import ctypes
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, override
 
@@ -65,9 +65,12 @@ class SymbolArgInfo:
 @dataclass
 class ScalarArgInfo(SymbolArgInfo):
     value: int
+    is_ref: bool = False
 
     @override
     def __str__(self) -> str:
+        if self.is_ref:
+            return f"%{self.value}: ScalarRef"
         return f"%{self.value}: Scalar"
 
 @dataclass
@@ -116,6 +119,21 @@ def _check_and_get_total_size(exprs: list[TypedAssignExpr], reduction: 'TypedRed
 
     return first_size
 
+def _collect_lvalue_symbols(exprs: list[AssignExpr]) -> set[Symbol]:
+    """The symbols written to by the assignments, i.e. the base symbols of their
+    left-hand sides.
+
+    A scalar reference argument that is never written to does not need a pointer:
+    it can be passed by value, which avoids a pointer load on every read."""
+    ret: set[Symbol] = set()
+    for e in exprs:
+        lhs = e.lhs
+        while isinstance(lhs, Slice):
+            lhs = lhs.expr
+        if isinstance(lhs, Symbol):
+            ret.add(lhs)
+    return ret
+
 class StandardLayoutMode(Enum):
     NONE = "none"
     COLUMN_MAJOR = "column"
@@ -153,9 +171,15 @@ class _SymbolScope:
             raise ValueError(f"duplicate symbol {symbol} in function arguments")
         lower_type = self.type_cache.get_symbol_type(symbol)
         dim = self.type_cache.get_symbol_dimension(symbol)
+        is_ref = self.type_cache.symbol_types[symbol].is_ref
         if dim == 0:
-            # scalar arguments are passed by value
-            ret = ScalarArgInfo(self._add_arg(lower_type))
+            if is_ref:
+                # scalar references are passed as pointers so that writes
+                # propagate back to the caller
+                ret = ScalarArgInfo(self._add_arg(ap.PointerType(lower_type)), is_ref=True)
+            else:
+                # scalar arguments are passed by value
+                ret = ScalarArgInfo(self._add_arg(lower_type))
         else:
             # TODO: check indices types
             ret = ArrayArgInfo(
@@ -171,6 +195,8 @@ class _SymbolScope:
         elems: list[str] = []
         for sym, info in self._symbol_values.items():
             match info:
+                case ScalarArgInfo(is_ref=True):
+                    elems.append(f"%{info.value}: ScalarRef = {sym}")
                 case ScalarArgInfo():
                     elems.append(f"%{info.value}: Scalar = {sym}")
                 case ArrayArgInfo():
@@ -439,6 +465,9 @@ class _FunctionCompiler:
                 lower_type = self._type_cache.get_symbol_type(expr)
                 ret = None
                 match sym:
+                    case ScalarArgInfo(is_ref=True):
+                        # scalar references are passed as pointers; dereference on read
+                        ret = self._block.load(self._args[sym.value])
                     case ScalarArgInfo():
                         ret = self._args[sym.value]
                     case ArrayArgInfo():
@@ -561,6 +590,10 @@ class _FunctionCompiler:
                 lower_type = self._type_cache.get_symbol_type(expr)
                 assert sym is not None
                 match sym:
+                    case ScalarArgInfo(is_ref=True):
+                        # a scalar reference can be assigned to: the pointer is the
+                        # lvalue itself
+                        return self._args[sym.value], lower_type
                     case ScalarArgInfo():
                         raise TypeError(f"cannot use {expr} as left-value")
                     case ArrayArgInfo():
@@ -597,13 +630,17 @@ class _FunctionCompiler:
         expr = typed_expr.expr
 
         if self._standard_layout is StandardLayoutMode.NONE:
-            shape: list[Value] = []
-            for i in typed_expr.shape:
-                type = self._type_cache.get_type(i)
-                assert isinstance(type, ap.IntType), f"integer type expected for shape, got {type}"
-                value = self.compile_non_complex_expr(i, _RealSubscriptsInfo(()))
-                shape.append(value)
-            subscripts: _SubscriptsInfo = _RealSubscriptsInfo(self._compile_unpack_subscripts(tuple(shape), tid))
+            if len(typed_expr.shape) == 0:
+                # scalar assignment: no array subscripts to unpack
+                subscripts: _SubscriptsInfo = _RealSubscriptsInfo(())
+            else:
+                shape: list[Value] = []
+                for i in typed_expr.shape:
+                    type = self._type_cache.get_type(i)
+                    assert isinstance(type, ap.IntType), f"integer type expected for shape, got {type}"
+                    value = self.compile_non_complex_expr(i, _RealSubscriptsInfo(()))
+                    shape.append(value)
+                subscripts = _RealSubscriptsInfo(self._compile_unpack_subscripts(tuple(shape), tid))
         else:
             # standard layout: use the flat loop variable directly as the array index
             subscripts = _StandardLayoutSubscriptInfo(self._standard_layout, tid, {})
@@ -637,6 +674,10 @@ class _FunctionCompiler:
                 raise ValueError(f"unknown op {expr.op}")
         result_value = self._helper.coerce(self._block, result_value, final_type, lhs_type)
         self._store(lhs_ptr, result_value)
+        # the store may change the value of an expression read while an earlier
+        # assignment was compiled (e.g. a scalar reference that is written and
+        # then read by a later assignment), so drop the cached expression values
+        self._expr_cache.clear()
 
     def compile_assignments(self, exprs: list[TypedAssignExpr], tid: Value):
         assert not self._finished
@@ -685,7 +726,19 @@ class CompiledWrapper:
             lower_type_ctype = lower_type.to_ctype()
             lower_type_size = ctypes.sizeof(lower_type_ctype)
             match info:
+                case ScalarArgInfo(is_ref=True):
+                    # pass the address of the scalar: 0-d numpy arrays and ctypes
+                    # scalars expose a stable, writable memory location
+                    ptr_type = ctypes.POINTER(lower_type_ctype)
+                    if isinstance(value, np.ndarray):
+                        converted_args[info.value] = ctypes.cast(value.ctypes.data, ptr_type)
+                    else:
+                        converted_args[info.value] = ctypes.pointer(value)
                 case ScalarArgInfo():
+                    if isinstance(value, ctypes._SimpleCData):
+                        # a demoted reference scalar arrives as a ctypes instance;
+                        # unwrap it to its Python value before converting
+                        value = value.value
                     converted_args[info.value] = lower_type_ctype(value)
                 case ArrayArgInfo():
                     value_shape = value.shape
@@ -927,8 +980,16 @@ class JitCompiler(TypesConfig):
         self.index_type = index_type
 
     def compile_assignments(self, args: list[tuple[Symbol, SymbolTypeDesc]], exprs: list[AssignExpr], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
-        type_context = {a: b for a, b in args}
-        kernel = _AssignmentsKernel(self, [a[0] for a in args], exprs, type_context, reduction, standard_layout)
+        # scalar references that are never written to do not need a pointer: pass
+        # them by value so reads do not pay a pointer indirection
+        written = _collect_lvalue_symbols(exprs)
+        effective_args = []
+        for sym, desc in args:
+            if desc.dimension == 0 and desc.is_ref and sym not in written:
+                desc = replace(desc, is_ref=False)
+            effective_args.append((sym, desc))
+        type_context = {a: b for a, b in effective_args}
+        kernel = _AssignmentsKernel(self, [a[0] for a in effective_args], exprs, type_context, reduction, standard_layout)
         reduction_kernel: ReductionKernel | None = None
         if reduction is not None:
             assert kernel.reduction_type is not None

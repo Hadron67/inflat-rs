@@ -1,7 +1,7 @@
 import ctypes
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Any, override
+from typing import override
 
 from ..expr import (
     AssignExpr,

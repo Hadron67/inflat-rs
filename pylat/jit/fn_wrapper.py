@@ -12,6 +12,7 @@ calling it, it never needs to be source-inspectable: closures, lambdas and
 functions defined in interactive sessions all work.
 """
 
+import ctypes
 import functools
 import inspect
 from collections.abc import Callable
@@ -400,9 +401,12 @@ class DictArgNode(SignatureNode):
 class ScalarArgNode(SignatureNode):
     dtype: LowerType
     runtime_arg_pos: int
+    is_ref: bool = False
 
     @override
     def __str__(self) -> str:
+        if self.is_ref:
+            return f"ScalarRef[{self.dtype}]"
         return f"Scalar[{self.dtype}]"
 
 @dataclass(frozen=True)
@@ -650,20 +654,28 @@ class _JittedFunction:
             raise TypeError(f"{self.__name__}() must contain at least one in-place assignment")
         return trace.assigns, trace.sums
 
-    def _infer_arg_type(self, value) -> tuple[LowerType, int]:
+    def _infer_arg_type(self, value) -> tuple[LowerType, int, bool]:
+        """Infer ``(lower_type, dimension, is_ref)`` for a runtime argument.
+
+        ``is_ref`` marks address-takable scalars (0-d arrays and ctypes scalars
+        like ``c_double``/``c_int``): they can be passed by reference so that
+        the kernel can write back to them.  numpy scalars (``np.float64`` etc.)
+        and Python scalars have no writable address and are always by value."""
         if isinstance(value, _Probe):
             raise TypeError(
                 f"{self.__name__}() cannot be called from within another jitted function; "
                 "use a plain helper function instead"
             )
         if isinstance(value, np.ndarray):
-            return LowerType.from_numpy_dtype(str(value.dtype)), value.ndim
+            return LowerType.from_numpy_dtype(str(value.dtype)), value.ndim, value.ndim == 0
         if isinstance(value, (np.floating, float)):
-            return self._wrapper._real_type, 0
+            return self._wrapper._real_type, 0, False
         if isinstance(value, (np.complexfloating, complex)):
-            return ComplexFloatType(self._wrapper._real_type), 0
+            return ComplexFloatType(self._wrapper._real_type), 0, False
         if isinstance(value, (np.integer, int)):
-            return self._wrapper._index_type, 0
+            return self._wrapper._index_type, 0, False
+        if isinstance(value, ctypes._SimpleCData):
+            return LowerType.from_numpy_dtype(str(np.dtype(type(value)))), 0, True
         raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
     def _is_comptime_arg(self, pos: int, value) -> bool:
@@ -711,12 +723,12 @@ class _JittedFunction:
         number of runtime positions it consumes."""
         if self._is_comptime_arg(pos, value):
             return ComptimeValueArgNode(value), 0
-        if isinstance(value, (np.ndarray, np.floating, np.complexfloating, np.integer, float, complex, int, _Probe)):
+        if isinstance(value, (np.ndarray, np.floating, np.complexfloating, np.integer, float, complex, int, ctypes._SimpleCData, _Probe)):
             # probes reach _infer_arg_type here and are rejected with a clear
             # "nested jitted call" error
-            lower_type, dim = self._infer_arg_type(value)
+            lower_type, dim, is_ref = self._infer_arg_type(value)
             if dim == 0:
-                return ScalarArgNode(lower_type, runtime_arg_pos), 1
+                return ScalarArgNode(lower_type, runtime_arg_pos, is_ref), 1
             return ArrayArgNode(lower_type, dim, runtime_arg_pos), 1
         # general object: inline it by classifying each attribute recursively
         fields = getattr(value, '__dict__', None)
@@ -758,9 +770,10 @@ class _JittedFunction:
             kwargs_node = DictArgNode(frozenset((n, add(-1, v)) for n, v in sorted(keyword.items())))
         return Signature(fixed_args=fixed_nodes, varargs=varargs_node, kwargs=kwargs_node)
 
-    def _runtime_args(self, key: _JitCacheKey) -> list[tuple[int, Symbol, LowerType, int]]:
-        """Return ``(runtime_arg_pos, symbol, lower_type, dim)`` for every runtime
-        argument in the key, using the positions recorded in the signature nodes.
+    def _runtime_args(self, key: _JitCacheKey) -> list[tuple[int, Symbol, LowerType, int, bool]]:
+        """Return ``(runtime_arg_pos, symbol, lower_type, dim, is_ref)`` for every
+        runtime argument in the key, using the positions recorded in the signature
+        nodes.
         The traversal mirrors ``_create_one_probe_arg``: it descends into
         ``TupleArgNode``/``DictArgNode`` wherever they appear and builds symbols
         from the same probe paths used while tracing (the ``__trace`` namespace
@@ -772,7 +785,7 @@ class _JittedFunction:
         def probe_symbol(path: tuple[str, ...]) -> Symbol:
             return Symbol(('__trace',) + path)
 
-        result: list[tuple[int, Symbol, LowerType, int]] = []
+        result: list[tuple[int, Symbol, LowerType, int, bool]] = []
         todo: list[tuple[SignatureNode, tuple[str, ...]]] = []
 
         def walk(node: SignatureNode, path: tuple[str, ...]) -> None:
@@ -781,7 +794,7 @@ class _JittedFunction:
                 snode, spath = todo.pop()
                 match snode:
                     case ArrayArgNode() | ScalarArgNode():
-                        result.append((snode.runtime_arg_pos, probe_symbol(spath), snode.dtype, dim_of(snode)))
+                        result.append((snode.runtime_arg_pos, probe_symbol(spath), snode.dtype, dim_of(snode), getattr(snode, 'is_ref', False)))
                     case ComptimeValueArgNode():
                         pass  # baked into the expression trees, not passed at runtime
                     case TupleArgNode():
@@ -819,7 +832,7 @@ class _JittedFunction:
         # order (the traversal uses a stack), and the converter passes values in
         # position order
         args_by_pos: dict[int, tuple[Symbol, SymbolTypeDesc]] = {
-            pos: (sym, SymbolTypeDesc(lower_type, dim)) for pos, sym, lower_type, dim in runtime
+            pos: (sym, SymbolTypeDesc(lower_type, dim, is_ref)) for pos, sym, lower_type, dim, is_ref in runtime
         }
         args = [args_by_pos[i] for i in range(len(args_by_pos))]
         compiler = JitCompiler(
@@ -831,7 +844,7 @@ class _JittedFunction:
         if len(sums) == 0:
             main = compiler.compile_assignments(args, assigns, standard_layout=key.layout)
             return main, ()
-        context = {sym: SymbolTypeDesc(lower_type, dim) for _, sym, lower_type, dim in runtime}
+        context = {sym: SymbolTypeDesc(lower_type, dim, is_ref) for _, sym, lower_type, dim, is_ref in runtime}
         resolver = TypeResolver(context, compiler)
         placeholder_symbols = list(sums.values())
         sum_types: dict[Sum, LowerType] = {}

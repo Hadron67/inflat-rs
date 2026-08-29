@@ -1,3 +1,4 @@
+import ctypes
 from typing import Any
 from unittest import TestCase
 
@@ -155,6 +156,46 @@ class JitTest(TestCase):
         fn.call(a0, b0, c0, d0)
         assert_almost_equal(a0, b0 + c0 + d0)
 
+    def test_scalar_ref(self):
+        x, y = symbols('x', 'y')
+
+        compiler = JitCompiler(OpenMPBackend())
+        # written references are compiled as pointers and writes propagate back
+        fn = compiler.compile_assignments([
+            (x, SymbolTypeDesc(FloatType(64), 0, is_ref=True)),
+            (y, SymbolTypeDesc(FloatType(64), 0, is_ref=True)),
+        ], [
+            AssignExpr(x, x, '+'),
+            AssignExpr(y, x, '+'),
+        ])
+
+        x0 = ctypes.c_double(2.0)
+        y0 = ctypes.c_double(3.0)
+        fn.call(x0, y0)
+        self.assertEqual(x0.value, 4.0)
+        self.assertEqual(y0.value, 7.0)
+
+        # 0-d numpy arrays are addressable too
+        x2 = np.array(2.0)
+        y2 = ctypes.c_double(3.0)
+        fn.call(x2, y2)
+        self.assertEqual(x2[()], 4.0)
+        self.assertEqual(y2.value, 7.0)
+
+        # references that are only read are demoted to by-value scalars
+        a, = symbols('a')
+        fn2 = compiler.compile_assignments([
+            (a, SymbolTypeDesc(FloatType(64), 1)),
+            (x, SymbolTypeDesc(FloatType(64), 0, is_ref=True)),
+        ], [
+            AssignExpr(a, x, '+'),
+        ])
+        a1 = np.zeros(5)
+        x1 = ctypes.c_double(3.0)
+        fn2.call(a1, x1)
+        assert_almost_equal(a1, np.full(5, 3.0))
+        self.assertEqual(x1.value, 3.0)
+
 class JitWrapperTest(TestCase):
     def test_usage_example(self):
         wrapper = Wrapper()
@@ -174,6 +215,56 @@ class JitWrapperTest(TestCase):
         my_func(a, b, c, dt)
         assert_almost_equal(a, a0 + c * dt)
         assert_almost_equal(b, b0 + c * dt + c * 2)
+
+    def test_scalar_ref_argument(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(dt, scale):
+            dt *= scale
+
+        dt = ctypes.c_double(3.0)
+        scale = ctypes.c_double(2.0)
+        f(dt, scale)
+        self.assertEqual(dt.value, 6.0)
+        self.assertEqual(scale.value, 2.0)
+
+    def test_scalar_ref_read_only(self):
+        # a reference scalar that is never written to is compiled by value
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, dt):
+            a += dt
+
+        a = np.zeros(5)
+        dt = ctypes.c_double(3.0)
+        f(a, dt)
+        assert_almost_equal(a, np.full(5, 3.0))
+        self.assertEqual(dt.value, 3.0)
+
+    def test_zero_d_array_argument(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, dt):
+            a += dt
+
+        a = np.zeros(5)
+        dt = np.array(3.0)
+        f(a, dt)
+        assert_almost_equal(a, np.full(5, 3.0))
+
+    def test_write_to_numpy_scalar_raises(self):
+        # numpy scalars have no writable address: writing to one is a compile error
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(dt):
+            dt += 1.0
+
+        with self.assertRaises(TypeError):
+            f(np.float64(2.0))
 
     def test_shape_and_dtype_variants(self):
         wrapper = Wrapper()
