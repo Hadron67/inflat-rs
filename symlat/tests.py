@@ -439,6 +439,122 @@ class JitWrapperTest(TestCase):
         with self.assertRaises(TypeError):
             f2(np.zeros((3, 3)), np.zeros((3, 3)))
 
+    def test_flip(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.flip(b, axis=0)
+            a += np.flip(b, axis=1)
+            a += np.flip(b, axis=-1)  # negative axis
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        assert_almost_equal(a, np.flip(b, axis=0) + np.flip(b, axis=1) + np.flip(b, axis=-1))
+
+    def test_flip_multiple_axes(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.flip(b, axis=(0, 1))
+            a += np.flip(b)  # axis=None flips every axis
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        assert_almost_equal(a, np.flip(b, axis=(0, 1)) + np.flip(b))
+
+    def test_flip_rank_one(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.flip(b, axis=0)
+
+        a = np.zeros(6)
+        b = np.arange(6).astype(float)
+        f(a, b)
+        assert_almost_equal(a, np.flip(b))
+
+    def test_flip_nested(self):
+        # nested flips merge during normalization: flipping the same axis twice
+        # cancels out
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.flip(np.flip(b, axis=0), axis=0)  # cancels to b
+            a += np.flip(np.flip(b, axis=0), axis=1)  # merges to (0, 1)
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        assert_almost_equal(a, b + np.flip(b, axis=(0, 1)))
+
+    def test_flip_broadcast(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.flip(b, axis=0)
+
+        a = np.zeros((4, 5))
+        b = np.arange(5).astype(float)  # rank-1 argument broadcast along axis 0
+        f(a, b)
+        assert_almost_equal(a, np.broadcast_to(np.flip(b), a.shape))
+
+    def test_flip_derived_array(self):
+        # axis=None (flip every axis) also works on intermediate expressions,
+        # whose rank is not known while tracing
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.flip(b[0])
+            a += np.flip(b, axis=0)[0]
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        b0 = b.copy()
+        f(a, b)
+        expected = (
+            np.broadcast_to(np.flip(b0[0]), a.shape)
+            + np.broadcast_to(np.flip(b0, axis=0)[0], a.shape)
+        )
+        assert_almost_equal(a, expected)
+
+    def test_flip_in_sum(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sum(b * np.flip(b, axis=1))
+
+        a = np.zeros((3, 4))
+        b = np.random.rand(3, 4)
+        b0 = b.copy()
+        f(a, b)
+        assert_almost_equal(a, np.full(a.shape, np.sum(b0 * np.flip(b0, axis=1))))
+
+    def test_flip_errors(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f1(a, b):
+            a += np.flip(b, axis=2)  # axis out of bounds
+
+        with self.assertRaises(TypeError):
+            f1(np.zeros((3, 3)), np.zeros((3, 3)))
+
+        @wrapper.jit()
+        def f2(a, b, c):
+            a += np.flip(b, axis=c)  # traced axis is not a compile-time constant
+
+        with self.assertRaises(TypeError):
+            f2(np.zeros((3, 3)), np.zeros((3, 3)), 0)
+
     def test_coord(self):
         wrapper = Wrapper()
 

@@ -843,6 +843,32 @@ class Slice(Expr):
         return f"({self.expr.input_form()} [{self.axis}, {self.index}])"
 
 @exprclass
+class Flip(Expr):
+    expr: Expr
+    axes: tuple[int, ...] | None  # `None` means flip all axes
+
+    @override
+    def input_form(self) -> str:
+        return f"flip({self.expr.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        expr = self.expr.normalize()
+        if self.axes is None:
+            # flipping every axis cannot be expanded here: the rank is only
+            # known during compilation
+            return Flip(expr, None)
+        axes = set(self.axes)
+        if isinstance(expr, Flip) and expr.axes is not None:
+            # flipping along the same axis twice cancels out, so the two flips
+            # merge into one over the symmetric difference of their axes
+            axes ^= set(expr.axes)
+            expr = expr.expr
+        if len(axes) == 0:
+            return expr
+        return Flip(expr, tuple(sorted(axes)))
+
+@exprclass
 class Sum(Expr):
     expr: Expr
 
@@ -917,7 +943,7 @@ def derivative(expr: Expr, var: Expr, default_case_handler: Callable[[Expr, Expr
             return derivative(expr, var, default_case_handler) / expr
         case Exp(expr):
             return Exp(expr) * derivative(expr, var, default_case_handler)
-        case Roll() | Slice():
+        case Roll() | Slice() | Flip():
             raise ValueError(f"Cannot take derivative of {expr}")
         case _:
             if default_case_handler is not None:

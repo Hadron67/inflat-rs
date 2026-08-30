@@ -15,6 +15,7 @@ functions defined in interactive sessions all work.
 import ctypes
 import functools
 import inspect
+import operator
 from collections.abc import Callable
 from dataclasses import dataclass
 from inspect import Parameter
@@ -29,6 +30,7 @@ from ..expr import (
     Cos,
     Exp,
     Expr,
+    Flip,
     Int,
     Ln,
     Power,
@@ -230,6 +232,8 @@ class _Probe:
             return self._np_roll(*args, **kwargs)
         if func is np.sum:
             return self._np_sum(*args, **kwargs)
+        if func is np.flip:
+            return self._np_flip(*args, **kwargs)
         return NotImplemented
 
     def _np_sum(self, array, **kwargs):
@@ -262,6 +266,36 @@ class _Probe:
         for ax, sh in zip(axes, shifts):
             expr = Roll(expr, int(ax), int(sh))
         return self._new(expr)
+
+    def _np_flip(self, array, axis=None):
+        if not isinstance(array, _Probe):
+            raise TypeError("np.flip requires a traced array in jitted functions")
+        if isinstance(axis, _Probe):
+            raise TypeError("np.flip axis must be constant in jitted functions")
+        if axis is None:
+            # flipping every axis stays symbolic in the Flip node and is
+            # expanded when the rank is known during compilation
+            axes: tuple[int, ...] | None = None
+        elif isinstance(axis, (tuple, list)):
+            axes = tuple(operator.index(ax) for ax in axis)
+        else:
+            axes = (operator.index(axis),)
+        # negative axes are normalized and out-of-range axes are rejected when
+        # the rank is known, so they fail while tracing instead of during
+        # kernel generation
+        ndim = array._ndim
+        if axes is not None and ndim is not None:
+            normalized: list[int] = []
+            for ax in axes:
+                if ax < 0:
+                    ax += ndim
+                if not 0 <= ax < ndim:
+                    raise TypeError(
+                        f"np.flip axis {ax} is out of bounds for a {ndim}-dimensional array"
+                    )
+                normalized.append(ax)
+            axes = tuple(normalized)
+        return self._new(Flip(array._expr, axes))
 
     # --- numpy ufuncs (np.sin, np.cos, np.exp, np.log, np.sqrt, ...) -----
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):

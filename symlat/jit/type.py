@@ -10,6 +10,7 @@ from ..expr import (
     Cos,
     Exp,
     Expr,
+    Flip,
     Float,
     Int,
     Ln,
@@ -342,7 +343,7 @@ class TypeResolver:
                 return self.merge_shapes(self.get_shape(base), self.get_shape(exp))
             case UnaryNumericFunction():
                 return self.get_shape(expr.expr)
-            case Roll():
+            case Roll() | Flip():
                 return self.get_shape(expr.expr)
             case Slice():
                 shape = self.get_shape(expr.expr)
@@ -400,7 +401,7 @@ class TypeResolver:
                     return self.get_type(base)
                 else:
                     return self._int_to_float_type(self.get_type(base))
-            case Roll() | Slice():
+            case Roll() | Slice() | Flip():
                 return self.get_type(expr.expr)
             case Sin() | Cos() | Ln() | Exp():
                 return self._int_to_float_type(self.get_type(expr.expr))

@@ -13,6 +13,7 @@ from ..expr import (
     Cos,
     Exp,
     Expr,
+    Flip,
     Float,
     Int,
     Ln,
@@ -526,6 +527,34 @@ class _FunctionCompiler:
                     subscripts.subscripts[:expr.axis] + (new_index,) + subscripts.subscripts[expr.axis + 1:]
                 )
                 return self.compile_expr(expr.expr, new_subscripts)
+            case Flip():
+                assert isinstance(subscripts, _RealSubscriptsInfo), "cannot compile Flip in standard layout mode"
+                expr_shape = self._type_cache.get_shape(expr.expr)
+                assert expr_shape is not None, "cannot compile unspecified shape"
+                axes = expr.axes
+                if axes is None:
+                    # flipping every axis: the rank is only known here
+                    axes = tuple(range(len(expr_shape)))
+                # the flipped expression may have a lower rank than the loop
+                # (broadcasting); its axes are trailing-aligned with the loop
+                # subscripts, like array access
+                sub = subscripts.subscripts
+                for axis in axes:
+                    if axis < 0:
+                        axis += len(expr_shape)
+                    length = self.compile_non_complex_expr(expr_shape[axis], _RealSubscriptsInfo(()))
+                    subscript_index = len(sub) - len(expr_shape) + axis
+                    if subscript_index < 0 or subscript_index >= len(sub):
+                        raise IndexError(
+                            f"np.flip axis {axis} is out of bounds for the loop"
+                        )
+                    # new index = length - 1 - subscript
+                    new_index = self._block.sub(
+                        self._block.sub(length, IntValue(1, h.llvm_index_type)),
+                        sub[subscript_index],
+                    )
+                    sub = sub[:subscript_index] + (new_index,) + sub[subscript_index + 1:]
+                return self.compile_expr(expr.expr, _RealSubscriptsInfo(tuple(sub)))
             case Slice():
                 match subscripts:
                     case _StandardLayoutSubscriptInfo(mode, subscript, shifts):
@@ -820,13 +849,13 @@ class _AssignmentsKernel(LoopKernel):
 
     @staticmethod
     def _contains_indexing(expr: Expr) -> bool:
-        """Whether an expression contains a roll or a nested slice.  Sliced views are
-        not standard layout, so they cannot appear below a slice in a standard
-        layout kernel."""
+        """Whether an expression contains a roll, flip or a nested slice.  Sliced
+        views are not standard layout, so they cannot appear below a slice in a
+        standard layout kernel."""
         todo = [expr]
         while todo:
             elem = todo.pop()
-            if isinstance(elem, (Roll, Slice)):
+            if isinstance(elem, (Roll, Slice, Flip)):
                 return True
             todo.extend(elem.subexpressions())
         return False
@@ -877,6 +906,8 @@ class _AssignmentsKernel(LoopKernel):
         def walk(expr: Expr) -> None:
             if isinstance(expr, Roll):
                 failures.append("np.roll is not supported in standard layout kernels")
+            elif isinstance(expr, Flip):
+                failures.append("np.flip is not supported in standard layout kernels")
             elif isinstance(expr, Coord):
                 failures.append("coord is not supported in standard layout kernels")
             elif isinstance(expr, Slice):
