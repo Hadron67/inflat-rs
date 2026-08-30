@@ -6,7 +6,18 @@ import numpy as np
 from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
-from .expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, coord, symbols
+from .expr import (
+    AssignExpr,
+    Int,
+    Plus,
+    Rational,
+    S,
+    Slice,
+    Times,
+    coord,
+    coords,
+    symbols,
+)
 from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .jit.fn_wrapper import Wrapper
 from .jit.openmp import OpenMPBackend
@@ -433,8 +444,9 @@ class JitWrapperTest(TestCase):
 
         @wrapper.jit()
         def f(a, b):
-            a += b * coord(0) + coord(1)
-            b += coord(0) * coord(1)
+            x = coords(a.shape)
+            a += b * x[0] + x[1]
+            b += x[0] * x[1]
 
         a = np.zeros((4, 5))
         b = np.ones((4, 5))
@@ -450,7 +462,7 @@ class JitWrapperTest(TestCase):
 
         @wrapper.jit()
         def f(a):
-            a += coord(0)
+            a += coord(0, a.shape)
 
         a = np.zeros(6)
         f(a)
@@ -461,8 +473,9 @@ class JitWrapperTest(TestCase):
 
         @wrapper.jit()
         def f(a, b):
-            a += b * coord(0) + np.roll(b, 1, axis=0) * 0.5
-            a += b[0] * coord(1)
+            x = coords(a.shape)
+            a += b * x[0] + np.roll(b, 1, axis=0) * 0.5
+            a += b[0] * x[1]
 
         a = np.zeros((4, 5))
         b = np.random.rand(4, 5)
@@ -478,7 +491,8 @@ class JitWrapperTest(TestCase):
 
         @wrapper.jit()
         def f(a, b):
-            a += coord(0) * b + 2 * coord(1)
+            x = coords(a.shape)
+            a += x[0] * b + 2 * x[1]
 
         a = np.zeros((4, 5))
         b = np.ones((4, 5))
@@ -493,7 +507,7 @@ class JitWrapperTest(TestCase):
 
         @wrapper.jit()
         def f(a, b):
-            a += np.sum(b * coord(0))
+            a += np.sum(b * coord(0, b.shape))
 
         a = np.zeros((3, 4))
         b = np.random.rand(3, 4)
@@ -507,7 +521,7 @@ class JitWrapperTest(TestCase):
 
         @wrapper.jit()
         def f(a):
-            a += coord(2)
+            a += coord(2, a.shape)
 
         with self.assertRaises(TypeError):
             f(np.zeros((4, 5)))

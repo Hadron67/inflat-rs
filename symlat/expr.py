@@ -853,20 +853,30 @@ class Sum(Expr):
 @exprclass
 class Coord(Expr):
     axis: int
-    shape: tuple[int, ...] | None
+    shape: tuple[Expr, ...]
 
     @override
     def input_form(self) -> str:
         return f"coord({self.axis})"
 
-def coord(axis: int) -> Coord:
+def coords(shape: tuple[Expr, ...]) -> tuple[Coord, ...]:
+    return tuple(coord(i, shape) for i in range(len(shape)))
+
+
+def coord(axis: int, shape: tuple[Expr, ...]) -> Coord:
     """Create a lattice-coordinate expression.
 
-    ``coord(axis)`` evaluates to the index along ``axis`` at each lattice point
-    of the enclosing loop, e.g. ``a += coord(0)`` adds the first coordinate to
-    every element of ``a``.  The shape is filled in from the context during JIT
-    compilation."""
-    return Coord(axis, None)
+    ``coord(axis, shape)`` evaluates to the index along ``axis`` at each lattice
+    point of the enclosing loop, e.g. ``a += coord(0, a.shape)`` adds the first
+    coordinate to every element of ``a``.  ``shape`` is the shape of the
+    enclosing loop; inside a jitted function it is typically taken from the
+    ``.shape`` of an array argument (a tuple of ``SymbolShape`` expressions)."""
+    shape = tuple(s for s in shape)
+    if not 0 <= axis < len(shape):
+        raise TypeError(
+            f"coord axis {axis} is out of bounds for a {len(shape)}-dimensional lattice"
+        )
+    return Coord(axis, shape)
 
 class AssignExpr:
     def __init__(self, lhs: Expr, rhs: Expr, op: str = '') -> None:

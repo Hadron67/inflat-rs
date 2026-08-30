@@ -281,9 +281,28 @@ class TypeResolver:
 
         raise ValueError(f"cannot resolve equal constrain {expr1} === {expr2}")
 
+    @staticmethod
+    def _in_natural_order(shape: tuple[Expr, ...]) -> bool:
+        """Whether ``shape`` is in natural axis order (outermost first).
+
+        Leaf shapes (``Symbol``, ``Coord``) are in natural order, while
+        ``get_shape`` of composite expressions (``Plus``/``Times``) returns
+        merge outputs in innermost-first order; the two are told apart by the
+        ``SymbolShape`` indices, which follow the same heuristic as
+        :class:`TypedReductionExpr`."""
+        indices = [e.index for e in shape if isinstance(e, SymbolShape)]
+        return len(indices) == 0 or indices == sorted(indices)
+
     def merge_shape(self, lhs: tuple[Expr, ...], rhs: tuple[Expr, ...], is_assign: bool = False):
         if is_assign and len(rhs) > len(lhs):
             raise TypeError(f"cannot assign shape {rhs} to shape {lhs}")
+        # merge_shape pairs its inputs trailing-aligned, which is only correct
+        # when both inputs are in the same convention; bring innermost-first
+        # inputs (composite-expression shapes) back to natural order first
+        if not self._in_natural_order(lhs):
+            lhs = tuple(reversed(lhs))
+        if not self._in_natural_order(rhs):
+            rhs = tuple(reversed(rhs))
         ret: list[Expr] = []
         for i in range(max(len(lhs), len(rhs))):
             lhs_s = lhs[len(lhs) - 1 - i] if i < len(lhs) else None
@@ -313,8 +332,10 @@ class TypeResolver:
         match expr:
             case Symbol():
                 return tuple(SymbolShape(expr, i) for i in range(self.symbol_types[expr].dimension))
-            case Int() | Float() | Rational() | Complex() | SymbolShape() | Coord():
+            case Int() | Float() | Rational() | Complex() | SymbolShape():
                 return ()
+            case Coord():
+                return expr.shape
             case Plus(children) | Times(children):
                 return self.merge_shapes(*tuple(self.get_shape(a) for a in children))
             case Power(base, exp):

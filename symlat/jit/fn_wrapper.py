@@ -26,7 +26,6 @@ from typing_extensions import override
 
 from ..expr import (
     AssignExpr,
-    Coord,
     Cos,
     Exp,
     Expr,
@@ -49,6 +48,7 @@ from .type import (
     FloatType,
     IntType,
     LowerType,
+    SymbolShape,
     SymbolTypeDesc,
     TypeResolver,
 )
@@ -88,44 +88,6 @@ def _as_expr(value) -> Expr:
         raise TypeError(f"unsupported operand of type {type(value).__name__} in jitted function") from e
 
 
-def _contains_coord(expr: Expr) -> bool:
-    """Whether an expression contains a ``Coord`` node."""
-    todo = [expr]
-    while todo:
-        e = todo.pop()
-        if isinstance(e, Coord):
-            return True
-        todo.extend(e.subexpressions())
-    return False
-
-
-def _fill_coord_shape(expr: Expr, rank: int) -> Expr:
-    """Fill in the shape of every shape-less ``Coord`` node in ``expr``.
-
-    ``Coord`` nodes are created without a shape (the actual sizes are runtime
-    arguments, so they are not known before compilation); the rank of the
-    surrounding loop is the only shape information available.  The axis is
-    validated against that rank, and the filled shape is a rank-sized
-    placeholder tuple whose entries are unused."""
-    def fill(e: Expr) -> Expr:
-        if not isinstance(e, Coord) or e.shape is not None:
-            return e
-        if not 0 <= e.axis < rank:
-            raise TypeError(
-                f"coord axis {e.axis} is out of bounds for a {rank}-dimensional lattice"
-            )
-        return Coord(e.axis, (0,) * rank)
-    return expr.map(fill)
-
-
-def _fill_coord_shapes(assign: AssignExpr, resolver: TypeResolver) -> AssignExpr:
-    """Fill in the ``Coord`` shapes of one assignment from its loop context."""
-    lhs_shape = resolver.get_shape(assign.lhs)
-    rhs_shape = resolver.get_shape(assign.rhs)
-    rank = len(resolver.merge_shape(lhs_shape, rhs_shape, True))
-    return AssignExpr(assign.lhs, _fill_coord_shape(assign.rhs, rank), assign.op)
-
-
 class _Trace:
     """Records the assignments performed while the function is being traced."""
 
@@ -144,8 +106,8 @@ class _Trace:
             self.sums[sum_node] = Symbol(_SUM_PREFIX + (str(len(self.sums)),))
         return self.sums[sum_node]
 
-    def make_param_probe(self, name: tuple[str, ...]) -> '_Probe':
-        return _Probe(self, Symbol(name))
+    def make_param_probe(self, name: tuple[str, ...], rank: int) -> '_Probe':
+        return _Probe(self, Symbol(name), rank)
 
     def record(self, target: '_Probe', op: str, value) -> None:
         if not isinstance(target._expr, Symbol):
@@ -156,14 +118,27 @@ class _Trace:
 class _Probe:
     """Records an element-wise operation by building an ``Expr`` tree."""
 
-    __slots__ = ('_expr', '_trace')
+    __slots__ = ('_expr', '_ndim', '_trace')
 
-    def __init__(self, trace: _Trace, expr: Expr) -> None:
+    def __init__(self, trace: _Trace, expr: Expr, ndim: int | None = None) -> None:
         self._trace = trace
         self._expr = expr
+        self._ndim = ndim
 
     def _new(self, expr: Expr) -> '_Probe':
         return _Probe(self._trace, expr)
+
+    @property
+    def ndim(self) -> int:
+        if self._ndim is None:
+            raise ValueError("ndim is not set")
+        return self._ndim
+
+    @property
+    def shape(self) -> tuple[Expr, ...]:
+        if self._ndim is not None and isinstance(self._expr, Symbol):
+            return tuple(SymbolShape(self._expr, i) for i in range(self._ndim))
+        raise ValueError("shape is not available for this expression")
 
     # --- binary arithmetic ------------------------------------------------
     def __add__(self, other):
@@ -526,8 +501,10 @@ def _gen_args_converter(signature: Signature) -> Callable:
 
 def _create_one_probe_arg(trace: _Trace, snode: SignatureNode, name: tuple[str, ...]) -> Any:
     match snode:
-        case ArrayArgNode() | ScalarArgNode():
-            return trace.make_param_probe(name)
+        case ArrayArgNode():
+            return trace.make_param_probe(name, snode.rank)
+        case ScalarArgNode():
+            return trace.make_param_probe(name, 0)
         case ComptimeValueArgNode():
             return snode.value
         case TupleArgNode():
@@ -888,12 +865,6 @@ class _JittedFunction:
         for sym in sums.values():
             context[sym] = SymbolTypeDesc(self._wrapper._index_type, 0)
         resolver = TypeResolver(context, compiler)
-        # ``Coord`` nodes are created without a shape (the actual sizes are runtime
-        # arguments); fill in the rank of their loop context before compiling
-        if any(_contains_coord(a.rhs) for a in assigns) or any(_contains_coord(s.expr) for s in sums):
-            assigns = [_fill_coord_shapes(a, resolver) for a in assigns]
-            if len(sums) > 0:
-                sums = {Sum(_fill_coord_shape(s.expr, len(resolver.get_shape(s.expr)))): sym for s, sym in sums.items()}
         if len(sums) == 0:
             main = compiler.compile_assignments(args, assigns, standard_layout=key.layout)
             return main, ()
