@@ -5,7 +5,7 @@ import numpy as np
 from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
-from .numpy import ArrayNode, JitContext
+from .numpy import ArrayNode, ArrayWrapper, JitContext
 from .openmp import OpenMPBackend
 
 llvm.initialize_native_target()
@@ -214,5 +214,79 @@ class NumpyJitTest(TestCase):
 
         with self.assertRaises(TypeError):
             d[...] = self._data(a)  # raw numpy arrays are not operands
+
+    def test_sum(self):
+        np.random.seed(10)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        result = nc.sum(a)
+        assert_almost_equal(result, np.sum(self._data(a)))
+        # sum is eager: it returns a plain numpy scalar, not a wrapper
+        self.assertIsInstance(result, np.generic)
+
+    def test_sum_of_expression(self):
+        np.random.seed(11)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        assert_almost_equal(
+            nc.sum(a * b + a - 2),
+            np.sum(self._data(a) * self._data(b) + self._data(a) - 2),
+        )
+
+    def test_sum_broadcast(self):
+        np.random.seed(12)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(5)
+        assert_almost_equal(nc.sum(a + b), np.sum(self._data(a) + self._data(b)))
+
+    def test_sum_slices(self):
+        np.random.seed(13)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        assert_almost_equal(nc.sum(a[0]), np.sum(self._data(a)[0]))
+        assert_almost_equal(nc.sum(a[:, 2]), np.sum(self._data(a)[:, 2]))
+        assert_almost_equal(nc.sum(a[-1]), np.sum(self._data(a)[-1]))
+
+    def test_sum_complex_and_int(self):
+        nc = JitContext(OpenMPBackend())
+
+        complex_arr = np.random.rand(3, 4) + 1j * np.random.rand(3, 4)
+        assert_almost_equal(
+            nc.sum(ArrayWrapper(nc, ArrayNode(complex_arr))), np.sum(complex_arr)
+        )
+        int_arr = np.arange(12).reshape(3, 4)
+        assert_almost_equal(nc.sum(ArrayWrapper(nc, ArrayNode(int_arr))), np.sum(int_arr))
+
+    def test_sum_cache(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        c = nc.rand(4, 5)
+        nc.sum(a + b)
+        nc.sum(a + b)  # the same expression structure reuses the compiled kernel
+        nc.sum(b + c)
+        self.assertEqual(len(nc._reduction_cache), 1)
+        nc.sum(a * b)  # a different structure compiles separately
+        self.assertEqual(len(nc._reduction_cache), 2)
+
+    def test_sum_errors(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        with self.assertRaises(TypeError):
+            nc.sum(a, axis=0)  # only the sum over all axes is supported
+        with self.assertRaises(TypeError):
+            nc.sum(self._data(a))  # raw numpy arrays are not operands
+        with self.assertRaises(ValueError):
+            nc.sum(a + nc.rand(3, 4))  # incompatible shapes
+        with self.assertRaises(IndexError):
+            nc.sum(a[10])  # index out of bounds
 
 all_tests = [NumpyJitTest]

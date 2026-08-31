@@ -10,6 +10,7 @@ arguments.
 """
 
 import operator
+from typing import Any
 
 import numpy as np
 from typing_extensions import override
@@ -65,6 +66,66 @@ def _substitute_array_nodes(expr: Expr, symbols: dict['ArrayNode', Symbol]) -> E
     return expr.map(subst)
 
 
+def _merged_loop_shape(expr: Expr) -> tuple[int, ...]:
+    """The merged (broadcast) shape of every array leaf of ``expr``, in natural
+    axis order -- the shape a reduction over ``expr`` iterates.
+
+    Slice indices are validated along the way, and the leaves must be mutually
+    broadcastable (numpy-style size-1 broadcasting is not supported);
+    mismatches raise ``ValueError``.  The per-leaf check mirrors the assignment
+    path: a sliced array whose base has the loop's rank keeps its surviving axes
+    at their own positions, otherwise they are trailing-aligned with the loop.
+    """
+    merged: list[int] = []  # trailing-first accumulation
+    leaves: list[tuple[np.ndarray, list[int]]] = []
+    todo = [(expr, [])]
+    while todo:
+        e, chain = todo.pop()
+        if isinstance(e, Slice):
+            todo.append((e.expr, chain + [e]))
+        elif isinstance(e, ArrayNode):
+            arr = e.arr
+            fixed: set[int] = set()
+            for slice_node in reversed(chain):
+                for k, index in slice_node.axes:
+                    axis = _nth_axis(k, fixed)
+                    if axis >= arr.ndim:
+                        raise TypeError(f"slice axis {axis} is out of bounds")
+                    dim = arr.shape[axis]
+                    if index < -dim or index >= dim:
+                        raise IndexError(
+                            f"index {index} is out of bounds for axis {axis} of size {dim}"
+                        )
+                    fixed.add(axis)
+            rem = [i for i in range(arr.ndim) if i not in fixed]
+            for j, d in enumerate(arr.shape[ax] for ax in reversed(rem)):
+                if j < len(merged):
+                    if merged[j] != d:
+                        raise ValueError(
+                            f"cannot broadcast shape {arr.shape} with the other "
+                            "summands of the reduction"
+                        )
+                else:
+                    merged.append(d)
+            leaves.append((arr, rem))
+        else:
+            todo.extend((c, chain) for c in e.subexpressions())
+    loop_shape = tuple(reversed(merged))
+    rank = len(loop_shape)
+    for arr, rem in leaves:
+        if len(rem) > rank:
+            raise ValueError(
+                f"cannot broadcast shape {arr.shape} into a reduction of shape {loop_shape}"
+            )
+        offset = 0 if arr.ndim == rank else rank - len(rem)
+        for j, ax in enumerate(rem):
+            if arr.shape[ax] != loop_shape[offset + j]:
+                raise ValueError(
+                    f"cannot broadcast shape {arr.shape} into a reduction of shape {loop_shape}"
+                )
+    return loop_shape
+
+
 def _determine_layout(values) -> StandardLayoutMode:
     """Pick the kernel layout that matches the actual array arguments.
 
@@ -102,6 +163,8 @@ class JitContext:
         c = a + b # computations are lazy: this only creats a symbolic expression `a + b` and does not compute the result
         d = np.zeros(*a.shape)
         d[...] = c # this triggers the computation of `c` and stores the result in `d` (d[:] = c works too)
+
+        s = np.sum(a) # eager: reduces `a` over all axes to a scalar right away
     """
 
     def __init__(self, backend: Backend) -> None:
@@ -109,6 +172,8 @@ class JitContext:
         self._compiler = JitCompiler(backend)
         # cache: (lhs, rhs, input dtypes, dest dtype, layout) -> compiled kernel
         self._cache: dict[tuple, CompiledWrapper] = {}
+        # reduction cache: (expr, input dtypes/ranks, layout) -> compiled kernel
+        self._reduction_cache: dict[tuple, CompiledWrapper] = {}
 
     def rand(self, *shape) -> 'ArrayWrapper':
         """A random array with entries uniformly distributed in ``[0, 1)``."""
@@ -231,6 +296,46 @@ class JitContext:
             compiled = self._compiler.compile_assignments(args, [assign], standard_layout=layout)
             self._cache[key] = compiled
         compiled.call(*([node.arr for node in inputs if node is not base] + [base_arr]))
+
+    def sum(self, array, axis=None, **kwargs) -> Any:
+        """Sum ``array`` over all axes and return the scalar immediately.
+
+        Unlike the element-wise operators, ``sum`` is eager: the reduction
+        kernel is compiled (and cached per expression structure) and run right
+        away, so the result is a plain numpy scalar instead of an
+        :class:`ArrayWrapper`.
+        """
+        if axis is not None:
+            raise TypeError("only np.sum over all axes is supported")
+        unsupported = [
+            name for name, value in kwargs.items()
+            if name != 'axis' and value is not None and not isinstance(value, bool)
+        ]
+        if unsupported:
+            raise TypeError(f"unsupported np.sum argument(s): {unsupported}")
+        expr = _as_expr(array)
+        inputs = _collect_array_nodes(expr)
+        # validate slice indices and broadcasting compatibility; the compiler
+        # derives the loop shape itself from the symbol dimensions
+        _merged_loop_shape(expr)
+        symbols = {node: Symbol(('@array', str(i))) for i, node in enumerate(inputs)}
+        reduction = _substitute_array_nodes(expr, symbols).normalize()
+        layout = _determine_layout([node.arr for node in inputs])
+        key = (
+            reduction,
+            tuple((str(node.arr.dtype), node.arr.ndim) for node in inputs),
+            layout,
+        )
+        compiled = self._reduction_cache.get(key)
+        if compiled is None:
+            args = [
+                (symbols[node], SymbolTypeDesc(LowerType.from_numpy_dtype(str(node.arr.dtype)), node.arr.ndim))
+                for node in inputs
+            ]
+            compiled = self._compiler.compile_reduction(args, reduction, standard_layout=layout)
+            self._reduction_cache[key] = compiled
+        result = compiled.call(*[node.arr for node in inputs])
+        return np.asarray(result)[()]
 
 
 class ArrayNode(Expr):
