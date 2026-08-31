@@ -1,5 +1,5 @@
 import ctypes
-from typing import Any
+from typing import Any, cast
 from unittest import TestCase
 
 import numpy as np
@@ -20,6 +20,7 @@ from .expr import (
 )
 from .jit.compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .jit.fn_wrapper import Wrapper
+from .jit.numpy import ArrayNode, JitContext
 from .jit.openmp import OpenMPBackend
 from .jit.type import ComplexFloatType, FloatType, SymbolTypeDesc
 
@@ -1602,4 +1603,102 @@ class ObjectInliningTest(TestCase):
         f(x, obj=Test(a, b))
         assert_almost_equal(x, a * b)
 
-all_tests = [TestExpr, JitTest, JitWrapperTest, SimdLayoutTests, ObjectInliningTest]
+
+class NumpyJitTest(TestCase):
+    """Tests for the lazy numpy-style frontend in ``symlat.jit.numpy``."""
+
+    @staticmethod
+    def _data(w) -> np.ndarray:
+        """The concrete numpy array behind a wrapper (leaf or computed)."""
+        return cast(ArrayNode, w.arr).arr
+
+    def test_usage_example(self):
+        np.random.seed(114514)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(8, 9, 10)
+        b = nc.rand(8, 9, 10)
+
+        c = a + b  # lazy: no computation happens yet
+
+        d = nc.zeros(*a.shape)
+        d[...] = c  # compiles and runs `c` into `d`
+
+        assert_almost_equal(self._data(d), self._data(a) + self._data(b))
+
+    def test_lazy_arithmetic(self):
+        np.random.seed(1)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+
+        d = nc.zeros(4, 5)
+        d[...] = a * b + a - b / 2 + 2 * a ** 2
+
+        expected = self._data(a) * self._data(b) + self._data(a) - self._data(b) / 2 + 2 * self._data(a) ** 2
+        assert_almost_equal(self._data(d), expected)
+
+    def test_broadcast(self):
+        nc = JitContext(OpenMPBackend())
+
+        np.random.seed(2)
+        a = nc.rand(4, 5)
+        b = nc.rand(5)  # rank-1, trailing-aligned with the last axis
+
+        d = nc.zeros(4, 5)
+        d[...] = a + b
+        assert_almost_equal(self._data(d), self._data(a) + self._data(b))
+
+    def test_in_place(self):
+        np.random.seed(3)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        a0 = self._data(a).copy()
+
+        a[...] = a + b
+        assert_almost_equal(self._data(a), a0 + self._data(b))
+
+    def test_scalar_assignment(self):
+        nc = JitContext(OpenMPBackend())
+
+        d = nc.zeros(4, 5)
+        d[...] = 3.0
+        assert_almost_equal(self._data(d), np.full((4, 5), 3.0))
+
+    def test_cache(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        d = nc.zeros(4, 5)
+
+        d[...] = a + b
+        d[...] = a + b  # the same assignment must reuse the compiled kernel
+        assert len(nc._cache) == 1
+        assert_almost_equal(self._data(d), self._data(a) + self._data(b))
+
+    def test_errors(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(6, 7)
+        d = nc.zeros(4, 5)
+
+        with self.assertRaises(ValueError):
+            d[...] = b  # incompatible shapes
+
+        with self.assertRaises(TypeError):
+            d[0] = b  # partial assignment is not supported
+
+        c = a + b  # a computed expression has no storage of its own
+        with self.assertRaises(TypeError):
+            c[...] = a
+
+        with self.assertRaises(TypeError):
+            d[...] = self._data(a)  # raw numpy arrays are not operands
+
+
+all_tests = [TestExpr, JitTest, JitWrapperTest, SimdLayoutTests, ObjectInliningTest, NumpyJitTest]
