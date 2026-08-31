@@ -11,7 +11,7 @@ arguments.
 
 import operator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from typing_extensions import override
@@ -151,7 +151,7 @@ class JitContext:
         b = np.rand(8, 9, 10)
 
         c = a + b # computations are lazy: this only creats a symbolic expression `a + b` and does not compute the result
-        d = np.zeros(*a.shape)
+        d = np.zeros(a.shape)
         d[...] = c # this triggers the computation of `c` and stores the result in `d` (d[:] = c works too)
 
         s = np.sum(a) # eager: reduces `a` over all axes to a scalar right away
@@ -169,9 +169,10 @@ class JitContext:
         """A random array with entries uniformly distributed in ``[0, 1)``."""
         return ArrayWrapper(self, ArrayNode(np.random.rand(*shape)))
 
-    def zeros(self, *shape) -> 'ArrayWrapper':
-        """A zero-filled array; typically the destination of an assignment."""
-        return ArrayWrapper(self, ArrayNode(np.zeros(shape)))
+    def zeros(self, shape, dtype=float, order: Literal['C', 'F'] = 'C') -> 'ArrayWrapper':
+        """A zero-filled array of the given shape; typically the destination of
+        an assignment.  Follows ``numpy.zeros``'s calling convention."""
+        return ArrayWrapper(self, ArrayNode(np.zeros(shape, dtype=dtype, order=order)))
 
     def _execute(self, lhs: Expr, value) -> None:
         """Compile ``lhs = value`` (cached per assignment) and run it.
@@ -385,7 +386,7 @@ class ArrayWrapper:
             Roll(self.arr, tuple((int(ax), int(sh)) for ax, sh in zip(axes, shifts)))
         )
 
-    def flip(self, axis=None) -> 'ArrayWrapper':
+    def flip(self, axis: int | tuple[int, ...] | list[int] | None = None) -> 'ArrayWrapper':
         """Lazily flip the array along ``axis`` (or the given axes); ``None``
         flips every axis."""
         if axis is None:

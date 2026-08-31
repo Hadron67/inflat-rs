@@ -28,7 +28,7 @@ class NumpyJitTest(TestCase):
 
         c = a + b  # lazy: no computation happens yet
 
-        d = nc.zeros(*a.shape)
+        d = nc.zeros(a.shape)
         d[...] = c  # compiles and runs `c` into `d`
 
         assert_almost_equal(self._data(d), self._data(a) + self._data(b))
@@ -40,7 +40,7 @@ class NumpyJitTest(TestCase):
         a = nc.rand(4, 5)
         b = nc.rand(4, 5)
 
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = a * b + a - b / 2 + 2 * a ** 2
 
         expected = self._data(a) * self._data(b) + self._data(a) - self._data(b) / 2 + 2 * self._data(a) ** 2
@@ -53,7 +53,7 @@ class NumpyJitTest(TestCase):
         a = nc.rand(4, 5)
         b = nc.rand(5)  # rank-1, trailing-aligned with the last axis
 
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = a + b
         assert_almost_equal(self._data(d), self._data(a) + self._data(b))
 
@@ -71,7 +71,7 @@ class NumpyJitTest(TestCase):
     def test_scalar_assignment(self):
         nc = JitContext(OpenMPBackend())
 
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = 3.0
         assert_almost_equal(self._data(d), np.full((4, 5), 3.0))
 
@@ -80,7 +80,7 @@ class NumpyJitTest(TestCase):
 
         a = nc.rand(4, 5)
         b = nc.rand(4, 5)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
 
         d[...] = a + b
         d[...] = a + b  # the same assignment must reuse the compiled kernel
@@ -96,8 +96,8 @@ class NumpyJitTest(TestCase):
         a = nc.rand(4, 5)
         b = nc.rand(4, 5)
         c = nc.rand(4, 5)
-        d1 = nc.zeros(4, 5)
-        d2 = nc.zeros(4, 5)
+        d1 = nc.zeros((4, 5))
+        d2 = nc.zeros((4, 5))
 
         d1[...] = a + b
         d2[...] = b + c
@@ -143,7 +143,7 @@ class NumpyJitTest(TestCase):
     def test_slice_assignment_scalar_and_element(self):
         nc = JitContext(OpenMPBackend())
 
-        a = nc.zeros(4, 5)
+        a = nc.zeros((4, 5))
         a[1] = 2.5
         a[2, 4] = 7.0
         expected = np.zeros((4, 5))
@@ -169,7 +169,7 @@ class NumpyJitTest(TestCase):
 
         a = nc.rand(4, 5)
         b = nc.rand(4, 5)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
 
         d[0] = a[1] * 2 + b[3]
         d[:, 2] = a[:, 3]
@@ -201,7 +201,7 @@ class NumpyJitTest(TestCase):
 
         a = nc.rand(4, 5)
         b = nc.rand(6, 7)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
 
         with self.assertRaises(ValueError):
             d[...] = b  # incompatible shapes
@@ -294,7 +294,7 @@ class NumpyJitTest(TestCase):
         nc = JitContext(OpenMPBackend())
 
         a = nc.rand(4, 5)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = d + a.roll(1, axis=0) + a.roll(-1, axis=1)
         expected = np.roll(self._data(a), 1, axis=0) + np.roll(self._data(a), -1, axis=1)
         assert_almost_equal(self._data(d), expected)
@@ -303,7 +303,7 @@ class NumpyJitTest(TestCase):
         nc = JitContext(OpenMPBackend())
 
         a = nc.rand(4, 5)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = a.roll((1, -2), axis=(0, 1))
         assert_almost_equal(self._data(d), np.roll(self._data(a), (1, -2), axis=(0, 1)))
 
@@ -311,7 +311,7 @@ class NumpyJitTest(TestCase):
         nc = JitContext(OpenMPBackend())
 
         a = nc.rand(4, 5)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = d + a.flip(axis=0) + a.flip(axis=(0, 1)) + a.flip()
         expected = (
             np.flip(self._data(a), axis=0)
@@ -325,7 +325,7 @@ class NumpyJitTest(TestCase):
         nc = JitContext(OpenMPBackend())
 
         a = nc.rand(4, 5)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = d + np.roll(a, 2, axis=1) + np.flip(a, axis=0)  # pyright: ignore
         expected = np.roll(self._data(a), 2, axis=1) + np.flip(self._data(a), axis=0)
         assert_almost_equal(self._data(d), expected)
@@ -336,7 +336,7 @@ class NumpyJitTest(TestCase):
 
         base = nc.rand(4, 5)
         a = base + 1  # entries in (1, 2), so log is well defined
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = np.sin(a) + np.cos(a) + np.exp(a) + np.log(a)
         data = self._data(base)
         expected = np.sin(data + 1) + np.cos(data + 1) + np.exp(data + 1) + np.log(data + 1)
@@ -359,7 +359,7 @@ class NumpyJitTest(TestCase):
         flipped = np.flip(a, axis=1)  # pyright: ignore
         self.assertIsInstance(rolled, ArrayWrapper)
         self.assertIsInstance(flipped, ArrayWrapper)
-        d = nc.zeros(4, 5)
+        d = nc.zeros((4, 5))
         d[...] = rolled + flipped
         expected = np.roll(self._data(a), 1, axis=0) + np.flip(self._data(a), axis=1)
         assert_almost_equal(self._data(d), expected)
