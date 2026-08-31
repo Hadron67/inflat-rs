@@ -10,12 +10,13 @@ arguments.
 """
 
 import operator
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 from typing_extensions import override
 
-from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times
+from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times, next_head_sort_token
 from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .type import LowerType, SymbolTypeDesc
@@ -87,6 +88,30 @@ def _determine_layout(values) -> StandardLayoutMode:
     return StandardLayoutMode.NONE
 
 
+@dataclass(frozen=True)
+class _AssignmentCacheKey:
+    """Cache key of a compiled assignment kernel.
+
+    A kernel is fully determined by the (substituted) assignment structure, the
+    dtypes and ranks of its array arguments and the layout mode; the concrete
+    shapes are runtime arguments and do not participate.
+    """
+    lhs: Expr
+    rhs: Expr
+    input_types: tuple[tuple[str, int], ...]
+    dest_type: tuple[str, int]
+    layout: StandardLayoutMode
+
+
+@dataclass(frozen=True)
+class _ReductionCacheKey:
+    """Cache key of a compiled reduction kernel, analogous to
+    :class:`_AssignmentCacheKey` for ``sum``."""
+    expr: Expr
+    input_types: tuple[tuple[str, int], ...]
+    layout: StandardLayoutMode
+
+
 class JitContext:
     """
     A JIT context for numpy expressions.
@@ -110,10 +135,10 @@ class JitContext:
     def __init__(self, backend: Backend) -> None:
         self.backend = backend
         self._compiler = JitCompiler(backend)
-        # cache: (lhs, rhs, input dtypes, dest dtype, layout) -> compiled kernel
-        self._cache: dict[tuple, CompiledWrapper] = {}
-        # reduction cache: (expr, input dtypes/ranks, layout) -> compiled kernel
-        self._reduction_cache: dict[tuple, CompiledWrapper] = {}
+        # assignment structure + input/dest dtypes and ranks -> compiled kernel
+        self._cache: dict[_AssignmentCacheKey, CompiledWrapper] = {}
+        # reduction structure + input dtypes and ranks -> compiled kernel
+        self._reduction_cache: dict[_ReductionCacheKey, CompiledWrapper] = {}
 
     def rand(self, *shape) -> 'ArrayWrapper':
         """A random array with entries uniformly distributed in ``[0, 1)``."""
@@ -168,7 +193,7 @@ class JitContext:
             _substitute_array_nodes(rhs, symbols).normalize(),
         )
         layout = _determine_layout([node.arr for node in inputs if node is not base] + [base_arr])
-        key = (
+        key = _AssignmentCacheKey(
             assign.lhs,
             assign.rhs,
             tuple((str(node.arr.dtype), node.arr.ndim) for node in inputs if node is not base),
@@ -204,7 +229,7 @@ class JitContext:
         symbols = {node: Symbol(('@array', str(i))) for i, node in enumerate(inputs)}
         reduction = _substitute_array_nodes(expr, symbols).normalize()
         layout = _determine_layout([node.arr for node in inputs])
-        key = (
+        key = _ReductionCacheKey(
             reduction,
             tuple((str(node.arr.dtype), node.arr.ndim) for node in inputs),
             layout,
@@ -230,7 +255,7 @@ class ArrayNode(Expr):
     """
 
     #: a sort token distinct from every ``@exprclass``-generated class
-    HEAD_SORT_TOKEN = 0x10000
+    HEAD_SORT_TOKEN = next_head_sort_token()
 
     def __init__(self, arr: np.ndarray) -> None:
         self.arr = arr

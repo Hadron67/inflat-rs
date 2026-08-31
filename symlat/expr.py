@@ -174,6 +174,11 @@ class Expr:
 def S(expr) -> Expr:
     return Expr.as_expr(expr)
 
+def next_head_sort_token() -> int:
+    token = Expr._HEAD_SORT_TOKEN_COUNTER
+    Expr._HEAD_SORT_TOKEN_COUNTER += 1
+    return token
+
 @dataclass_transform()
 def exprclass(cls=None, **kwargs):
     dataclass_wrapper = dataclass(repr=False, frozen=True, **kwargs)
@@ -198,7 +203,6 @@ def exprclass(cls=None, **kwargs):
         globals[cls.__name__] = cls
         exec('\n'.join(compare_code + map_code + get_subexpressions_code), globals)  # noqa: S102
 
-        Expr._HEAD_SORT_TOKEN_COUNTER += 1
         cls = dataclass_wrapper(cls)
         if cls.compare is Expr.compare:
             cls.compare = globals[compare_name]
@@ -206,7 +210,7 @@ def exprclass(cls=None, **kwargs):
             cls.subexpressions = globals[subexpressions_name]
         if cls.map is Expr.map:
             cls.map = globals[map_name]
-        cls.HEAD_SORT_TOKEN = Expr._HEAD_SORT_TOKEN_COUNTER
+        cls.HEAD_SORT_TOKEN = next_head_sort_token()
         return cls
 
     if cls is not None:
