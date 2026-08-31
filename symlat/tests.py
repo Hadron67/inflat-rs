@@ -1706,6 +1706,89 @@ class NumpyJitTest(TestCase):
         with self.assertRaises(NotImplementedError):
             a.arr.compare(b.arr)
 
+    def test_slice_assignment(self):
+        np.random.seed(6)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(5)
+        c = nc.rand(4)
+        expected = self._data(a).copy()
+
+        a[0] = b
+        expected[0] = self._data(b)
+        a[:, 3] = c
+        expected[:, 3] = self._data(c)
+        assert_almost_equal(self._data(a), expected)
+
+    def test_slice_assignment_negative_index(self):
+        np.random.seed(7)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(5)
+        expected = self._data(a).copy()
+
+        a[-1] = b
+        expected[-1] = self._data(b)
+        assert_almost_equal(self._data(a), expected)
+
+    def test_slice_assignment_scalar_and_element(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.zeros(4, 5)
+        a[1] = 2.5
+        a[2, 4] = 7.0
+        expected = np.zeros((4, 5))
+        expected[1] = 2.5
+        expected[2, 4] = 7.0
+        assert_almost_equal(self._data(a), expected)
+
+    def test_slice_assignment_in_place(self):
+        np.random.seed(8)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        expected = self._data(a).copy()
+
+        a[0] = a[1] + b[2]
+        expected[0] = expected[1] + self._data(b)[2]
+        assert_almost_equal(self._data(a), expected)
+
+    def test_slice_read(self):
+        np.random.seed(9)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        d = nc.zeros(4, 5)
+
+        d[0] = a[1] * 2 + b[3]
+        d[:, 2] = a[:, 3]
+        expected = np.zeros((4, 5))
+        expected[0] = self._data(a)[1] * 2 + self._data(b)[3]
+        expected[:, 2] = self._data(a)[:, 3]
+        assert_almost_equal(self._data(d), expected)
+
+    def test_slice_assignment_errors(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 6)
+
+        with self.assertRaises(ValueError):
+            a[0] = b  # cannot broadcast (4, 6) into (5,)
+
+        with self.assertRaises(TypeError):
+            a[0:2] = b  # range slices are not supported
+
+        with self.assertRaises(TypeError):
+            a[..., 0] = b  # ellipsis is not supported as an index
+
+        with self.assertRaises(IndexError):
+            a[10] = nc.zeros(5)  # index out of bounds
+
     def test_errors(self):
         nc = JitContext(OpenMPBackend())
 
@@ -1716,12 +1799,11 @@ class NumpyJitTest(TestCase):
         with self.assertRaises(ValueError):
             d[...] = b  # incompatible shapes
 
-        with self.assertRaises(TypeError):
-            d[0] = b  # partial assignment is not supported
-
         c = a + b  # a computed expression has no storage of its own
         with self.assertRaises(TypeError):
             c[...] = a
+        with self.assertRaises(TypeError):
+            c[0] = a  # cannot slice-assign into a computed expression
 
         with self.assertRaises(TypeError):
             d[...] = self._data(a)  # raw numpy arrays are not operands

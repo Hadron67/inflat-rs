@@ -388,6 +388,35 @@ class _FunctionCompiler:
         v = [value_at[axis] for axis in range(dim)]
         return self.compile_expr(cur, _RealSubscriptsInfo(tuple(v)))
 
+    def _compile_slice_lvalue(self, expr: Slice, subscripts: _RealSubscriptsInfo) -> tuple[Value, LowerType]:
+        """Compile the lvalue of a slice chain, e.g. ``a[0]`` or ``a[:, 3]``.
+
+        Every slice node fixes one axis of the base expression at its index; the
+        surviving axes receive the loop subscripts in order, since the loop
+        iterates exactly the sliced shape."""
+        nodes: list[Slice] = []
+        cur = expr
+        while isinstance(cur, Slice):
+            nodes.append(cur)
+            cur = cur.expr
+        cur_shape = self._type_cache.get_shape(cur)
+        dim = len(cur_shape)
+        remaining = list(range(dim))
+        value_at: dict[int, Value] = {}
+        for node in reversed(nodes):
+            if node.axis < 0 or node.axis >= len(remaining):
+                raise TypeError(f"slice axis {node.axis} is out of bounds for {cur}")
+            axis = remaining[node.axis]
+            del remaining[node.axis]
+            length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
+            value_at[axis] = self._normalize_slice_index(length, node.index)
+        if len(subscripts.subscripts) != len(remaining):
+            raise TypeError("slice assignment loop rank does not match the sliced expression")
+        for j, axis in enumerate(remaining):
+            value_at[axis] = subscripts.subscripts[j]
+        v = [value_at[axis] for axis in range(dim)]
+        return self._compile_lvalue(cur, _RealSubscriptsInfo(tuple(v)))
+
     def _compile_unpack_subscripts(self, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
         """
             sizes are innermost-first, i.e. in the order produced by merge_shape
@@ -647,6 +676,18 @@ class _FunctionCompiler:
                                 return self._compile_array_symbol_access(sym, s), lower_type
                             case _StandardLayoutSubscriptInfo():
                                 return self._block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(sym, subscripts)), lower_type
+            case Slice():
+                match subscripts:
+                    case _StandardLayoutSubscriptInfo(mode, subscript, shifts):
+                        # record the fixed axis and recurse; the offset is applied
+                        # at the array access using the base array's strides
+                        new_shifts = dict(shifts)
+                        new_shifts[expr.axis] = expr.index
+                        return self._compile_lvalue(
+                            expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
+                        )
+                    case _RealSubscriptsInfo(s):
+                        return self._compile_slice_lvalue(expr, subscripts)
         raise ValueError(f"cannot use {expr} as left-value")
 
     def _expr_cache_key(self, expr: Expr, subscripts: _SubscriptsInfo) -> tuple[Any, ...]:

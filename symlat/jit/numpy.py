@@ -4,14 +4,17 @@ Unlike :mod:`symlat.jit.fn_wrapper`, which traces the body of a decorated
 function with probe objects, this module builds the expression tree directly
 from the array operators: ``a + b`` only records a symbolic ``Plus`` node and
 does no work.  The computation is deferred until the result is assigned into a
-concrete array (``d[..] = c``), which compiles the tree into a kernel (cached
-per assignment) and runs it with the arrays as arguments.
+concrete array (``d[...] = c`` or a slice like ``a[0] = c``), which compiles
+the tree into a kernel (cached per assignment) and runs it with the arrays as
+arguments.
 """
+
+import operator
 
 import numpy as np
 from typing_extensions import override
 
-from ..expr import AssignExpr, Expr, Int, Symbol, Times
+from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times
 from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .type import LowerType, SymbolTypeDesc
@@ -115,61 +118,113 @@ class JitContext:
         """A zero-filled array; typically the destination of an assignment."""
         return ArrayWrapper(self, ArrayNode(np.zeros(shape)))
 
-    def _execute(self, dest: 'ArrayWrapper', rhs: Expr) -> None:
-        """Compile ``dest[..] = rhs`` (cached per assignment) and run it."""
-        if not isinstance(dest.arr, ArrayNode):
+    def _execute(self, lhs: Expr, value) -> None:
+        """Compile ``lhs = value`` (cached per assignment) and run it.
+
+        ``lhs`` is the whole ``ArrayNode`` of the destination or a chain of
+        ``Slice`` nodes over it (a slice assignment like ``a[0] = ...``).
+        """
+        # the assignment target is (a chain of slices over) a concrete array
+        base = lhs
+        while isinstance(base, Slice):
+            base = base.expr
+        if not isinstance(base, ArrayNode):
             raise TypeError(
                 "cannot assign into a computed expression; assign into an array "
                 "created by rand() or zeros() instead"
             )
-        dest_arr = dest.arr.arr
+        base_arr = base.arr
+        rhs = _as_expr(value)
         inputs = _collect_array_nodes(rhs)
         # every ArrayNode leaf is replaced by a fresh symbol before compiling;
         # the names are positional so that structurally identical assignments
         # (with the same input dtypes and ranks) share the cached kernel
         symbols = {node: Symbol(('@array', str(i))) for i, node in enumerate(inputs)}
-        if dest.arr in symbols:
+        if base in symbols:
             # in-place update: the destination is also read from
-            dest_sym = symbols[dest.arr]
+            dest_sym = symbols[base]
         else:
             dest_sym = Symbol(('@dest',))
-        # the kernel iterates the destination's shape and reads the inputs with
-        # trailing-aligned subscripts, so every input axis must equal the
-        # destination axis it aligns to (numpy-style size-1 broadcasting is not
-        # supported)
-        dest_shape = dest_arr.shape
-        for node in inputs:
-            src_shape = node.arr.shape
-            if len(src_shape) > len(dest_shape):
-                raise ValueError(
-                    f"cannot broadcast shape {src_shape} into destination shape {dest_shape}"
+            symbols[base] = dest_sym
+        # the kernel iterates the destination's (sliced) shape: compute it and
+        # validate the LHS slice indices
+        nodes: list[Slice] = []
+        cur = lhs
+        while isinstance(cur, Slice):
+            nodes.append(cur)
+            cur = cur.expr
+        remaining = list(range(base_arr.ndim))
+        for node in reversed(nodes):
+            if node.axis < 0 or node.axis >= len(remaining):
+                raise TypeError(f"slice axis {node.axis} is out of bounds")
+            axis = remaining[node.axis]
+            del remaining[node.axis]
+            dim = base_arr.shape[axis]
+            if node.index < -dim or node.index >= dim:
+                raise IndexError(
+                    f"index {node.index} is out of bounds for axis {axis} of size {dim}"
                 )
-            for d, s in zip(reversed(dest_shape), reversed(src_shape)):
-                if d != s:
+        dest_shape = tuple(base_arr.shape[i] for i in remaining)
+        # every input must read within the loop bounds: slice indices are
+        # checked, and the surviving axes must equal the destination axis they
+        # align to (numpy-style size-1 broadcasting is not supported)
+        todo = [(rhs, [])]
+        while todo:
+            expr, chain = todo.pop()
+            if isinstance(expr, Slice):
+                todo.append((expr.expr, chain + [expr]))
+            elif isinstance(expr, ArrayNode):
+                arr = expr.arr
+                rem = list(range(arr.ndim))
+                for node in reversed(chain):
+                    if node.axis < 0 or node.axis >= len(rem):
+                        raise TypeError(f"slice axis {node.axis} is out of bounds")
+                    ax = rem[node.axis]
+                    del rem[node.axis]
+                    dim = arr.shape[ax]
+                    if node.index < -dim or node.index >= dim:
+                        raise IndexError(
+                            f"index {node.index} is out of bounds for axis {ax} of size {dim}"
+                        )
+                if len(rem) > len(dest_shape):
                     raise ValueError(
-                        f"cannot broadcast shape {src_shape} into destination shape {dest_shape}"
+                        f"cannot broadcast shape {arr.shape} into destination shape {dest_shape}"
                     )
+                # a sliced expression whose base has the loop's rank is read at
+                # its surviving axes positionally; otherwise (broadcasting) its
+                # surviving axes are trailing-aligned with the loop
+                offset = 0 if arr.ndim == len(dest_shape) else len(dest_shape) - len(rem)
+                for j, ax in enumerate(rem):
+                    if arr.shape[ax] != dest_shape[offset + j]:
+                        raise ValueError(
+                            f"cannot broadcast shape {arr.shape} into destination shape {dest_shape}"
+                        )
+            else:
+                todo.extend((c, chain) for c in expr.subexpressions())
         input_args = [
             (symbols[node], SymbolTypeDesc(LowerType.from_numpy_dtype(str(node.arr.dtype)), node.arr.ndim))
             for node in inputs
-            if node is not dest.arr
+            if node is not base
         ]
-        dest_desc = SymbolTypeDesc(LowerType.from_numpy_dtype(str(dest_arr.dtype)), dest_arr.ndim)
+        dest_desc = SymbolTypeDesc(LowerType.from_numpy_dtype(str(base_arr.dtype)), base_arr.ndim)
         args = input_args + [(dest_sym, dest_desc)]
-        assign = AssignExpr(dest_sym, _substitute_array_nodes(rhs, symbols).normalize())
-        layout = _determine_layout([node.arr for node in inputs if node is not dest.arr] + [dest_arr])
+        assign = AssignExpr(
+            _substitute_array_nodes(lhs, symbols),
+            _substitute_array_nodes(rhs, symbols).normalize(),
+        )
+        layout = _determine_layout([node.arr for node in inputs if node is not base] + [base_arr])
         key = (
-            dest_sym,
+            assign.lhs,
             assign.rhs,
-            tuple((str(node.arr.dtype), node.arr.ndim) for node in inputs if node is not dest.arr),
-            (str(dest_arr.dtype), dest_arr.ndim),
+            tuple((str(node.arr.dtype), node.arr.ndim) for node in inputs if node is not base),
+            (str(base_arr.dtype), base_arr.ndim),
             layout,
         )
         compiled = self._cache.get(key)
         if compiled is None:
             compiled = self._compiler.compile_assignments(args, [assign], standard_layout=layout)
             self._cache[key] = compiled
-        compiled.call(*([node.arr for node in inputs if node is not dest.arr] + [dest_arr]))
+        compiled.call(*([node.arr for node in inputs if node is not base] + [base_arr]))
 
 
 class ArrayNode(Expr):
@@ -263,13 +318,36 @@ class ArrayWrapper:
     def __pos__(self):
         return self
 
-    # --- assignment: triggers compilation and execution ---------------------
+    # --- indexing: slicing is lazy, assignment triggers compilation ---------
+    def _index(self, key) -> Expr:
+        """The expression selected by ``self[key]``: the ``ArrayNode`` itself when
+        the key selects the whole array, otherwise a chain of ``Slice`` nodes."""
+        if key is Ellipsis:
+            return self.arr
+        if not isinstance(key, tuple):
+            key = (key,)
+        expr: Expr = self.arr
+        fixed: list[tuple[int, int]] = []
+        for axis, k in enumerate(key):
+            if k == slice(None):
+                continue
+            if k is Ellipsis:
+                raise TypeError("'...' is not supported as an index; use explicit ':'")
+            if isinstance(k, (int, np.integer)):
+                fixed.append((axis, operator.index(k)))
+                continue
+            raise TypeError(f"unsupported index {k!r}; use integer indices or ':'")
+        # fix the highest axis first (innermost), so that lower axes stay valid
+        # after the higher ones have been removed
+        for axis, index in reversed(fixed):
+            expr = Slice(expr, axis, index)
+        return expr
+
+    def __getitem__(self, key) -> 'ArrayWrapper':
+        return self._new(self._index(key))
+
     def __setitem__(self, key, value) -> None:
-        if key is not Ellipsis and key != slice(None):
-            raise TypeError(
-                "only whole-array assignment (d[..] = ... or d[:] = ...) is supported"
-            )
-        self.ctx._execute(self, _as_expr(value))
+        self.ctx._execute(self._index(key), value)
 
     def __repr__(self) -> str:
         return self.arr.input_form()
