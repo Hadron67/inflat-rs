@@ -1,7 +1,8 @@
+import types
 from abc import abstractmethod
 from inspect import isclass
 from types import GenericAlias
-from typing import get_args, get_origin, override
+from typing import Union, get_args, get_origin, override
 from weakref import WeakKeyDictionary
 
 
@@ -191,6 +192,20 @@ class SubExprFnBuilder:
             for i, arg in enumerate(args):
                 ret.extend(self._process_compare(f"{self_arg}[{i}]", f"{other_arg}[{i}]", arg, compare_fn))
             return ret
+        if head is types.UnionType or head is Union:
+            # a union with a single non-``None`` member, e.g. ``tuple | None``:
+            # ``None`` compares as the smallest value and the other member is
+            # compared by its own rules
+            non_none = [a for a in args if a is not types.NoneType]
+            if len(non_none) == 1:
+                body = [
+                    f'if {self_arg} is None and {other_arg} is not None:',
+                    '    return -1',
+                    f'if {self_arg} is not None and {other_arg} is None:',
+                    '    return 1',
+                ]
+                body.extend(self._process_compare(self_arg, other_arg, non_none[0], compare_fn))
+                return body
 
         return [
             f'if {self_arg} > {other_arg}:',
@@ -221,7 +236,9 @@ class SubExprFnBuilder:
                 if exclude is not None and name in exclude:
                     continue
                 body.append('    ' + f'ret["{name}"] = {self._process_map(op, f'self.{name}', type)}')
-        body.append(f'    return op({cls.__name__}(**ret))')
+        # rebuild with the runtime type: subclasses of a decorated class (e.g.
+        # ``Sin`` of ``UnaryNumericFunction``) are mapped back to themselves
+        body.append('    return op(type(self)(**ret))')
         return body
 
     def generate_compare_body(self, cls: type, self_arg: str, other_arg: str, compare_fn: str, exclude: set[str] | None = None):

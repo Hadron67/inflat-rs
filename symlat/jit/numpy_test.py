@@ -289,4 +289,92 @@ class NumpyJitTest(TestCase):
         with self.assertRaises(IndexError):
             nc.sum(a[10])  # index out of bounds
 
+    def test_roll(self):
+        np.random.seed(20)
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        d = nc.zeros(4, 5)
+        d[...] = d + a.roll(1, axis=0) + a.roll(-1, axis=1)
+        expected = np.roll(self._data(a), 1, axis=0) + np.roll(self._data(a), -1, axis=1)
+        assert_almost_equal(self._data(d), expected)
+
+    def test_roll_multiple_axes(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        d = nc.zeros(4, 5)
+        d[...] = a.roll((1, -2), axis=(0, 1))
+        assert_almost_equal(self._data(d), np.roll(self._data(a), (1, -2), axis=(0, 1)))
+
+    def test_flip(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        d = nc.zeros(4, 5)
+        d[...] = d + a.flip(axis=0) + a.flip(axis=(0, 1)) + a.flip()
+        expected = (
+            np.flip(self._data(a), axis=0)
+            + np.flip(self._data(a), axis=(0, 1))
+            + np.flip(self._data(a))
+        )
+        assert_almost_equal(self._data(d), expected)
+
+    def test_np_roll_flip_dispatch(self):
+        # np.roll(a, ...) and np.flip(a, ...) dispatch through __array_function__
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        d = nc.zeros(4, 5)
+        d[...] = d + np.roll(a, 2, axis=1) + np.flip(a, axis=0)  # pyright: ignore
+        expected = np.roll(self._data(a), 2, axis=1) + np.flip(self._data(a), axis=0)
+        assert_almost_equal(self._data(d), expected)
+
+    def test_scalar_functions(self):
+        # np.sin etc. are lazy ufuncs on the wrapper
+        nc = JitContext(OpenMPBackend())
+
+        base = nc.rand(4, 5)
+        a = base + 1  # entries in (1, 2), so log is well defined
+        d = nc.zeros(4, 5)
+        d[...] = np.sin(a) + np.cos(a) + np.exp(a) + np.log(a)
+        data = self._data(base)
+        expected = np.sin(data + 1) + np.cos(data + 1) + np.exp(data + 1) + np.log(data + 1)
+        assert_almost_equal(self._data(d), expected)
+
+        d[...] = np.sqrt(a)
+        assert_almost_equal(self._data(d), np.sqrt(data + 1))
+        d[...] = np.negative(a)
+        assert_almost_equal(self._data(d), -(data + 1))
+        d[...] = np.positive(a)
+        assert_almost_equal(self._data(d), data + 1)
+
+    def test_roll_flip_are_lazy(self):
+        # roll/flip only build expression trees; nothing is computed until an
+        # assignment triggers the compilation
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        rolled = a.roll(1, axis=0)
+        flipped = np.flip(a, axis=1)  # pyright: ignore
+        self.assertIsInstance(rolled, ArrayWrapper)
+        self.assertIsInstance(flipped, ArrayWrapper)
+        d = nc.zeros(4, 5)
+        d[...] = rolled + flipped
+        expected = np.roll(self._data(a), 1, axis=0) + np.flip(self._data(a), axis=1)
+        assert_almost_equal(self._data(d), expected)
+        # the same expression structure shares the compiled kernel
+        self.assertEqual(len(nc._cache), 1)
+
+    def test_roll_flip_errors(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        with self.assertRaises(TypeError):
+            a.roll(1)  # axis is required
+        with self.assertRaises(TypeError):
+            a.roll((1, 2), axis=0)  # shift and axis must have the same length
+        with self.assertRaises(TypeError):
+            np.tanh(a)  # unsupported scalar function
+
 all_tests = [NumpyJitTest]

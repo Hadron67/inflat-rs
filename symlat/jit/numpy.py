@@ -16,7 +16,23 @@ from typing import Any
 import numpy as np
 from typing_extensions import override
 
-from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times, next_head_sort_token
+from ..expr import (
+    AssignExpr,
+    Cos,
+    Exp,
+    Expr,
+    Flip,
+    Int,
+    Ln,
+    Power,
+    Rational,
+    Roll,
+    Sin,
+    Slice,
+    Symbol,
+    Times,
+    next_head_sort_token,
+)
 from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .type import LowerType, SymbolTypeDesc
@@ -86,6 +102,15 @@ def _determine_layout(values) -> StandardLayoutMode:
     if col_ok:
         return StandardLayoutMode.COLUMN_MAJOR
     return StandardLayoutMode.NONE
+
+
+#: numpy unary ufuncs supported as lazy element-wise functions
+_FUNC_MAP = {
+    'sin': Sin,
+    'cos': Cos,
+    'exp': Exp,
+    'log': Ln,
+}
 
 
 @dataclass(frozen=True)
@@ -297,6 +322,15 @@ class ArrayWrapper:
             )
         return self.arr.arr.shape
 
+    @property
+    def ndim(self) -> int:
+        if not isinstance(self.arr, ArrayNode):
+            raise TypeError(
+                "the ndim of a computed expression is not available; assign it "
+                "into an array created by rand() or zeros() to materialize it"
+            )
+        return self.arr.arr.ndim
+
     def _new(self, expr: Expr) -> 'ArrayWrapper':
         return ArrayWrapper(self.ctx, expr)
 
@@ -336,6 +370,59 @@ class ArrayWrapper:
 
     def __pos__(self):
         return self
+
+    # --- numpy functions: lazy roll/flip and scalar ufuncs -----------------
+    def roll(self, shift, axis=None) -> 'ArrayWrapper':
+        """Lazily roll the array along ``axis`` (or the given axes); nothing is
+        computed until the result is assigned into a concrete array."""
+        if axis is None:
+            raise TypeError("roll requires an explicit axis")
+        axes = axis if isinstance(axis, (tuple, list)) else (axis,)
+        shifts = shift if isinstance(shift, (tuple, list)) else (shift,) * len(axes)
+        if len(axes) != len(shifts):
+            raise TypeError("roll shift and axis must have the same length")
+        return self._new(
+            Roll(self.arr, tuple((int(ax), int(sh)) for ax, sh in zip(axes, shifts)))
+        )
+
+    def flip(self, axis=None) -> 'ArrayWrapper':
+        """Lazily flip the array along ``axis`` (or the given axes); ``None``
+        flips every axis."""
+        if axis is None:
+            return self._new(Flip(self.arr, None))
+        axes = axis if isinstance(axis, (tuple, list)) else (axis,)
+        return self._new(Flip(self.arr, tuple(int(ax) for ax in axes)))
+
+    def __array_function__(self, func, types, args, kwargs):
+        """Handle ``np.roll``/``np.flip`` called on a lazy array."""
+        if func is np.roll and args[0] is self:
+            return self.roll(*args[1:], **kwargs)
+        if func is np.flip and args[0] is self:
+            return self.flip(*args[1:], **kwargs)
+        return NotImplemented
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        """Handle unary scalar functions like ``np.sin`` applied to a lazy array."""
+        if method != '__call__' or len(kwargs) > 0:
+            return NotImplemented
+        name = ufunc.__name__
+        if len(inputs) == 1:
+            arg = inputs[0]
+            if not isinstance(arg, ArrayWrapper):
+                return NotImplemented
+            if name == 'negative':
+                return self._new(Times((Int(-1), arg.arr)))
+            if name == 'positive':
+                return self._new(arg.arr)
+            if name == 'sqrt':
+                return self._new(Power(arg.arr, Rational(1, 2)))
+            fn = _FUNC_MAP.get(name)
+            if fn is None:
+                raise TypeError(
+                    f"unsupported numpy function {name!r} in lazy array expression"
+                )
+            return self._new(fn(arg.arr))
+        return NotImplemented
 
     # --- indexing: slicing is lazy, assignment triggers compilation ---------
     def _index(self, key) -> Expr:
