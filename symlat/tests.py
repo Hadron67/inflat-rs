@@ -1680,6 +1680,32 @@ class NumpyJitTest(TestCase):
         assert len(nc._cache) == 1
         assert_almost_equal(self._data(d), self._data(a) + self._data(b))
 
+    def test_cache_shares_identical_structure(self):
+        # the kernel is keyed by the expression structure and the argument
+        # dtypes/ranks, so structurally identical assignments share it even for
+        # different arrays
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        c = nc.rand(4, 5)
+        d1 = nc.zeros(4, 5)
+        d2 = nc.zeros(4, 5)
+
+        d1[...] = a + b
+        d2[...] = b + c
+        assert len(nc._cache) == 1
+        assert_almost_equal(self._data(d1), self._data(a) + self._data(b))
+        assert_almost_equal(self._data(d2), self._data(b) + self._data(c))
+
+    def test_array_node_is_not_comparable(self):
+        nc = JitContext(OpenMPBackend())
+
+        a = nc.rand(4, 5)
+        b = nc.rand(4, 5)
+        with self.assertRaises(NotImplementedError):
+            a.arr.compare(b.arr)
+
     def test_errors(self):
         nc = JitContext(OpenMPBackend())
 

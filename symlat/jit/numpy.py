@@ -49,7 +49,7 @@ def _collect_array_nodes(expr: Expr) -> list['ArrayNode']:
     return ret
 
 
-def _substitute_array_nodes(expr: Expr) -> Expr:
+def _substitute_array_nodes(expr: Expr, symbols: dict['ArrayNode', Symbol]) -> Expr:
     """Replace every :class:`ArrayNode` leaf with its kernel symbol.
 
     ``Expr.map`` applies its operator to every node of the tree, so a single map
@@ -57,7 +57,7 @@ def _substitute_array_nodes(expr: Expr) -> Expr:
     """
     def subst(e: Expr) -> Expr:
         if isinstance(e, ArrayNode):
-            return e.sym
+            return symbols[e]
         return e
     return expr.map(subst)
 
@@ -124,6 +124,15 @@ class JitContext:
             )
         dest_arr = dest.arr.arr
         inputs = _collect_array_nodes(rhs)
+        # every ArrayNode leaf is replaced by a fresh symbol before compiling;
+        # the names are positional so that structurally identical assignments
+        # (with the same input dtypes and ranks) share the cached kernel
+        symbols = {node: Symbol(('@array', str(i))) for i, node in enumerate(inputs)}
+        if dest.arr in symbols:
+            # in-place update: the destination is also read from
+            dest_sym = symbols[dest.arr]
+        else:
+            dest_sym = Symbol(('@dest',))
         # the kernel iterates the destination's shape and reads the inputs with
         # trailing-aligned subscripts, so every input axis must equal the
         # destination axis it aligns to (numpy-style size-1 broadcasting is not
@@ -141,19 +150,19 @@ class JitContext:
                         f"cannot broadcast shape {src_shape} into destination shape {dest_shape}"
                     )
         input_args = [
-            (node.sym, SymbolTypeDesc(LowerType.from_numpy_dtype(str(node.arr.dtype)), node.arr.ndim))
+            (symbols[node], SymbolTypeDesc(LowerType.from_numpy_dtype(str(node.arr.dtype)), node.arr.ndim))
             for node in inputs
             if node is not dest.arr
         ]
         dest_desc = SymbolTypeDesc(LowerType.from_numpy_dtype(str(dest_arr.dtype)), dest_arr.ndim)
-        args = input_args + [(dest.arr.sym, dest_desc)]
-        assign = AssignExpr(dest.arr.sym, _substitute_array_nodes(rhs).normalize())
+        args = input_args + [(dest_sym, dest_desc)]
+        assign = AssignExpr(dest_sym, _substitute_array_nodes(rhs, symbols).normalize())
         layout = _determine_layout([node.arr for node in inputs if node is not dest.arr] + [dest_arr])
         key = (
-            assign.lhs,
+            dest_sym,
             assign.rhs,
-            tuple(str(node.arr.dtype) for node in inputs if node is not dest.arr),
-            str(dest_arr.dtype),
+            tuple((str(node.arr.dtype), node.arr.ndim) for node in inputs if node is not dest.arr),
+            (str(dest_arr.dtype), dest_arr.ndim),
             layout,
         )
         compiled = self._cache.get(key)
@@ -166,25 +175,20 @@ class JitContext:
 class ArrayNode(Expr):
     """A leaf of a lazy array expression: a concrete numpy array.
 
-    Each node owns a stable :class:`Symbol` that names its kernel argument, so
-    the same node always maps to the same kernel slot; this is what makes
-    repeated executions of an assignment hit the JIT cache.
+    ``ArrayNode`` is not comparable: it must be replaced by a :class:`Symbol`
+    (see :func:`_substitute_array_nodes`) before the expression is normalized
+    or compiled.
     """
 
     #: a sort token distinct from every ``@exprclass``-generated class
     HEAD_SORT_TOKEN = 0x10000
 
-    _counter = 0
-
     def __init__(self, arr: np.ndarray) -> None:
         self.arr = arr
-        self._id = ArrayNode._counter
-        ArrayNode._counter += 1
-        self.sym = Symbol(('@array', str(self._id)))
 
     @override
     def input_form(self) -> str:
-        return f"@array{self._id}"
+        return f"@array{id(self)}"
 
     @override
     def head_sort_token(self) -> int:
@@ -192,9 +196,10 @@ class ArrayNode(Expr):
 
     @override
     def compare(self, other: Expr) -> int:
-        if isinstance(other, ArrayNode):
-            return self._id - other._id
-        return self.HEAD_SORT_TOKEN - other.HEAD_SORT_TOKEN
+        raise NotImplementedError(
+            "ArrayNode does not support comparison; replace it with a Symbol before "
+            "normalizing or compiling the expression"
+        )
 
 
 class ArrayWrapper:
