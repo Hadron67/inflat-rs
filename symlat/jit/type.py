@@ -282,30 +282,18 @@ class TypeResolver:
 
         raise ValueError(f"cannot resolve equal constrain {expr1} === {expr2}")
 
-    @staticmethod
-    def _in_natural_order(shape: tuple[Expr, ...]) -> bool:
-        """Whether ``shape`` is in natural axis order (outermost first).
-
-        Leaf shapes (``Symbol``, ``Coord``) are in natural order, while
-        ``get_shape`` of composite expressions (``Plus``/``Times``) returns
-        merge outputs in innermost-first order; the two are told apart by the
-        ``SymbolShape`` indices, which follow the same heuristic as
-        :class:`TypedReductionExpr`."""
-        indices = [e.index for e in shape if isinstance(e, SymbolShape)]
-        return len(indices) == 0 or indices == sorted(indices)
-
     def merge_shape(self, lhs: tuple[Expr, ...], rhs: tuple[Expr, ...], is_assign: bool = False):
+        """Pair two shapes and merge them, following numpy broadcasting.
+
+        The shapes are in natural axis order (outermost first, like numpy's
+        ``.shape``) and are aligned by their innermost (trailing) axes: the
+        last axis of one shape pairs with the last axis of the other, so a
+        lower-rank shape broadcasts against the trailing axes.  The result is
+        again in natural order."""
         if is_assign and len(rhs) > len(lhs):
             raise TypeError(f"cannot assign shape {rhs} to shape {lhs}")
-        # merge_shape pairs its inputs trailing-aligned, which is only correct
-        # when both inputs are in the same convention; bring innermost-first
-        # inputs (composite-expression shapes) back to natural order first
-        if not self._in_natural_order(lhs):
-            lhs = tuple(reversed(lhs))
-        if not self._in_natural_order(rhs):
-            rhs = tuple(reversed(rhs))
         ret: list[Expr] = []
-        for i in range(max(len(lhs), len(rhs))):
+        for i in range(max(len(lhs), len(rhs)) - 1, -1, -1):
             lhs_s = lhs[len(lhs) - 1 - i] if i < len(lhs) else None
             rhs_s = rhs[len(rhs) - 1 - i] if i < len(rhs) else None
             if lhs_s is not None and rhs_s is not None:

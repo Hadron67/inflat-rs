@@ -401,16 +401,18 @@ class _FunctionCompiler:
         return self._compile_lvalue(cur, _RealSubscriptsInfo(tuple(v)))
 
     def _compile_unpack_subscripts(self, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
-        """
-            sizes are innermost-first, i.e. in the order produced by merge_shape
-        """
+        """Unpack the flat loop index into one subscript per axis.
+
+        ``sizes`` is the shape in natural axis order (outermost first, like
+        numpy's ``.shape``); the flat index iterates the innermost axis
+        fastest, so the unpacking starts from the last axis."""
         assert len(sizes) > 0
         ret: list[Value] = []
-        for size in sizes[:-1]:
+        for size in reversed(sizes[1:]):
             ret.append(self._block.rem(packed, size, False))
             packed = self._block.div(packed, size, False)
         ret.append(packed)
-        return tuple(ret[-1::-1])
+        return tuple(reversed(ret))
 
     def _compile_subscript_no_cache(self, strides: tuple[Value, ...], subscripts: tuple[Value, ...]) -> Value:
         assert len(subscripts) >= len(strides), f"incompatible subscripts {subscripts} and strides {strides}"
@@ -853,14 +855,9 @@ class CompiledWrapper:
 class TypedReductionExpr:
     def __init__(self, expr: Expr, ctx: TypeResolver) -> None:
         self.expr = expr
-        shape = ctx.get_shape(expr)
-        # get_shape returns shape elements in an order that depends on how many
-        # shape merges the expression underwent; normalize to the innermost-first
-        # convention used by _compile_unpack_subscripts
-        indices = [e.index for e in shape if isinstance(e, SymbolShape)]
-        if len(indices) > 0 and indices == sorted(indices):
-            shape = tuple(reversed(shape))
-        self.shape = shape
+        # get_shape returns the shape in natural axis order (outermost first,
+        # like numpy's ``.shape``); the loop unpacking consumes it as-is
+        self.shape = ctx.get_shape(expr)
 
     def total_size(self):
         return Times.make(self.shape).normalize()
