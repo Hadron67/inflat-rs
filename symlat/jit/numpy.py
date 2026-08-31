@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
+from numpy._typing import DTypeLike
 from typing_extensions import override
 
 from ..expr import (
@@ -169,7 +170,7 @@ class JitContext:
         """A random array with entries uniformly distributed in ``[0, 1)``."""
         return ArrayWrapper(self, ArrayNode(np.random.rand(*shape)))
 
-    def zeros(self, shape, dtype=float, order: Literal['C', 'F'] = 'C') -> 'ArrayWrapper':
+    def zeros(self, shape, dtype: DTypeLike = np.dtypes.Float64DType, order: Literal['C', 'F'] = 'C') -> 'ArrayWrapper':
         """A zero-filled array of the given shape; typically the destination of
         an assignment.  Follows ``numpy.zeros``'s calling convention."""
         return ArrayWrapper(self, ArrayNode(np.zeros(shape, dtype=dtype, order=order)))

@@ -1,5 +1,6 @@
 import ctypes
 from abc import abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, override
@@ -140,6 +141,112 @@ class StandardLayoutMode(Enum):
     NONE = "none"
     COLUMN_MAJOR = "column"
     ROW_MAJOR = "row"
+
+
+def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_layout: StandardLayoutMode) -> Callable:
+    """Generate the ``__invoke(self, values)`` function of a
+    :class:`CompiledWrapper`.
+
+    The function is specialised per kernel: the argument-count check, the
+    layout check, the shape validation and the per-symbol ctypes conversion are
+    unrolled into straight-line code, so a call reduces to plain indexing and
+    conversions instead of an interpreted loop."""
+    index_ctype = parent.index_type.to_ctype()
+    symbol_order = symbols.get_symbol_order()
+    arg_count = len(symbol_order)
+    pos_of = {symbol: i for i, symbol in enumerate(symbol_order)}
+
+    def shape_eval(expr: Expr) -> str:
+        """A Python expression evaluating ``expr`` against the ``values`` tuple
+        at call time, or ``None`` when the dimension cannot be evaluated."""
+        if isinstance(expr, SymbolShape):
+            pos = pos_of.get(expr.symbol)
+            if pos is None:
+                return 'None'
+            return (
+                f'values[{pos}].shape[{expr.index}]'
+                f' if isinstance(values[{pos}], np.ndarray)'
+                f' and 0 <= {expr.index} < values[{pos}].ndim else None'
+            )
+        if isinstance(expr, Int):
+            return str(expr.value)
+        return 'None'
+
+    globals: dict[str, Any] = {'np': np, 'ctypes': ctypes, '_INDEX': index_ctype}
+    lines: list[str] = ['def __invoke(self, values):']
+    lines += [
+        f'    if len(values) != {arg_count}:',
+        f"        raise TypeError(f\"the kernel expects {arg_count} positional argument(s), got {{len(values)}}\")",
+    ]
+    if standard_layout is not StandardLayoutMode.NONE:
+        flag = 'C_CONTIGUOUS' if standard_layout is StandardLayoutMode.ROW_MAJOR else 'F_CONTIGUOUS'
+        msg = (
+            f"the kernel was compiled for {standard_layout.value} layout but the array "
+            "arguments do not match; pass contiguous arrays of the expected layout or recompile "
+            "with standard_layout=StandardLayoutMode.NONE"
+        )
+        for i in range(arg_count):
+            lines += [
+                f'    if isinstance(values[{i}], np.ndarray) and not values[{i}].flags[{flag!r}]:',
+                f'        raise ValueError({msg!r})',
+            ]
+    type_cache = symbols.type_cache
+    for lhs, rhs in type_cache.resolved_shapes.items():
+        lines += [
+            f'    v = {shape_eval(rhs)}',
+            f'    s = {shape_eval(lhs)}',
+            '    if v != s:',
+            '        raise ValueError(f"resolved shape {v} does not match {s}")',
+        ]
+    for length, index in type_cache.slice_checks:
+        lines += [
+            f'    d = {shape_eval(length)}',
+            f'    if d is not None and not -d <= {index} < d:',
+            f'        raise IndexError(f"slice index {index} is out of bounds for a dimension of size {{d}}")',
+        ]
+    lines.append(f'    ret = [None] * {symbols.get_arg_count()}')
+    for i, symbol in enumerate(symbol_order):
+        info = symbols.get_symbol(symbol)
+        lower_ctype = symbols.type_cache.get_symbol_type(symbol).to_ctype()
+        lower_size = ctypes.sizeof(lower_ctype)
+        match info:
+            case ScalarArgInfo(slot, is_ref=True):
+                globals[f'_PTR{i}'] = ctypes.POINTER(lower_ctype)
+                lines += [
+                    f'    if isinstance(values[{i}], np.ndarray):',
+                    f'        ret[{slot}] = ctypes.cast(values[{i}].ctypes.data, _PTR{i})',
+                    '    else:',
+                    f'        ret[{slot}] = ctypes.pointer(values[{i}])',
+                ]
+            case ScalarArgInfo(slot, is_ref=False):
+                globals[f'_CTYPE{i}'] = lower_ctype
+                lines += [
+                    f'    if isinstance(values[{i}], ctypes._SimpleCData):',
+                    f'        ret[{slot}] = _CTYPE{i}(values[{i}].value)',
+                    '    else:',
+                    f'        ret[{slot}] = _CTYPE{i}(values[{i}])',
+                ]
+            case ArrayArgInfo(ptr, shape_slots, stride_slots):
+                globals[f'_PTR{i}'] = ctypes.POINTER(lower_ctype)
+                globals[f'_SIZE{i}'] = lower_size
+                lines += [
+                    f'    ret[{ptr}] = ctypes.cast(values[{i}].ctypes.data, _PTR{i})',
+                    f'    assert len(values[{i}].shape) == {len(shape_slots)}',
+                    f'    assert len(values[{i}].strides) == {len(stride_slots)}',
+                ]
+                for j, slot in enumerate(shape_slots):
+                    lines.append(f'    ret[{slot}] = _INDEX(values[{i}].shape[{j}])')
+                for j, slot in enumerate(stride_slots):
+                    lines += [
+                        f'    assert values[{i}].strides[{j}] % _SIZE{i} == 0',
+                        f'    ret[{slot}] = _INDEX(values[{i}].strides[{j}] // _SIZE{i})',
+                    ]
+    lines += [
+        '    assert None not in ret',
+        '    return self._inner.call(*ret)',
+    ]
+    exec('\n'.join(lines), globals)  # noqa: S102
+    return globals['__invoke']
 
 class _SymbolScope:
     def __init__(self, type_cache: TypeResolver) -> None:
@@ -804,106 +911,12 @@ class CompiledWrapper:
         self._symbols = symbols
         self._inner = inner
         self.standard_layout = standard_layout
-
-    def _check_layout(self, values) -> bool:
-        """Verify that every array argument matches the layout the kernel was compiled for."""
-        flag = 'C_CONTIGUOUS' if self.standard_layout is StandardLayoutMode.ROW_MAJOR else 'F_CONTIGUOUS'
-        for value in values:
-            if isinstance(value, np.ndarray) and not value.flags[flag]:
-                return False
-        return True
-
-    def _validate_shapes(self, values: tuple[Any, ...]) -> None:
-        """Verify the shape constraints recorded at compile time against the
-        concrete arguments.
-
-        :attr:`TypeResolver.resolved_shapes` records every pair of dimensions
-        that broadcasting requires to be equal, and
-        :attr:`TypeResolver.slice_checks` records every slice index that must
-        fall inside its axis.  Both are evaluated with the concrete array shapes
-        and raise ``ValueError``/``IndexError`` when violated.  A check is
-        skipped when its dimension cannot be evaluated (e.g. it is not a plain
-        array dimension).
-        """
-        type_cache = self._symbols.type_cache
-        value_of = dict(zip(self._symbols.get_symbol_order(), values))
-
-        def concrete(expr: Expr) -> int | None:
-            if isinstance(expr, SymbolShape):
-                value = value_of.get(expr.symbol)
-                if isinstance(value, np.ndarray) and 0 <= expr.index < value.ndim:
-                    return int(value.shape[expr.index])
-                return None
-            if isinstance(expr, Int):
-                return expr.value
-            return None
-
-        for symbol_shape, value in type_cache.resolved_shapes.items():
-            value = concrete(value)
-            symbol_shape = concrete(symbol_shape)
-            if value != symbol_shape:
-                raise ValueError(f"resolved shape {value} does not match {symbol_shape}")
-
-        for length, index in type_cache.slice_checks:
-            dim = concrete(length)
-            if dim is not None and not -dim <= index < dim:
-                raise IndexError(
-                    f"slice index {index} is out of bounds for a dimension of size {dim}"
-                )
+        self._invoke = _gen_call_invoke(symbols, parent, standard_layout)
 
     def call(self, *values: Any) -> Any:
         """Call the compiled kernel with the arguments in the order of the symbols
         passed to ``compile_assignments``/``compile_reduction``."""
-        arg_count = len(self._symbols.get_symbol_order())
-        if len(values) != arg_count:
-            raise TypeError(
-                f"the kernel expects {arg_count} positional argument(s), got {len(values)}"
-            )
-        if self.standard_layout is not StandardLayoutMode.NONE and not self._check_layout(values):
-            raise ValueError(
-                f"the kernel was compiled for {self.standard_layout.value} layout but the array "
-                "arguments do not match; pass contiguous arrays of the expected layout or recompile "
-                "with standard_layout=StandardLayoutMode.NONE"
-            )
-        self._validate_shapes(values)
-        index_type = self._parent.index_type.to_ctype()
-        converted_args: list[ctypes._CDataType | None] = [None for _ in range(self._symbols.get_arg_count())]
-        for symbol, value in zip(self._symbols.get_symbol_order(), values):
-            info = self._symbols.get_symbol(symbol)
-            lower_type = self._symbols.type_cache.get_symbol_type(symbol)
-            lower_type_ctype = lower_type.to_ctype()
-            lower_type_size = ctypes.sizeof(lower_type_ctype)
-            match info:
-                case ScalarArgInfo(is_ref=True):
-                    # pass the address of the scalar: 0-d numpy arrays and ctypes
-                    # scalars expose a stable, writable memory location
-                    ptr_type = ctypes.POINTER(lower_type_ctype)
-                    if isinstance(value, np.ndarray):
-                        converted_args[info.value] = ctypes.cast(value.ctypes.data, ptr_type)
-                    else:
-                        converted_args[info.value] = ctypes.pointer(value)
-                case ScalarArgInfo():
-                    if isinstance(value, ctypes._SimpleCData):
-                        # a demoted reference scalar arrives as a ctypes instance;
-                        # unwrap it to its Python value before converting
-                        value = value.value
-                    converted_args[info.value] = lower_type_ctype(value)
-                case ArrayArgInfo():
-                    value_shape = value.shape
-                    ptr_type = ctypes.POINTER(lower_type_ctype)
-                    # np.ndarray
-                    value_strides = value.strides
-                    converted_args[info.ptr] = ctypes.cast(value.ctypes.data, ptr_type)
-                    assert len(value_shape) == len(info.strides)
-                    assert len(value_strides) == len(info.strides)
-                    for index, shape in zip(info.shape, value_shape):
-                        converted_args[index] = index_type(shape)
-                    for index, stride in zip(info.strides, value_strides):
-                        assert stride % lower_type_size == 0
-                        converted_args[index] = index_type(stride // lower_type_size)
-        for a in converted_args:
-            assert a is not None
-        return self._inner.call(*converted_args) # type: ignore
+        return self._invoke(self, values)
 
     @override
     def __str__(self) -> str:
