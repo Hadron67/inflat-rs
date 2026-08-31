@@ -328,12 +328,17 @@ class _FunctionCompiler:
             False,
         )
 
-    def _flat_array_index(self, sym: ArrayArgInfo, subscripts: _StandardLayoutSubscriptInfo) -> Value:
+    def _flat_array_index(self, symbol: Symbol, subscripts: _StandardLayoutSubscriptInfo) -> Value:
         """Compute the linear index of an array in standard layout mode: the flat
         subscript plus, for every sliced axis, the (normalized) slice index times the
         stride of that axis."""
+        sym = self._symbol_scope.get_symbol(symbol)
+        assert isinstance(sym, ArrayArgInfo)
         index = subscripts.subscript
         for axis, raw_index in subscripts.shifts.items():
+            # record the bounds check; it is verified against the concrete
+            # dimension at call time
+            self._type_cache.slice_checks.append((SymbolShape(symbol, axis), raw_index))
             length = self._args[sym.shape[axis]]
             idx = self._normalize_slice_index(length, raw_index)
             stride = self._args[sym.strides[axis]]
@@ -356,6 +361,9 @@ class _FunctionCompiler:
             if axis < 0 or axis >= dim:
                 raise IndexError(f"slice axis {axis} is out of bounds for {cur}")
             length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
+            # record the bounds check; it is verified against the concrete
+            # dimension at call time
+            self._type_cache.slice_checks.append((cur_shape[axis], index))
             entries.append((axis, self._normalize_slice_index(length, index)))
         if dim == r:
             # the loop covers every axis of the sliced expression: keep the loop
@@ -394,6 +402,9 @@ class _FunctionCompiler:
             if axis < 0 or axis >= dim:
                 raise IndexError(f"slice axis {axis} is out of bounds for {cur}")
             length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
+            # record the bounds check; it is verified against the concrete
+            # dimension at call time
+            self._type_cache.slice_checks.append((cur_shape[axis], index))
             value_at[axis] = self._normalize_slice_index(length, index)
         for j, axis in enumerate(surviving):
             value_at[axis] = subscripts.subscripts[j]
@@ -493,7 +504,7 @@ class _FunctionCompiler:
                             case _StandardLayoutSubscriptInfo():
                                 # standard layout: the loop variable is the linear array index
                                 ret = self._block.load(
-                                    self._block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(sym, subscripts))
+                                    self._block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(expr, subscripts))
                                 )
                     case _:
                         raise NotImplementedError
@@ -590,7 +601,12 @@ class _FunctionCompiler:
                         # record the fixed axes and recurse; the offset is applied
                         # at the array access using the base array's strides
                         new_shifts = dict(shifts)
+                        rank = len(self._type_cache.get_shape(expr.expr))
                         for axis, index in expr.axes:
+                            if axis < 0 or axis >= rank:
+                                raise IndexError(
+                                    f"slice axis {axis} is out of bounds for {expr.expr}"
+                                )
                             new_shifts[axis] = index
                         return self.compile_expr(
                             expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
@@ -676,14 +692,19 @@ class _FunctionCompiler:
                             case _RealSubscriptsInfo(s):
                                 return self._compile_array_symbol_access(sym, s), lower_type
                             case _StandardLayoutSubscriptInfo():
-                                return self._block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(sym, subscripts)), lower_type
+                                return self._block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(expr, subscripts)), lower_type
             case Slice():
                 match subscripts:
                     case _StandardLayoutSubscriptInfo(mode, subscript, shifts):
                         # record the fixed axes and recurse; the offset is applied
                         # at the array access using the base array's strides
                         new_shifts = dict(shifts)
+                        rank = len(self._type_cache.get_shape(expr.expr))
                         for axis, index in expr.axes:
+                            if axis < 0 or axis >= rank:
+                                raise IndexError(
+                                    f"slice axis {axis} is out of bounds for {expr.expr}"
+                                )
                             new_shifts[axis] = index
                         return self._compile_lvalue(
                             expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
@@ -792,6 +813,44 @@ class CompiledWrapper:
                 return False
         return True
 
+    def _validate_shapes(self, values: tuple[Any, ...]) -> None:
+        """Verify the shape constraints recorded at compile time against the
+        concrete arguments.
+
+        :attr:`TypeResolver.resolved_shapes` records every pair of dimensions
+        that broadcasting requires to be equal, and
+        :attr:`TypeResolver.slice_checks` records every slice index that must
+        fall inside its axis.  Both are evaluated with the concrete array shapes
+        and raise ``ValueError``/``IndexError`` when violated.  A check is
+        skipped when its dimension cannot be evaluated (e.g. it is not a plain
+        array dimension).
+        """
+        type_cache = self._symbols.type_cache
+        value_of = dict(zip(self._symbols.get_symbol_order(), values))
+
+        def concrete(expr: Expr) -> int | None:
+            if isinstance(expr, SymbolShape):
+                value = value_of.get(expr.symbol)
+                if isinstance(value, np.ndarray) and 0 <= expr.index < value.ndim:
+                    return int(value.shape[expr.index])
+                return None
+            if isinstance(expr, Int):
+                return expr.value
+            return None
+
+        for symbol_shape, value in type_cache.resolved_shapes.items():
+            value = concrete(value)
+            symbol_shape = concrete(symbol_shape)
+            if value != symbol_shape:
+                raise ValueError(f"resolved shape {value} does not match {symbol_shape}")
+
+        for length, index in type_cache.slice_checks:
+            dim = concrete(length)
+            if dim is not None and not -dim <= index < dim:
+                raise IndexError(
+                    f"slice index {index} is out of bounds for a dimension of size {dim}"
+                )
+
     def call(self, *values: Any) -> Any:
         """Call the compiled kernel with the arguments in the order of the symbols
         passed to ``compile_assignments``/``compile_reduction``."""
@@ -806,6 +865,7 @@ class CompiledWrapper:
                 "arguments do not match; pass contiguous arrays of the expected layout or recompile "
                 "with standard_layout=StandardLayoutMode.NONE"
             )
+        self._validate_shapes(values)
         index_type = self._parent.index_type.to_ctype()
         converted_args: list[ctypes._CDataType | None] = [None for _ in range(self._symbols.get_arg_count())]
         for symbol, value in zip(self._symbols.get_symbol_order(), values):

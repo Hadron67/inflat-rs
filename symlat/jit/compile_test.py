@@ -521,8 +521,8 @@ class SimdLayoutTests(TestCase):
             [AssignExpr(a, Slice(Slice(b5, ((2, 3),)), ((1, 2),)), '+')],
         )
         a5 = np.zeros((2, 4))
-        b50 = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5).astype(float)
+        b50 = np.arange(2 * 3 * 4 * 4).reshape(2, 3, 4, 4).astype(float)
         fn5.call(a5, b50)
-        assert_almost_equal(a5, b50[:, 2, 3][:, :4])
+        assert_almost_equal(a5, b50[:, 2, 3])
 
 all_tests = [TestExpr, JitTest, SimdLayoutTests]

@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 from typing_extensions import override
 
-from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times, _nth_axis
+from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times
 from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .type import LowerType, SymbolTypeDesc
@@ -64,66 +64,6 @@ def _substitute_array_nodes(expr: Expr, symbols: dict['ArrayNode', Symbol]) -> E
             return symbols[e]
         return e
     return expr.map(subst)
-
-
-def _merged_loop_shape(expr: Expr) -> tuple[int, ...]:
-    """The merged (broadcast) shape of every array leaf of ``expr``, in natural
-    axis order -- the shape a reduction over ``expr`` iterates.
-
-    Slice indices are validated along the way, and the leaves must be mutually
-    broadcastable (numpy-style size-1 broadcasting is not supported);
-    mismatches raise ``ValueError``.  The per-leaf check mirrors the assignment
-    path: a sliced array whose base has the loop's rank keeps its surviving axes
-    at their own positions, otherwise they are trailing-aligned with the loop.
-    """
-    merged: list[int] = []  # trailing-first accumulation
-    leaves: list[tuple[np.ndarray, list[int]]] = []
-    todo = [(expr, [])]
-    while todo:
-        e, chain = todo.pop()
-        if isinstance(e, Slice):
-            todo.append((e.expr, chain + [e]))
-        elif isinstance(e, ArrayNode):
-            arr = e.arr
-            fixed: set[int] = set()
-            for slice_node in reversed(chain):
-                for k, index in slice_node.axes:
-                    axis = _nth_axis(k, fixed)
-                    if axis >= arr.ndim:
-                        raise TypeError(f"slice axis {axis} is out of bounds")
-                    dim = arr.shape[axis]
-                    if index < -dim or index >= dim:
-                        raise IndexError(
-                            f"index {index} is out of bounds for axis {axis} of size {dim}"
-                        )
-                    fixed.add(axis)
-            rem = [i for i in range(arr.ndim) if i not in fixed]
-            for j, d in enumerate(arr.shape[ax] for ax in reversed(rem)):
-                if j < len(merged):
-                    if merged[j] != d:
-                        raise ValueError(
-                            f"cannot broadcast shape {arr.shape} with the other "
-                            "summands of the reduction"
-                        )
-                else:
-                    merged.append(d)
-            leaves.append((arr, rem))
-        else:
-            todo.extend((c, chain) for c in e.subexpressions())
-    loop_shape = tuple(reversed(merged))
-    rank = len(loop_shape)
-    for arr, rem in leaves:
-        if len(rem) > rank:
-            raise ValueError(
-                f"cannot broadcast shape {arr.shape} into a reduction of shape {loop_shape}"
-            )
-        offset = 0 if arr.ndim == rank else rank - len(rem)
-        for j, ax in enumerate(rem):
-            if arr.shape[ax] != loop_shape[offset + j]:
-                raise ValueError(
-                    f"cannot broadcast shape {arr.shape} into a reduction of shape {loop_shape}"
-                )
-    return loop_shape
 
 
 def _determine_layout(values) -> StandardLayoutMode:
@@ -214,64 +154,8 @@ class JitContext:
         else:
             dest_sym = Symbol(('@dest',))
             symbols[base] = dest_sym
-        # the kernel iterates the destination's (sliced) shape: compute it and
-        # validate the LHS slice indices (the axes of a slice are directly
-        # relative to its expression)
-        if isinstance(lhs, Slice):
-            fixed: set[int] = set()
-            for axis, index in lhs.axes:
-                if axis < 0 or axis >= base_arr.ndim:
-                    raise TypeError(f"slice axis {axis} is out of bounds")
-                dim = base_arr.shape[axis]
-                if index < -dim or index >= dim:
-                    raise IndexError(
-                        f"index {index} is out of bounds for axis {axis} of size {dim}"
-                    )
-                fixed.add(axis)
-            dest_shape = tuple(s for i, s in enumerate(base_arr.shape) if i not in fixed)
-        else:
-            dest_shape = base_arr.shape
-        # every input must read within the loop bounds: slice indices are
-        # checked, and the surviving axes must equal the destination axis they
-        # align to (numpy-style size-1 broadcasting is not supported)
-        todo = [(rhs, [])]
-        while todo:
-            expr, chain = todo.pop()
-            if isinstance(expr, Slice):
-                todo.append((expr.expr, chain + [expr]))
-            elif isinstance(expr, ArrayNode):
-                arr = expr.arr
-                # map the axes of the enclosing slices to the node's numbering:
-                # the axes of an outer slice are relative to the axes that
-                # survive the inner slices
-                fixed_axes: set[int] = set()
-                for slice_node in reversed(chain):
-                    for k, index in slice_node.axes:
-                        axis = _nth_axis(k, fixed_axes)
-                        if axis >= arr.ndim:
-                            raise TypeError(f"slice axis {axis} is out of bounds")
-                        dim = arr.shape[axis]
-                        if index < -dim or index >= dim:
-                            raise IndexError(
-                                f"index {index} is out of bounds for axis {axis} of size {dim}"
-                            )
-                        fixed_axes.add(axis)
-                rem = [i for i in range(arr.ndim) if i not in fixed_axes]
-                if len(rem) > len(dest_shape):
-                    raise ValueError(
-                        f"cannot broadcast shape {arr.shape} into destination shape {dest_shape}"
-                    )
-                # a sliced expression whose base has the loop's rank is read at
-                # its surviving axes positionally; otherwise (broadcasting) its
-                # surviving axes are trailing-aligned with the loop
-                offset = 0 if arr.ndim == len(dest_shape) else len(dest_shape) - len(rem)
-                for j, ax in enumerate(rem):
-                    if arr.shape[ax] != dest_shape[offset + j]:
-                        raise ValueError(
-                            f"cannot broadcast shape {arr.shape} into destination shape {dest_shape}"
-                        )
-            else:
-                todo.extend((c, chain) for c in expr.subexpressions())
+        # slice axis/index bounds and broadcasting compatibility are validated
+        # by the compiled kernel at call time (see ``CompiledWrapper.call``)
         input_args = [
             (symbols[node], SymbolTypeDesc(LowerType.from_numpy_dtype(str(node.arr.dtype)), node.arr.ndim))
             for node in inputs
@@ -315,9 +199,8 @@ class JitContext:
             raise TypeError(f"unsupported np.sum argument(s): {unsupported}")
         expr = _as_expr(array)
         inputs = _collect_array_nodes(expr)
-        # validate slice indices and broadcasting compatibility; the compiler
-        # derives the loop shape itself from the symbol dimensions
-        _merged_loop_shape(expr)
+        # slice index bounds and broadcasting compatibility are validated by the
+        # compiled kernel at call time (see ``CompiledWrapper.call``)
         symbols = {node: Symbol(('@array', str(i))) for i, node in enumerate(inputs)}
         reduction = _substitute_array_nodes(expr, symbols).normalize()
         layout = _determine_layout([node.arr for node in inputs])
