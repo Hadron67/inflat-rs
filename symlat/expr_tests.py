@@ -4,6 +4,7 @@ from .expr import (
     Complex,
     Cos,
     Exp,
+    Expr,
     Float,
     Int,
     Ln,
@@ -378,6 +379,58 @@ class ComplexExpressionNormalizationTests(TestCase):
         # applications of numeric functions take part in like-term collection
         self.assertEqual((Sin(x) + Sin(x)).normalize(), Times((Int(2), Sin(x))))
 
+class MapReplaceTests(TestCase):
+    """Deep ``Expr.map``/``Expr.replace`` semantics."""
+
+    @staticmethod
+    def _count_nodes(expr):
+        todo = [expr]
+        n = 0
+        while todo:
+            e = todo.pop()
+            n += 1
+            todo.extend(e.subexpressions())
+        return n
+
+    def test_map_reaches_nested_leaves(self):
+        a, b, c = symbols('a', 'b', 'c')
+        expr = (a + 2) * b - c
+        visits: list[Expr] = []
+
+        def op(e):
+            visits.append(e)
+            if isinstance(e, Symbol):
+                return Symbol(('mapped',) + e.fully_qualified_name)
+            return e
+
+        mapped = expr.map(op)
+        # every symbol, at any depth, was replaced
+        todo = [mapped]
+        leaves: list[Symbol] = []
+        while todo:
+            e = todo.pop()
+            if isinstance(e, Symbol):
+                leaves.append(e)
+            else:
+                todo.extend(e.subexpressions())
+        self.assertEqual(
+            {l.fully_qualified_name for l in leaves},
+            {('mapped', 'a'), ('mapped', 'b'), ('mapped', 'c')},
+        )
+        # op was applied to every node of the tree, exactly once
+        self.assertEqual(len(visits), self._count_nodes(expr))
+        self.assertEqual(len(visits), len(set(map(id, visits))))
+
+    def test_identity_map_preserves_the_tree(self):
+        expr = ((x + y) * 2) / z
+        self.assertEqual(expr.map(lambda e: e), expr)
+
+    def test_replace_is_deep(self):
+        a, b, c = symbols('a', 'b', 'c')
+        expr = (a + b) * a - c
+        pairs: list[tuple[Expr, Expr]] = [(a, c)]
+        self.assertEqual(expr.replace(dict(pairs)), (c + b) * c - c)
+
 all_tests = [
     ConstantEvaluationTests,
     PlusEvaluationTests,
@@ -387,4 +440,5 @@ all_tests = [
     MixedArithmeticTests,
     ExpressionFormTests,
     ComplexExpressionNormalizationTests,
+    MapReplaceTests,
 ]

@@ -36,6 +36,12 @@ class Expr:
 
 
     def map(self, op: 'Callable[[Expr], Expr]') -> 'Expr':
+        """Apply ``op`` to every node of the expression, bottom-up, and rebuild the
+        tree.
+
+        Composite nodes are rebuilt from their mapped children and then passed to
+        ``op`` themselves; leaves are replaced by ``op`` directly, so ``op`` is
+        applied exactly once to every node of the tree."""
         return op(self)
 
     def replace(self, replacements: 'dict[Expr, Expr]') -> 'Expr':

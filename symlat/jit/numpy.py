@@ -49,32 +49,17 @@ def _collect_array_nodes(expr: Expr) -> list['ArrayNode']:
     return ret
 
 
-def _contains_array(expr: Expr) -> bool:
-    """Whether the expression subtree contains an :class:`ArrayNode` leaf."""
-    todo = [expr]
-    while todo:
-        e = todo.pop()
-        if isinstance(e, ArrayNode):
-            return True
-        todo.extend(e.subexpressions())
-    return False
-
-
 def _substitute_array_nodes(expr: Expr) -> Expr:
-    """Replace every :class:`ArrayNode` leaf with its kernel symbol, recursively.
+    """Replace every :class:`ArrayNode` leaf with its kernel symbol.
 
-    ``Expr.map`` only applies its operator to the direct children of a node, so
-    the substitution descends by mapping any node whose subtree still contains an
-    ``ArrayNode``; a node without one is a leaf of the substitution and is
-    returned as-is.
+    ``Expr.map`` applies its operator to every node of the tree, so a single map
+    pass reaches the ``ArrayNode`` leaves at any depth.
     """
     def subst(e: Expr) -> Expr:
         if isinstance(e, ArrayNode):
             return e.sym
-        if _contains_array(e):
-            return e.map(subst)
         return e
-    return expr.map(subst) if _contains_array(expr) else expr
+    return expr.map(subst)
 
 
 def _determine_layout(values) -> StandardLayoutMode:

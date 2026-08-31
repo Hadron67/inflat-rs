@@ -143,7 +143,9 @@ class SubExprFnBuilder:
 
     def _process_map(self, op: str, var_name: str, type: type) -> str:
         if self._check_type(type):
-            return f"{op}({var_name})"
+            # recurse into the child's own map so that ``op`` reaches every node
+            # of the tree (deep substitution)
+            return f"{var_name}.map({op})"
         head = get_origin(type)
         args = get_args(type)
         if head is list or head is tuple and args[1] is Ellipsis:
