@@ -220,10 +220,8 @@ class _Probe:
                 fixed.append((axis, int(k)))
                 continue
             raise TypeError(f"unsupported slice index {k!r}")
-        # fix the highest axis first (innermost), so that lower axes stay valid
-        # after the higher ones have been removed
-        for axis, index in reversed(fixed):
-            expr = Slice(expr, axis, index)
+        if len(fixed) > 0:
+            expr = Slice(expr, tuple(fixed))
         return self._new(expr)
 
     # --- numpy functions (np.roll, np.sum, ...) --------------------------
@@ -262,10 +260,7 @@ class _Probe:
         shifts = shift if isinstance(shift, (tuple, list)) else (shift,) * len(axes)
         if len(axes) != len(shifts):
             raise TypeError("np.roll shift and axis must have the same length")
-        expr = array._expr
-        for ax, sh in zip(axes, shifts):
-            expr = Roll(expr, int(ax), int(sh))
-        return self._new(expr)
+        return self._new(Roll(array._expr, tuple((int(ax), int(sh)) for ax, sh in zip(axes, shifts))))
 
     def _np_flip(self, array, axis=None):
         if not isinstance(array, _Probe):

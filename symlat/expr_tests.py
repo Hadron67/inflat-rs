@@ -246,8 +246,8 @@ class ExpressionFormTests(TestCase):
         self.assertEqual(Cos(S(0)).normalize(), Cos(Int(0)))
         self.assertEqual(Ln(x).normalize(), Ln(x))
         self.assertEqual(Exp(x).normalize(), Exp(x))
-        self.assertEqual(Roll(x, 0, 1).normalize(), Roll(x, 0, 1))
-        self.assertEqual(Slice(x, 0, 2).normalize(), Slice(x, 0, 2))
+        self.assertEqual(Roll(x, ((0, 1),)).normalize(), Roll(x, ((0, 1),)))
+        self.assertEqual(Slice(x, ((0, 2),)).normalize(), Slice(x, ((0, 2),)))
 
     def test_symbols_are_distinct_by_name(self):
         a, b = symbols('a', 'b')
@@ -431,6 +431,35 @@ class MapReplaceTests(TestCase):
         pairs: list[tuple[Expr, Expr]] = [(a, c)]
         self.assertEqual(expr.replace(dict(pairs)), (c + b) * c - c)
 
+class IndexingNormalizeTests(TestCase):
+    """Normalization of ``Roll`` and ``Slice`` expressions."""
+
+    def test_axes_are_sorted(self):
+        self.assertEqual(Slice(x, ((1, 2), (0, 3))).normalize(), Slice(x, ((0, 3), (1, 2))))
+        self.assertEqual(Roll(x, ((1, 2), (0, 3))).normalize(), Roll(x, ((0, 3), (1, 2))))
+
+    def test_roll_merges_amounts_per_axis(self):
+        self.assertEqual(
+            Roll(Roll(x, ((0, 1), (1, 2))), ((0, 3),)).normalize(),
+            Roll(x, ((0, 4), (1, 2))),
+        )
+        # rolling by zero cancels
+        self.assertEqual(Roll(Roll(x, ((0, 1),)), ((0, -1),)).normalize(), x)
+        self.assertEqual(Roll(Roll(x, 3), 4).normalize(), Roll(x, 7))
+        self.assertEqual(Roll(Roll(x, 3), -3).normalize(), x)
+
+    def test_slice_merges_nested_axes(self):
+        # the outer axes are relative to the inner slice, i.e. to the axes of
+        # the base expression that survive it
+        self.assertEqual(
+            Slice(Slice(x, ((0, 1),)), ((0, 2),)).normalize(),
+            Slice(x, ((0, 1), (1, 2))),
+        )
+        self.assertEqual(
+            Slice(Slice(x, ((1, 3),)), ((0, 4),)).normalize(),
+            Slice(x, ((0, 4), (1, 3))),
+        )
+
 all_tests = [
     ConstantEvaluationTests,
     PlusEvaluationTests,
@@ -441,4 +470,5 @@ all_tests = [
     ExpressionFormTests,
     ComplexExpressionNormalizationTests,
     MapReplaceTests,
+    IndexingNormalizeTests,
 ]

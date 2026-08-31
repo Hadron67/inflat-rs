@@ -341,44 +341,32 @@ class _FunctionCompiler:
         return index
 
     def _compile_slice_chain(self, expr: Slice, subscripts: _RealSubscriptsInfo) -> MaybeComplexValue:
-        """Compile a slice chain by building the subscript vector of the sliced
-        expression directly and compiling the sliced expression with it, so compound
-        bases like ``np.sin(b)[2]`` work.  Unlike the positional substitution, this
-        also works when the sliced expression has a different rank than the loop,
-        e.g. ``a += b[1]`` with a one-dimensional ``a``."""
-        nodes: list[Slice] = []
-        cur = expr
-        while isinstance(cur, Slice):
-            nodes.append(cur)
-            cur = cur.expr
+        """Compile a sliced expression with the loop subscripts: fix the sliced
+        axes at their indices and address the base expression.
+
+        The axes of a ``Slice`` are directly relative to its expression, so a
+        nested slice (e.g. ``np.sin(b)[2]``) recurses through
+        :meth:`compile_expr` with its own axes."""
+        cur = expr.expr
         cur_shape = self._type_cache.get_shape(cur)
         dim = len(cur_shape)
-        # the axis attribute of a slice is relative to the expression it wraps, so
-        # map each node to the axis of the sliced expression it fixes, innermost
-        # first
-        remaining = list(range(dim))
-        node_axes: list[int] = []
-        for node in reversed(nodes):
-            if node.axis < 0 or node.axis >= len(remaining):
-                raise TypeError(f"slice axis {node.axis} is out of bounds for {cur}")
-            node_axes.append(remaining[node.axis])
-            del remaining[node.axis]
-        node_axes.reverse()
         r = len(subscripts.subscripts)
         entries: list[tuple[int, Value]] = []
-        for node, axis in zip(nodes, node_axes):
+        for axis, index in expr.axes:
+            if axis < 0 or axis >= dim:
+                raise IndexError(f"slice axis {axis} is out of bounds for {cur}")
             length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
-            entries.append((axis, self._normalize_slice_index(length, node.index)))
+            entries.append((axis, self._normalize_slice_index(length, index)))
         if dim == r:
-            # the loop covers every axis of the sliced expression: replace the value
-            # at the fixed axes
+            # the loop covers every axis of the sliced expression: keep the loop
+            # subscripts and replace the value at the fixed axes
             v: list[Value] = list(subscripts.subscripts)
             for axis, index in entries:
                 v[axis] = index
             return self.compile_expr(cur, _RealSubscriptsInfo(tuple(v)))
-        # the loop does not cover every axis: the sliced expression is broadcast, so
-        # the surviving axes (ascending) receive the trailing-aligned loop subscripts
-        # and the fixed axes receive their indices
+        # the loop does not cover every axis: the sliced expression is broadcast,
+        # so the surviving axes (ascending) receive the trailing-aligned loop
+        # subscripts and the fixed axes receive their indices
         fixed = {axis for axis, _ in entries}
         surviving = [axis for axis in range(dim) if axis not in fixed]
         r_rhs = len(surviving)
@@ -389,30 +377,25 @@ class _FunctionCompiler:
         return self.compile_expr(cur, _RealSubscriptsInfo(tuple(v)))
 
     def _compile_slice_lvalue(self, expr: Slice, subscripts: _RealSubscriptsInfo) -> tuple[Value, LowerType]:
-        """Compile the lvalue of a slice chain, e.g. ``a[0]`` or ``a[:, 3]``.
+        """Compile the lvalue of a slice expression, e.g. ``a[0]`` or ``a[:, 3]``.
 
-        Every slice node fixes one axis of the base expression at its index; the
-        surviving axes receive the loop subscripts in order, since the loop
-        iterates exactly the sliced shape."""
-        nodes: list[Slice] = []
-        cur = expr
-        while isinstance(cur, Slice):
-            nodes.append(cur)
-            cur = cur.expr
+        Every fixed axis is addressed at its index; the surviving axes receive
+        the loop subscripts in order, since the loop iterates exactly the sliced
+        shape."""
+        cur = expr.expr
         cur_shape = self._type_cache.get_shape(cur)
         dim = len(cur_shape)
-        remaining = list(range(dim))
-        value_at: dict[int, Value] = {}
-        for node in reversed(nodes):
-            if node.axis < 0 or node.axis >= len(remaining):
-                raise TypeError(f"slice axis {node.axis} is out of bounds for {cur}")
-            axis = remaining[node.axis]
-            del remaining[node.axis]
-            length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
-            value_at[axis] = self._normalize_slice_index(length, node.index)
-        if len(subscripts.subscripts) != len(remaining):
+        fixed = {axis for axis, _ in expr.axes}
+        surviving = [axis for axis in range(dim) if axis not in fixed]
+        if len(subscripts.subscripts) != len(surviving):
             raise TypeError("slice assignment loop rank does not match the sliced expression")
-        for j, axis in enumerate(remaining):
+        value_at: dict[int, Value] = {}
+        for axis, index in expr.axes:
+            if axis < 0 or axis >= dim:
+                raise IndexError(f"slice axis {axis} is out of bounds for {cur}")
+            length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
+            value_at[axis] = self._normalize_slice_index(length, index)
+        for j, axis in enumerate(surviving):
             value_at[axis] = subscripts.subscripts[j]
         v = [value_at[axis] for axis in range(dim)]
         return self._compile_lvalue(cur, _RealSubscriptsInfo(tuple(v)))
@@ -534,28 +517,43 @@ class _FunctionCompiler:
                 assert isinstance(subscripts, _RealSubscriptsInfo), "cannot compile Roll in standard layout mode"
                 expr_shape = self._type_cache.get_shape(expr.expr)
                 assert expr_shape is not None, "cannot compile unspecified shape"
-                length = self.compile_non_complex_expr(expr_shape[expr.axis], _RealSubscriptsInfo(()))
-                length_type = self._type_cache.get_type(expr_shape[expr.axis])
-                assert isinstance(length_type, ap.IntType), "length must be an integer"
-                # new index = (subscript - amount) mod length; add enough multiples
-                # of the length so that the unsigned remainder is well-defined
-                amount = expr.amount
-                abs_amount = IntValue(abs(amount), h.llvm_index_type)
-                # ceil(abs_amount / length)
-                multiples = self._block.div(
-                    self._block.add(abs_amount, self._block.sub(length, IntValue(1, h.llvm_index_type))),
-                    length,
-                    False,
-                )
-                new_index = self._block.add(
-                    self._block.add(subscripts.subscripts[expr.axis], IntValue(-amount, h.llvm_index_type)),
-                    self._block.mul(multiples, length),
-                )
-                new_index = self._block.rem(new_index, length, False)
-                new_subscripts = _RealSubscriptsInfo(
-                    subscripts.subscripts[:expr.axis] + (new_index,) + subscripts.subscripts[expr.axis + 1:]
-                )
-                return self.compile_expr(expr.expr, new_subscripts)
+                axes = expr.axes
+                if isinstance(axes, int):
+                    # rolling every axis by the same amount: the rank is only
+                    # known here
+                    axes = tuple((i, axes) for i in range(len(expr_shape)))
+                # the rolled expression may have a lower rank than the loop
+                # (broadcasting); its axes are trailing-aligned with the loop
+                # subscripts, like array access
+                sub = subscripts.subscripts
+                for axis, amount in axes:
+                    if axis < 0:
+                        axis += len(expr_shape)
+                    subscript_index = len(sub) - len(expr_shape) + axis
+                    if subscript_index < 0 or subscript_index >= len(sub):
+                        raise IndexError(
+                            f"np.roll axis {axis} is out of bounds for the loop"
+                        )
+                    length = self.compile_non_complex_expr(expr_shape[axis], _RealSubscriptsInfo(()))
+                    length_type = self._type_cache.get_type(expr_shape[axis])
+                    assert isinstance(length_type, ap.IntType), "length must be an integer"
+                    # new index = (subscript - amount) mod length; add enough
+                    # multiples of the length so that the unsigned remainder is
+                    # well-defined
+                    abs_amount = IntValue(abs(amount), h.llvm_index_type)
+                    # ceil(abs_amount / length)
+                    multiples = self._block.div(
+                        self._block.add(abs_amount, self._block.sub(length, IntValue(1, h.llvm_index_type))),
+                        length,
+                        False,
+                    )
+                    new_index = self._block.add(
+                        self._block.add(sub[subscript_index], IntValue(-amount, h.llvm_index_type)),
+                        self._block.mul(multiples, length),
+                    )
+                    new_index = self._block.rem(new_index, length, False)
+                    sub = sub[:subscript_index] + (new_index,) + sub[subscript_index + 1:]
+                return self.compile_expr(expr.expr, _RealSubscriptsInfo(tuple(sub)))
             case Flip():
                 assert isinstance(subscripts, _RealSubscriptsInfo), "cannot compile Flip in standard layout mode"
                 expr_shape = self._type_cache.get_shape(expr.expr)
@@ -587,10 +585,11 @@ class _FunctionCompiler:
             case Slice():
                 match subscripts:
                     case _StandardLayoutSubscriptInfo(mode, subscript, shifts):
-                        # record the fixed axis and recurse; the offset is applied at
-                        # the array access using the base array's strides
+                        # record the fixed axes and recurse; the offset is applied
+                        # at the array access using the base array's strides
                         new_shifts = dict(shifts)
-                        new_shifts[expr.axis] = expr.index
+                        for axis, index in expr.axes:
+                            new_shifts[axis] = index
                         return self.compile_expr(
                             expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
                         )
@@ -679,10 +678,11 @@ class _FunctionCompiler:
             case Slice():
                 match subscripts:
                     case _StandardLayoutSubscriptInfo(mode, subscript, shifts):
-                        # record the fixed axis and recurse; the offset is applied
+                        # record the fixed axes and recurse; the offset is applied
                         # at the array access using the base array's strides
                         new_shifts = dict(shifts)
-                        new_shifts[expr.axis] = expr.index
+                        for axis, index in expr.axes:
+                            new_shifts[axis] = index
                         return self._compile_lvalue(
                             expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
                         )
@@ -918,8 +918,8 @@ class _AssignmentsKernel(LoopKernel):
 
         def check_slice_chain(expr: Slice) -> None:
             # the sliced sub-expression must itself be standard layout, i.e. free of
-            # slices and rolls, so that the axis attribute of the slice equals the
-            # axis of the underlying arrays
+            # slices, rolls and flips, so that the axes of the slice equal the axes
+            # of the underlying arrays
             if self._contains_indexing(expr.expr):
                 failures.append(
                     f"nested slices are not supported in standard layout kernels: {expr}"
@@ -927,7 +927,8 @@ class _AssignmentsKernel(LoopKernel):
                 return
             expr_shape = self._type_cache.get_shape(expr.expr)
             rank = len(expr_shape)
-            if rank != loop_rank + 1:
+            fixed = {axis for axis, _ in expr.axes}
+            if rank != loop_rank + len(fixed):
                 failures.append(
                     f"the sliced expression {expr.expr} has rank {rank} but the loop "
                     f"rank is {loop_rank}; broadcasting sliced expressions is not "
@@ -935,12 +936,14 @@ class _AssignmentsKernel(LoopKernel):
                 )
                 return
             if requested is StandardLayoutMode.ROW_MAJOR:
-                ok_axis = expr.axis == 0
+                # the fixed axes must be a leading prefix so that the surviving
+                # axes form the contiguous block iterated by the loop
+                ok_axes = fixed == set(range(len(fixed)))
             else:
-                ok_axis = expr.axis == rank - 1
-            if not ok_axis:
+                ok_axes = fixed == set(range(rank - len(fixed), rank))
+            if not ok_axes:
                 failures.append(
-                    f"slice axis {expr.axis} is not compatible with the "
+                    f"slice axes {sorted(fixed)} are not compatible with the "
                     f"{requested.value} layout"
                 )
 

@@ -1257,9 +1257,9 @@ class SimdLayoutTests(TestCase):
         assert_almost_equal(a, b[:, 1])
         self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
 
-    def test_multi_axis_slices_fall_back_to_generic(self):
-        # multi-axis slices are nested slices; the sliced sub-expression is not
-        # standard layout, so they are compiled by the generic kernel
+    def test_multi_axis_slices(self):
+        # a slice fixing the leading axes is an affine offset of the flat index
+        # in row-major layout, so it stays in the standard layout kernel
         wrapper = Wrapper()
 
         @wrapper.jit()
@@ -1270,8 +1270,10 @@ class SimdLayoutTests(TestCase):
         b = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
         f(a, b)
         assert_almost_equal(a, b[1, 2])
-        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.NONE)
+        self.assertIs(self._last_compiled(f).standard_layout, StandardLayoutMode.ROW_MAJOR)
 
+        # fixing an interior axis (b[1, :, 2]) is not an affine offset of the
+        # flat index, so the generic kernel is used
         @wrapper.jit()
         def g(a, b):
             a += b[1, :, 2]
@@ -1418,7 +1420,7 @@ class SimdLayoutTests(TestCase):
         b, = symbols('b')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(b, SymbolTypeDesc(FloatType(64), 2))], Slice(b, 0, 1), standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([(b, SymbolTypeDesc(FloatType(64), 2))], Slice(b, ((0, 1),)), standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(9)
@@ -1446,7 +1448,7 @@ class SimdLayoutTests(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments(
-            [(a, SymbolTypeDesc(FloatType(64), 1)), (b, SymbolTypeDesc(FloatType(64), 2))], [AssignExpr(a, Slice(b, 0, 1), '+')]
+            [(a, SymbolTypeDesc(FloatType(64), 1)), (b, SymbolTypeDesc(FloatType(64), 2))], [AssignExpr(a, Slice(b, ((0, 1),)), '+')]
         )
         a0 = np.zeros(6)
         b0 = np.arange(30).reshape(5, 6).astype(float)
@@ -1456,7 +1458,7 @@ class SimdLayoutTests(TestCase):
         b3, = symbols('b3')
         fn3 = compiler.compile_assignments(
             [(a, SymbolTypeDesc(FloatType(64), 1)), (b3, SymbolTypeDesc(FloatType(64), 3))],
-            [AssignExpr(a, Slice(Slice(b3, 2, 2), 0, 1), '+')],
+            [AssignExpr(a, Slice(Slice(b3, ((2, 2),)), ((0, 1),)), '+')],
         )
         a3 = np.zeros(4)
         b30 = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
@@ -1467,7 +1469,7 @@ class SimdLayoutTests(TestCase):
         # smaller than the loop rank) must align its surviving axis with the
         # trailing loop axes
         fn4 = compiler.compile_assignments(
-            [(a, SymbolTypeDesc(FloatType(64), 3)), (b, SymbolTypeDesc(FloatType(64), 2))], [AssignExpr(a, Slice(b, 0, 1), '+')]
+            [(a, SymbolTypeDesc(FloatType(64), 3)), (b, SymbolTypeDesc(FloatType(64), 2))], [AssignExpr(a, Slice(b, ((0, 1),)), '+')]
         )
         a4 = np.zeros((2, 3, 6))
         b40 = np.arange(30).reshape(5, 6).astype(float)
@@ -1477,7 +1479,7 @@ class SimdLayoutTests(TestCase):
         b5, = symbols('b5')
         fn5 = compiler.compile_assignments(
             [(a, SymbolTypeDesc(FloatType(64), 2)), (b5, SymbolTypeDesc(FloatType(64), 4))],
-            [AssignExpr(a, Slice(Slice(b5, 2, 3), 1, 2), '+')],
+            [AssignExpr(a, Slice(Slice(b5, ((2, 3),)), ((1, 2),)), '+')],
         )
         a5 = np.zeros((2, 4))
         b50 = np.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5).astype(float)

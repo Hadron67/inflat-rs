@@ -1,5 +1,6 @@
 from abc import abstractmethod
 from inspect import isclass
+from types import GenericAlias
 from typing import get_args, get_origin, override
 from weakref import WeakKeyDictionary
 
@@ -115,6 +116,18 @@ class SubExprFnBuilder:
     def _check_type(self, type: type):
         return isclass(type) and issubclass(type, self._base_cls)
 
+    def _contains_expr(self, type) -> bool:
+        """Whether the type (or a nested collection of it) mentions an ``Expr``
+        subclass, i.e. whether ``map`` must descend into it."""
+        if self._check_type(type):
+            return True
+        if get_origin(type) is None:
+            return False
+        return any(
+            (isclass(a) or isinstance(a, GenericAlias)) and self._contains_expr(a)
+            for a in get_args(type)
+        )
+
     def _process_get_child(self, var_name: str, type: type) -> list[str]:
         if self._check_type(type):
             return [f'ret.append({var_name})']
@@ -146,6 +159,10 @@ class SubExprFnBuilder:
             # recurse into the child's own map so that ``op`` reaches every node
             # of the tree (deep substitution)
             return f"{var_name}.map({op})"
+        if not self._contains_expr(type):
+            # collections of plain values (e.g. ``tuple[tuple[int, int], ...]``)
+            # are not expressions and stay untouched
+            return var_name
         head = get_origin(type)
         args = get_args(type)
         if head is list or head is tuple and args[1] is Ellipsis:

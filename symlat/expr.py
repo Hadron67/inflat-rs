@@ -835,18 +835,70 @@ class Exp(UnaryNumericFunction):
 @exprclass
 class Roll(Expr):
     expr: Expr
-    axis: int
-    amount: int
+    axes: tuple[tuple[int, int], ...] | int  # (axis, amount), and int means roll all axes
+
+    @override
+    def input_form(self) -> str:
+        return f"roll({self.expr.input_form()}, {self.axes})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        expr = self.expr.normalize()
+        if isinstance(self.axes, int):
+            if isinstance(expr, Roll) and isinstance(expr.axes, int):
+                # rolling every axis twice adds the amounts up
+                amount = self.axes + expr.axes
+                return expr.expr if amount == 0 else Roll(expr.expr, amount)
+            return Roll(expr, self.axes)
+        # nested rolls merge: rolling along the same axis twice adds the amounts
+        merged: dict[int, int] = {}
+        for axis, amount in self.axes:
+            merged[axis] = merged.get(axis, 0) + amount
+        if isinstance(expr, Roll) and not isinstance(expr.axes, int):
+            for axis, amount in expr.axes:
+                merged[axis] = merged.get(axis, 0) + amount
+            expr = expr.expr
+        axes = tuple(sorted((axis, amount) for axis, amount in merged.items() if amount != 0))
+        if len(axes) == 0:
+            return expr
+        return Roll(expr, axes)
 
 @exprclass
 class Slice(Expr):
     expr: Expr
-    axis: int
-    index: int
+    axes: tuple[tuple[int, int], ...]  # (axis, index), directly relative to ``expr``
 
     @override
     def input_form(self) -> str:
-        return f"({self.expr.input_form()} [{self.axis}, {self.index}])"
+        return f"({self.expr.input_form()} [{' '.join(f'{a}, {i}' for a, i in self.axes)}])"
+
+    @override
+    def normalize(self) -> 'Expr':
+        expr = self.expr.normalize()
+        axes = self.axes
+        if isinstance(expr, Slice):
+            # nested slices merge: the outer axes are relative to the inner
+            # slice, i.e. to the axes of the base expression that survive it
+            fixed = {axis for axis, _ in expr.axes}
+            merged = list(expr.axes)
+            for k, index in axes:
+                merged.append((_nth_axis(k, fixed), index))
+            axes = tuple(merged)
+            expr = expr.expr
+        axes = tuple(sorted(axes))
+        if len(axes) == 0:
+            return expr
+        return Slice(expr, axes)
+
+
+def _nth_axis(k: int, fixed: set[int]) -> int:
+    """The ``k``-th (0-based) axis not in ``fixed``, in the base numbering."""
+    axis = -1
+    for _ in range(k + 1):
+        axis += 1
+        while axis in fixed:
+            axis += 1
+    return axis
 
 @exprclass
 class Flip(Expr):

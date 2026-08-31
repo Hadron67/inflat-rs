@@ -347,9 +347,11 @@ class TypeResolver:
                 return self.get_shape(expr.expr)
             case Slice():
                 shape = self.get_shape(expr.expr)
-                if expr.axis >= len(shape):
-                    raise IndexError(f"Axis {expr.axis} is out of bounds for shape {shape}")
-                return shape[:expr.axis] + shape[expr.axis + 1:]
+                fixed = {axis for axis, _ in expr.axes}
+                for axis in fixed:
+                    if axis < 0 or axis >= len(shape):
+                        raise IndexError(f"Axis {axis} is out of bounds for shape {shape}")
+                return tuple(s for i, s in enumerate(shape) if i not in fixed)
             case _:
                 raise TypeError(f"cannot get shape from {expr}")
 

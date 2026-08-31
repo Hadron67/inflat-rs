@@ -14,7 +14,7 @@ import operator
 import numpy as np
 from typing_extensions import override
 
-from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times
+from ..expr import AssignExpr, Expr, Int, Slice, Symbol, Times, _nth_axis
 from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .type import LowerType, SymbolTypeDesc
@@ -121,10 +121,12 @@ class JitContext:
     def _execute(self, lhs: Expr, value) -> None:
         """Compile ``lhs = value`` (cached per assignment) and run it.
 
-        ``lhs`` is the whole ``ArrayNode`` of the destination or a chain of
-        ``Slice`` nodes over it (a slice assignment like ``a[0] = ...``).
+        ``lhs`` is the whole ``ArrayNode`` of the destination or a ``Slice``
+        over it (a slice assignment like ``a[0] = ...``).
         """
-        # the assignment target is (a chain of slices over) a concrete array
+        # the assignment target is (a slice over) a concrete array: check the
+        # base before normalizing, so that assigning into a computed expression
+        # reports a clear error instead of tripping over its uncomparable nodes
         base = lhs
         while isinstance(base, Slice):
             base = base.expr
@@ -133,6 +135,7 @@ class JitContext:
                 "cannot assign into a computed expression; assign into an array "
                 "created by rand() or zeros() instead"
             )
+        lhs = lhs.normalize()
         base_arr = base.arr
         rhs = _as_expr(value)
         inputs = _collect_array_nodes(rhs)
@@ -147,24 +150,22 @@ class JitContext:
             dest_sym = Symbol(('@dest',))
             symbols[base] = dest_sym
         # the kernel iterates the destination's (sliced) shape: compute it and
-        # validate the LHS slice indices
-        nodes: list[Slice] = []
-        cur = lhs
-        while isinstance(cur, Slice):
-            nodes.append(cur)
-            cur = cur.expr
-        remaining = list(range(base_arr.ndim))
-        for node in reversed(nodes):
-            if node.axis < 0 or node.axis >= len(remaining):
-                raise TypeError(f"slice axis {node.axis} is out of bounds")
-            axis = remaining[node.axis]
-            del remaining[node.axis]
-            dim = base_arr.shape[axis]
-            if node.index < -dim or node.index >= dim:
-                raise IndexError(
-                    f"index {node.index} is out of bounds for axis {axis} of size {dim}"
-                )
-        dest_shape = tuple(base_arr.shape[i] for i in remaining)
+        # validate the LHS slice indices (the axes of a slice are directly
+        # relative to its expression)
+        if isinstance(lhs, Slice):
+            fixed: set[int] = set()
+            for axis, index in lhs.axes:
+                if axis < 0 or axis >= base_arr.ndim:
+                    raise TypeError(f"slice axis {axis} is out of bounds")
+                dim = base_arr.shape[axis]
+                if index < -dim or index >= dim:
+                    raise IndexError(
+                        f"index {index} is out of bounds for axis {axis} of size {dim}"
+                    )
+                fixed.add(axis)
+            dest_shape = tuple(s for i, s in enumerate(base_arr.shape) if i not in fixed)
+        else:
+            dest_shape = base_arr.shape
         # every input must read within the loop bounds: slice indices are
         # checked, and the surviving axes must equal the destination axis they
         # align to (numpy-style size-1 broadcasting is not supported)
@@ -175,17 +176,22 @@ class JitContext:
                 todo.append((expr.expr, chain + [expr]))
             elif isinstance(expr, ArrayNode):
                 arr = expr.arr
-                rem = list(range(arr.ndim))
-                for node in reversed(chain):
-                    if node.axis < 0 or node.axis >= len(rem):
-                        raise TypeError(f"slice axis {node.axis} is out of bounds")
-                    ax = rem[node.axis]
-                    del rem[node.axis]
-                    dim = arr.shape[ax]
-                    if node.index < -dim or node.index >= dim:
-                        raise IndexError(
-                            f"index {node.index} is out of bounds for axis {ax} of size {dim}"
-                        )
+                # map the axes of the enclosing slices to the node's numbering:
+                # the axes of an outer slice are relative to the axes that
+                # survive the inner slices
+                fixed_axes: set[int] = set()
+                for slice_node in reversed(chain):
+                    for k, index in slice_node.axes:
+                        axis = _nth_axis(k, fixed_axes)
+                        if axis >= arr.ndim:
+                            raise TypeError(f"slice axis {axis} is out of bounds")
+                        dim = arr.shape[axis]
+                        if index < -dim or index >= dim:
+                            raise IndexError(
+                                f"index {index} is out of bounds for axis {axis} of size {dim}"
+                            )
+                        fixed_axes.add(axis)
+                rem = [i for i in range(arr.ndim) if i not in fixed_axes]
                 if len(rem) > len(dest_shape):
                     raise ValueError(
                         f"cannot broadcast shape {arr.shape} into destination shape {dest_shape}"
@@ -321,12 +327,12 @@ class ArrayWrapper:
     # --- indexing: slicing is lazy, assignment triggers compilation ---------
     def _index(self, key) -> Expr:
         """The expression selected by ``self[key]``: the ``ArrayNode`` itself when
-        the key selects the whole array, otherwise a chain of ``Slice`` nodes."""
+        the key selects the whole array, otherwise a ``Slice`` with one entry per
+        fixed axis."""
         if key is Ellipsis:
             return self.arr
         if not isinstance(key, tuple):
             key = (key,)
-        expr: Expr = self.arr
         fixed: list[tuple[int, int]] = []
         for axis, k in enumerate(key):
             if k == slice(None):
@@ -337,11 +343,9 @@ class ArrayWrapper:
                 fixed.append((axis, operator.index(k)))
                 continue
             raise TypeError(f"unsupported index {k!r}; use integer indices or ':'")
-        # fix the highest axis first (innermost), so that lower axes stay valid
-        # after the higher ones have been removed
-        for axis, index in reversed(fixed):
-            expr = Slice(expr, axis, index)
-        return expr
+        if len(fixed) == 0:
+            return self.arr
+        return Slice(self.arr, tuple(fixed))
 
     def __getitem__(self, key) -> 'ArrayWrapper':
         return self._new(self._index(key))
