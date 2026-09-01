@@ -36,7 +36,7 @@ from ..expr import (
 )
 from .backend import Backend
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
-from .type import LowerType, SymbolTypeDesc
+from .type import LowerType, SymbolTypeDesc, TypeResolver
 
 
 def _as_expr(value) -> Expr:
@@ -229,7 +229,10 @@ class JitContext:
         )
         compiled = self._cache.get(key)
         if compiled is None:
-            compiled = self._compiler.compile_assignments(args, [assign], standard_layout=layout)
+            resolver = TypeResolver(dict(args), self._compiler)
+            compiled = self._compiler.compile_assignments(
+                [sym for sym, _ in args], [assign], resolver, set(), standard_layout=layout
+            )
             self._cache[key] = compiled
         compiled.call(*([node.arr for node in inputs if node is not base] + [base_arr]))
 
@@ -267,7 +270,10 @@ class JitContext:
                 (symbols[node], SymbolTypeDesc(LowerType.from_numpy_dtype(str(node.arr.dtype)), node.arr.ndim))
                 for node in inputs
             ]
-            compiled = self._compiler.compile_reduction(args, reduction, standard_layout=layout)
+            resolver = TypeResolver(dict(args), self._compiler)
+            compiled = self._compiler.compile_reduction(
+                [sym for sym, _ in args], reduction, resolver, standard_layout=layout
+            )
             self._reduction_cache[key] = compiled
         result = compiled.call(*[node.arr for node in inputs])
         return np.asarray(result)[()]

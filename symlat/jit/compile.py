@@ -1,7 +1,7 @@
 import ctypes
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, override
 
@@ -52,7 +52,6 @@ from .type import (
     ComplexFloatType,
     LowerType,
     SymbolShape,
-    SymbolTypeDesc,
     TypedAssignExpr,
     TypeResolver,
     TypesConfig,
@@ -273,14 +272,14 @@ class _SymbolScope:
         self._args.append(type)
         return ret
 
-    def add_symbol(self, symbol: Symbol):
+    def add_symbol(self, symbol: Symbol, by_ref: set[Symbol] | None = None):
         """Register one function argument.  The registration order is the positional
         argument order of the compiled function."""
         if symbol in self._symbol_values:
             raise ValueError(f"duplicate symbol {symbol} in function arguments")
         lower_type = self.type_cache.get_symbol_type(symbol)
         dim = self.type_cache.get_symbol_dimension(symbol)
-        is_ref = self.type_cache.symbol_types[symbol].is_ref
+        is_ref = by_ref is not None and symbol in by_ref
         if dim == 0:
             if is_ref:
                 # scalar references are passed as pointers so that writes
@@ -937,8 +936,8 @@ class TypedReductionExpr:
 
 class _AssignmentsKernel(LoopKernel):
     @override
-    def __init__(self, parent: 'JitCompiler', args: list[Symbol], exprs: list[AssignExpr], type_context: dict[Symbol, SymbolTypeDesc], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
-        type_cache = TypeResolver(type_context, parent)
+    def __init__(self, parent: 'JitCompiler', args: list[Symbol], exprs: list[AssignExpr], type_resolver: TypeResolver, by_ref_symbols: set[Symbol], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
+        type_cache = type_resolver
         self._parent = parent
         self._type_cache = type_cache
         self._exprs: list[TypedAssignExpr] = [TypedAssignExpr(a, type_cache) for a in exprs]
@@ -955,7 +954,7 @@ class _AssignmentsKernel(LoopKernel):
         self._helper = CompileHelper(parent)
         self.symbol_scope = _SymbolScope(type_cache)
         for symbol in args:
-            self.symbol_scope.add_symbol(symbol)
+            self.symbol_scope.add_symbol(symbol, by_ref_symbols)
         self._standard_layout = self._check_standard_layout(standard_layout)
 
     @staticmethod
@@ -1142,17 +1141,15 @@ class JitCompiler(TypesConfig):
         self.real_type = real_type
         self.index_type = index_type
 
-    def compile_assignments(self, args: list[tuple[Symbol, SymbolTypeDesc]], exprs: list[AssignExpr], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+    def compile_assignments(self, args: list[Symbol], exprs: list[AssignExpr], type_resolver: TypeResolver, by_ref_symbols: set[Symbol], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         # scalar references that are never written to do not need a pointer: pass
         # them by value so reads do not pay a pointer indirection
         written = _collect_lvalue_symbols(exprs)
-        effective_args = []
-        for sym, desc in args:
-            if desc.dimension == 0 and desc.is_ref and sym not in written:
-                desc = replace(desc, is_ref=False)
-            effective_args.append((sym, desc))
-        type_context = {a: b for a, b in effective_args}
-        kernel = _AssignmentsKernel(self, [a[0] for a in effective_args], exprs, type_context, reduction, standard_layout)
+        effective_by_ref = {
+            sym for sym in by_ref_symbols
+            if sym in written and type_resolver.symbol_types[sym].dimension == 0
+        }
+        kernel = _AssignmentsKernel(self, args, exprs, type_resolver, effective_by_ref, reduction, standard_layout)
         reduction_kernel: ReductionKernel | None = None
         if reduction is not None:
             assert kernel.reduction_type is not None
@@ -1161,5 +1158,5 @@ class JitCompiler(TypesConfig):
 
         return CompiledWrapper(self, kernel.symbol_scope, compiled, standard_layout=kernel._standard_layout)
 
-    def compile_reduction(self, args: list[tuple[Symbol, SymbolTypeDesc]], expr: Expr, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
-        return self.compile_assignments(args, [], reduction=expr, standard_layout=standard_layout)
+    def compile_reduction(self, args: list[Symbol], expr: Expr, type_resolver: TypeResolver, by_ref_symbols: set[Symbol] | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
+        return self.compile_assignments(args, [], type_resolver, by_ref_symbols or set(), reduction=expr, standard_layout=standard_layout)

@@ -233,7 +233,6 @@ def get_peer_types(*types: LowerType) -> LowerType:
 class SymbolTypeDesc:
     type: LowerType
     dimension: int
-    is_ref: bool = False
 
 @exprclass
 class SymbolShape(Expr):

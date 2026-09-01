@@ -179,7 +179,7 @@ def next_head_sort_token() -> int:
     Expr._HEAD_SORT_TOKEN_COUNTER += 1
     return token
 
-@dataclass_transform()
+@dataclass_transform(frozen_default=True)
 def exprclass(cls=None, **kwargs):
     dataclass_wrapper = dataclass(repr=False, frozen=True, **kwargs)
     def wrapper(cls):

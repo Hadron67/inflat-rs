@@ -877,9 +877,7 @@ class _JittedFunction:
         # sort by runtime_arg_pos: the walk order is not necessarily the position
         # order (the traversal uses a stack), and the converter passes values in
         # position order
-        args_by_pos: dict[int, tuple[Symbol, SymbolTypeDesc]] = {
-            pos: (sym, SymbolTypeDesc(lower_type, dim, is_ref)) for pos, sym, lower_type, dim, is_ref in runtime
-        }
+        args_by_pos: dict[int, Symbol] = {pos: sym for pos, sym, _, _, _ in runtime}
         args = [args_by_pos[i] for i in range(len(args_by_pos))]
         compiler = JitCompiler(
             self._wrapper._backend,
@@ -888,16 +886,11 @@ class _JittedFunction:
         )
         assigns, sums = self._trace(key)
         assigns = [a.normalize() for a in assigns]
-        context = {sym: SymbolTypeDesc(lower_type, dim, is_ref) for _, sym, lower_type, dim, is_ref in runtime}
-        # reduction placeholders are rank-0 scalars; include them so that the
-        # shape resolver can handle assignments that read a reduction result
-        for sym in sums.values():
-            context[sym] = SymbolTypeDesc(self._wrapper._index_type, 0)
+        context = {sym: SymbolTypeDesc(lower_type, dim) for _, sym, lower_type, dim, _ in runtime}
         resolver = TypeResolver(context, compiler)
-        if len(sums) == 0:
-            main = compiler.compile_assignments(args, assigns, standard_layout=key.layout)
-            return main, ()
-        placeholder_symbols = list(sums.values())
+        # each traced ``Sum`` is compiled as a reduction kernel whose scalar
+        # result is passed to the main kernel as an extra argument; the
+        # placeholder symbols are typed by those results in the shared resolver
         sum_types: dict[Sum, LowerType] = {}
         for sum_node in sums:
             sum_type = resolver.get_type(sum_node.expr)
@@ -905,13 +898,24 @@ class _JittedFunction:
                 # integer sums follow the C convention of being signed
                 sum_type = IntType(sum_type.bits, True)
             sum_types[sum_node] = sum_type
+        for sum_node, sym in zip(sums, sums.values()):
+            context[sym] = SymbolTypeDesc(sum_types[sum_node], 0)
+        # the scalar references among the runtime arguments are passed by pointer
+        # so that writes propagate back to the caller
+        by_ref = {sym for _, sym, _, _, is_ref in runtime if is_ref}
+        if len(sums) == 0:
+            main = compiler.compile_assignments(args, assigns, resolver, by_ref, standard_layout=key.layout)
+            return main, ()
+        placeholder_symbols = list(sums.values())
         sum_wrappers = tuple(
-            compiler.compile_reduction(args, sum_node.expr, standard_layout=key.layout)
+            compiler.compile_reduction(args, sum_node.expr, resolver, standard_layout=key.layout)
             for sum_node in sums
         )
         main = compiler.compile_assignments(
-            args + [(sym, SymbolTypeDesc(sum_types[sum_node], 0)) for sum_node, sym in zip(sums, placeholder_symbols)],
+            args + placeholder_symbols,
             assigns,
+            resolver,
+            by_ref,
             standard_layout=key.layout,
         )
         return main, sum_wrappers

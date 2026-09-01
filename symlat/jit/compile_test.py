@@ -9,7 +9,7 @@ from ..expr import AssignExpr, Int, Plus, Rational, S, Slice, Times, symbols
 from .compile import CompiledWrapper, JitCompiler, StandardLayoutMode
 from .fn_wrapper import Wrapper
 from .openmp import OpenMPBackend
-from .type import ComplexFloatType, FloatType, SymbolTypeDesc
+from .type import ComplexFloatType, FloatType, SymbolTypeDesc, TypeResolver
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
@@ -33,13 +33,13 @@ class JitTest(TestCase):
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
-            (phi, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-            (mom_phi, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-            (dt, SymbolTypeDesc(FloatType(64), 0)),
-        ], [
+        fn = compiler.compile_assignments([phi, mom_phi, dt], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
-        ])
+        ], TypeResolver({
+            phi: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+            mom_phi: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+            dt: SymbolTypeDesc(FloatType(64), 0),
+        }, compiler), set())
 
         np.random.seed(114514)
         phi0 = np.zeros((10, 10, 10), dtype=np.complex128)
@@ -54,13 +54,13 @@ class JitTest(TestCase):
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
-            (phi, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-            (mom_phi, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-            (dt, SymbolTypeDesc(FloatType(64), 0)),
-        ], [
+        fn = compiler.compile_assignments([phi, mom_phi, dt], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
-        ])
+        ], TypeResolver({
+            phi: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+            mom_phi: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+            dt: SymbolTypeDesc(FloatType(64), 0),
+        }, compiler), set())
 
         np.random.seed(114514)
         phi0 = np.zeros((8, 9, 10), dtype=np.complex128)
@@ -75,7 +75,7 @@ class JitTest(TestCase):
         a, = symbols('a')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(a, SymbolTypeDesc(FloatType(64), 3))], a)
+        fn = compiler.compile_reduction([a], a, TypeResolver({a: SymbolTypeDesc(FloatType(64), 3)}, compiler))
 
         np.random.seed(114514)
         a0 = np.random.randn(10, 10, 10)
@@ -86,10 +86,10 @@ class JitTest(TestCase):
         a, b = symbols('a', 'b')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([
-            (a, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-            (b, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-        ], a * b + a)
+        fn = compiler.compile_reduction([a, b], a * b + a, TypeResolver({
+            a: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+            b: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+        }, compiler))
 
         np.random.seed(42)
         a0 = np.random.randn(10, 10, 10) + 1j * np.random.randn(10, 10, 10)
@@ -101,13 +101,13 @@ class JitTest(TestCase):
         phi, mom_phi, dt = symbols('phi', 'mom_phi', 'dt')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
-            (phi, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-            (mom_phi, SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3)),
-            (dt, SymbolTypeDesc(FloatType(64), 0)),
-        ], [
+        fn = compiler.compile_assignments([phi, mom_phi, dt], [
             AssignExpr(phi, mom_phi * mom_phi * dt)
-        ], reduction=mom_phi)
+        ], TypeResolver({
+            phi: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+            mom_phi: SymbolTypeDesc(ComplexFloatType(FloatType(64)), 3),
+            dt: SymbolTypeDesc(FloatType(64), 0),
+        }, compiler), set(), reduction=mom_phi)
 
         np.random.seed(114514)
         phi0 = np.zeros((8, 9, 10), dtype=np.complex128)
@@ -125,16 +125,16 @@ class JitTest(TestCase):
         a, b, c, d = symbols('a', 'b', 'c', 'd')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_assignments([
-            (a, SymbolTypeDesc(FloatType(64), 1)),
-            (b, SymbolTypeDesc(FloatType(64), 1)),
-            (c, SymbolTypeDesc(FloatType(64), 1)),
-            (d, SymbolTypeDesc(FloatType(64), 1)),
-        ], [
+        fn = compiler.compile_assignments([a, b, c, d], [
             AssignExpr(a, b, '+'),
             AssignExpr(a, c, '+'),
             AssignExpr(a, d, '+'),
-        ])
+        ], TypeResolver({
+            a: SymbolTypeDesc(FloatType(64), 1),
+            b: SymbolTypeDesc(FloatType(64), 1),
+            c: SymbolTypeDesc(FloatType(64), 1),
+            d: SymbolTypeDesc(FloatType(64), 1),
+        }, compiler), set())
 
         np.random.seed(40)
         a0 = np.zeros(5)
@@ -149,13 +149,13 @@ class JitTest(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         # written references are compiled as pointers and writes propagate back
-        fn = compiler.compile_assignments([
-            (x, SymbolTypeDesc(FloatType(64), 0, is_ref=True)),
-            (y, SymbolTypeDesc(FloatType(64), 0, is_ref=True)),
-        ], [
+        fn = compiler.compile_assignments([x, y], [
             AssignExpr(x, x, '+'),
             AssignExpr(y, x, '+'),
-        ])
+        ], TypeResolver({
+            x: SymbolTypeDesc(FloatType(64), 0),
+            y: SymbolTypeDesc(FloatType(64), 0),
+        }, compiler), {x, y})
 
         x0 = ctypes.c_double(2.0)
         y0 = ctypes.c_double(3.0)
@@ -172,12 +172,12 @@ class JitTest(TestCase):
 
         # references that are only read are demoted to by-value scalars
         a, = symbols('a')
-        fn2 = compiler.compile_assignments([
-            (a, SymbolTypeDesc(FloatType(64), 1)),
-            (x, SymbolTypeDesc(FloatType(64), 0, is_ref=True)),
-        ], [
+        fn2 = compiler.compile_assignments([a, x], [
             AssignExpr(a, x, '+'),
-        ])
+        ], TypeResolver({
+            a: SymbolTypeDesc(FloatType(64), 1),
+            x: SymbolTypeDesc(FloatType(64), 0),
+        }, compiler), {x})
         a1 = np.zeros(5)
         x1 = ctypes.c_double(3.0)
         fn2.call(a1, x1)
@@ -437,7 +437,7 @@ class SimdLayoutTests(TestCase):
         a, = symbols('a')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(a, SymbolTypeDesc(FloatType(64), 3))], a, standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([a], a, TypeResolver({a: SymbolTypeDesc(FloatType(64), 3)}, compiler), standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(7)
@@ -448,7 +448,7 @@ class SimdLayoutTests(TestCase):
         a, = symbols('a')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(a, SymbolTypeDesc(FloatType(64), 2))], a, standard_layout=StandardLayoutMode.COLUMN_MAJOR)
+        fn = compiler.compile_reduction([a], a, TypeResolver({a: SymbolTypeDesc(FloatType(64), 2)}, compiler), standard_layout=StandardLayoutMode.COLUMN_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.COLUMN_MAJOR)
 
         np.random.seed(8)
@@ -459,7 +459,7 @@ class SimdLayoutTests(TestCase):
         b, = symbols('b')
 
         compiler = JitCompiler(OpenMPBackend())
-        fn = compiler.compile_reduction([(b, SymbolTypeDesc(FloatType(64), 2))], Slice(b, ((0, 1),)), standard_layout=StandardLayoutMode.ROW_MAJOR)
+        fn = compiler.compile_reduction([b], Slice(b, ((0, 1),)), TypeResolver({b: SymbolTypeDesc(FloatType(64), 2)}, compiler), standard_layout=StandardLayoutMode.ROW_MAJOR)
         self.assertIs(fn.standard_layout, StandardLayoutMode.ROW_MAJOR)
 
         np.random.seed(9)
@@ -472,7 +472,12 @@ class SimdLayoutTests(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments(
-            [(a, SymbolTypeDesc(FloatType(64), 2)), (b, SymbolTypeDesc(FloatType(64), 2))], [AssignExpr(a, b, '+')],
+            [a, b], [AssignExpr(a, b, '+')],
+            TypeResolver({
+                a: SymbolTypeDesc(FloatType(64), 2),
+                b: SymbolTypeDesc(FloatType(64), 2),
+            }, compiler),
+            set(),
             standard_layout=StandardLayoutMode.ROW_MAJOR,
         )
         a0 = np.zeros((4, 5))
@@ -487,7 +492,12 @@ class SimdLayoutTests(TestCase):
 
         compiler = JitCompiler(OpenMPBackend())
         fn = compiler.compile_assignments(
-            [(a, SymbolTypeDesc(FloatType(64), 1)), (b, SymbolTypeDesc(FloatType(64), 2))], [AssignExpr(a, Slice(b, ((0, 1),)), '+')]
+            [a, b], [AssignExpr(a, Slice(b, ((0, 1),)), '+')],
+            TypeResolver({
+                a: SymbolTypeDesc(FloatType(64), 1),
+                b: SymbolTypeDesc(FloatType(64), 2),
+            }, compiler),
+            set(),
         )
         a0 = np.zeros(6)
         b0 = np.arange(30).reshape(5, 6).astype(float)
@@ -496,8 +506,13 @@ class SimdLayoutTests(TestCase):
 
         b3, = symbols('b3')
         fn3 = compiler.compile_assignments(
-            [(a, SymbolTypeDesc(FloatType(64), 1)), (b3, SymbolTypeDesc(FloatType(64), 3))],
+            [a, b3],
             [AssignExpr(a, Slice(Slice(b3, ((2, 2),)), ((0, 1),)), '+')],
+            TypeResolver({
+                a: SymbolTypeDesc(FloatType(64), 1),
+                b3: SymbolTypeDesc(FloatType(64), 3),
+            }, compiler),
+            set(),
         )
         a3 = np.zeros(4)
         b30 = np.arange(3 * 4 * 7).reshape(3, 4, 7).astype(float)
@@ -508,7 +523,12 @@ class SimdLayoutTests(TestCase):
         # smaller than the loop rank) must align its surviving axis with the
         # trailing loop axes
         fn4 = compiler.compile_assignments(
-            [(a, SymbolTypeDesc(FloatType(64), 3)), (b, SymbolTypeDesc(FloatType(64), 2))], [AssignExpr(a, Slice(b, ((0, 1),)), '+')]
+            [a, b], [AssignExpr(a, Slice(b, ((0, 1),)), '+')],
+            TypeResolver({
+                a: SymbolTypeDesc(FloatType(64), 3),
+                b: SymbolTypeDesc(FloatType(64), 2),
+            }, compiler),
+            set(),
         )
         a4 = np.zeros((2, 3, 6))
         b40 = np.arange(30).reshape(5, 6).astype(float)
@@ -517,8 +537,13 @@ class SimdLayoutTests(TestCase):
 
         b5, = symbols('b5')
         fn5 = compiler.compile_assignments(
-            [(a, SymbolTypeDesc(FloatType(64), 2)), (b5, SymbolTypeDesc(FloatType(64), 4))],
+            [a, b5],
             [AssignExpr(a, Slice(Slice(b5, ((2, 3),)), ((1, 2),)), '+')],
+            TypeResolver({
+                a: SymbolTypeDesc(FloatType(64), 2),
+                b5: SymbolTypeDesc(FloatType(64), 4),
+            }, compiler),
+            set(),
         )
         a5 = np.zeros((2, 4))
         b50 = np.arange(2 * 3 * 4 * 4).reshape(2, 3, 4, 4).astype(float)
