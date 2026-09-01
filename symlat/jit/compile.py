@@ -131,7 +131,7 @@ class StandardLayoutMode(Enum):
 
 
 def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_layout: StandardLayoutMode, inner_count: int) -> Callable:
-    """Generate the ``__invoke(self, values)`` function of a
+    """Generate the ``__invoke(inner, values)`` function of a
     :class:`CompiledWrapper`.
 
     The function is specialised per kernel: the argument-count check, the
@@ -140,7 +140,8 @@ def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_la
     conversions instead of an interpreted loop.  A wrapper may hold several
     compiled kernels (one per loop length); each one is invoked with the same
     converted arguments, and the (single, optional) reduction result is
-    returned."""
+    returned.  The wrapper members the function needs (``inner``, the compiled
+    kernels) are passed explicitly rather than via ``self``."""
     index_ctype = parent.index_type.to_ctype()
     symbol_order = symbols.get_symbol_order()
     arg_count = len(symbol_order)
@@ -163,7 +164,7 @@ def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_la
         return 'None'
 
     globals: dict[str, Any] = {'np': np, 'ctypes': ctypes, '_INDEX': index_ctype}
-    lines: list[str] = ['def __invoke(self, values):']
+    lines: list[str] = ['def __invoke(inner, values):']
     lines += [
         f'    if len(values) != {arg_count}:',
         f"        raise TypeError(f\"the kernel expects {arg_count} positional argument(s), got {{len(values)}}\")",
@@ -235,12 +236,12 @@ def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_la
         '    assert None not in ret',
     ]
     if inner_count == 1:
-        lines.append('    return self._inner[0].call(*ret)')
+        lines.append('    return inner[0].call(*ret)')
     else:
         lines += ['    ret_val = None']
         for i in range(inner_count):
             lines += [
-                f'    r{i} = self._inner[{i}].call(*ret)',
+                f'    r{i} = inner[{i}].call(*ret)',
                 f'    if r{i} is not None:',
                 f'        ret_val = r{i}',
             ]
@@ -924,7 +925,7 @@ class CompiledWrapper:
         invoked in the order their loop lengths first appear among the
         assignments; the result of the (optional) reduction kernel is returned.
         """
-        return self._invoke(self, values)
+        return self._invoke(self._inner, values)
 
     @override
     def __str__(self) -> str:
