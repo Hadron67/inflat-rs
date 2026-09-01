@@ -929,11 +929,23 @@ class BasicBlock(LocalValue):
             case _:
                 raise TypeError(f"Cannot take {f32_fn} or {f64_fn} of {value.get_type()}")
 
+    def float_func2(self, value: Value, exponent: Value, f32_fn: Value, f64_fn: Value):
+        """Like :meth:`float_func`, but for a binary float function."""
+        type = value.get_type()
+        assert isinstance(type, FloatType)
+        match type.bits:
+            case 32:
+                return self.call(f32_fn, value, exponent)
+            case 64:
+                return self.call(f64_fn, value, exponent)
+            case _:
+                raise TypeError(f"Cannot take {f32_fn} or {f64_fn} of {value.get_type()}")
+
     def sqrt(self, value: Value, reg_name: str | None = None) -> Value:
         return self.float_func(value, SQRT_F32, SQRT_F64)
 
     def pow(self, value: Value, exponent: Value) -> Value:
-        return self.float_func(value, POW_F32, POW_F64)
+        return self.float_func2(value, exponent, POW_F32, POW_F64)
 
     def exp(self, value: Value) -> Value:
         return self.float_func(value, EXP_F32, EXP_F64)

@@ -238,6 +238,31 @@ class JitWrapperTest(TestCase):
         assert_almost_equal(x, x0 + np.sin(y0) + np.cos(y0) + np.exp(y0) + np.log(y0))
         assert_almost_equal(y, y0 * -x)
 
+    def test_fractional_powers(self):
+        # non-integer exponents lower to llvm pow calls; regression test for a
+        # bug where the exponent argument was dropped (affecting e.g. scalar
+        # lattice parameters like ``b ** (2 - 4/d)`` in lat/scalar.py)
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += b ** 1.5 + b ** (2 / 3)
+
+        a = np.zeros((4, 4))
+        b = np.random.rand(4, 4) + 1.0
+        b0 = b.copy()
+        f(a, b)
+        assert_almost_equal(a, b0 ** 1.5 + b0 ** (2 / 3))
+
+        @wrapper.jit()
+        def g(c, b):
+            c[()] = b ** (2 / 3)
+
+        b = np.array(8.0)
+        c = np.array(0.0)
+        g(c, b)
+        assert_almost_equal(c, 8.0 ** (2 / 3))
+
     def test_numpy_scalar_operands(self):
         # numpy scalars and reversed operands dispatch through __array_ufunc__
         wrapper = Wrapper()
