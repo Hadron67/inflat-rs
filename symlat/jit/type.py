@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import override
 
 from ..expr import (
-    AssignExpr,
     Complex,
     Coord,
     Cos,
@@ -257,14 +256,14 @@ class TypeResolver:
     def get_symbol_dimension(self, expr: Symbol):
         return self.symbol_types[expr].dimension
 
-    def _eval_symbol_shape(self, expr: Expr):
+    def eval_symbol_shape(self, expr: Expr):
         while isinstance(expr, SymbolShape) and expr in self.resolved_shapes:
             expr = self.resolved_shapes[expr]
         return expr
 
     def _resolve_equal_constraint(self, expr1: Expr, expr2: Expr):
-        expr1 = self._eval_symbol_shape(expr1)
-        expr2 = self._eval_symbol_shape(expr2)
+        expr1 = self.eval_symbol_shape(expr1)
+        expr2 = self.eval_symbol_shape(expr2)
         if expr1 == expr2:
             return
         if not isinstance(expr1, SymbolShape) and isinstance(expr2, SymbolShape):
@@ -397,14 +396,11 @@ class TypeResolver:
             case _:
                 raise ValueError(f"cannot get type of {expr}")
 
-class TypedAssignExpr:
-    def __init__(self, expr: AssignExpr, ctx: TypeResolver) -> None:
-        self.expr = expr
+    def merge_expr_shapes(self, expr1: Expr, expr2: Expr, is_assign: bool = False) -> tuple[Expr, ...]:
+        shape1 = self.get_shape(expr1)
+        shape2 = self.get_shape(expr2)
+        return self.merge_shape(shape1, shape2, is_assign)
 
-        lhs_shape = ctx.get_shape(expr.lhs)
-        rhs_shape = ctx.get_shape(expr.rhs)
-        shape = ctx.merge_shape(lhs_shape, rhs_shape, True)
-        self.shape = shape
-
-    def total_size(self):
-        return Times.make(self.shape).normalize()
+    def loop_size(self, expr: Expr):
+        shape = self.get_shape(expr)
+        return Times.make(shape).normalize().map(lambda e: self.eval_symbol_shape(e))

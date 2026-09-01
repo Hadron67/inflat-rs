@@ -1,5 +1,3 @@
-
-
 import ctypes
 from abc import abstractmethod
 

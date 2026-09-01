@@ -52,7 +52,6 @@ from .type import (
     ComplexFloatType,
     LowerType,
     SymbolShape,
-    TypedAssignExpr,
     TypeResolver,
     TypesConfig,
     get_peer_types,
@@ -86,36 +85,25 @@ class ArrayArgInfo(SymbolArgInfo):
         return f"%{self.ptr}: Array(strides=({", ".join(str(i) for i in self.strides)}))"
 
 
-def _check_and_get_total_size(exprs: list[TypedAssignExpr], reduction: 'TypedReductionExpr | None' = None, resolver: 'TypeResolver | None' = None):
+def _check_and_get_loop_size(exprs: list[AssignExpr], reduction: Expr | None, resolver: TypeResolver):
     assert len(exprs) > 0 or reduction is not None, "no expressions to compile"
     if len(exprs) > 0:
-        first_size = exprs[0].total_size()
+        # the loop iterates the left-hand side shape: the loop size must be
+        # consistent with ``_compile_assignment``, which unpacks the loop index
+        # from ``get_shape(expr.lhs)``
+        first_size = resolver.loop_size(exprs[0].lhs)
         rest = exprs[1:]
     else:
         assert reduction is not None
-        first_size = reduction.total_size()
+        first_size = resolver.loop_size(reduction)
         rest = []
 
-    def resolve_size(expr: Expr) -> tuple[Expr, ...]:
-        if resolver is None:
-            resolved = expr
-        else:
-            resolved_shapes = resolver.resolved_shapes
-            resolved = expr.map(lambda e: resolved_shapes.get(e, e) if isinstance(e, SymbolShape) else e)
-        # total sizes are products of shape variables; compare them as multisets,
-        # since the shape variables may have been constrained to equal each other
-        # in different orders
-        if isinstance(resolved, Times):
-            return tuple(sorted(resolved.children))
-        return (resolved,)
-
-    first_resolved = resolve_size(first_size)
     for expr in rest:
-        expr_size = expr.total_size()
-        assert first_resolved == resolve_size(expr_size), f"incompatible expressions {exprs[0]} and {expr}, with incompatible total sizes {first_size} and {expr_size}"
+        expr_size = resolver.loop_size(expr.lhs)
+        assert first_size == expr_size, f"incompatible expressions {exprs[0]} and {expr}, with incompatible total sizes {first_size} and {expr_size}"
     if reduction is not None:
-        reduction_size = reduction.total_size()
-        assert first_resolved == resolve_size(reduction_size), f"incompatible reduction expression {reduction.expr}, with total size {reduction_size}, expected {first_size}"
+        reduction_size = resolver.loop_size(reduction)
+        assert first_size == reduction_size, f"incompatible reduction expression {reduction}, with total size {reduction_size}, expected {first_size}"
 
     assert first_size is not None, "cannot compile expression with unspecified shapes"
 
@@ -142,14 +130,17 @@ class StandardLayoutMode(Enum):
     ROW_MAJOR = "row"
 
 
-def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_layout: StandardLayoutMode) -> Callable:
+def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_layout: StandardLayoutMode, inner_count: int) -> Callable:
     """Generate the ``__invoke(self, values)`` function of a
     :class:`CompiledWrapper`.
 
     The function is specialised per kernel: the argument-count check, the
     layout check, the shape validation and the per-symbol ctypes conversion are
     unrolled into straight-line code, so a call reduces to plain indexing and
-    conversions instead of an interpreted loop."""
+    conversions instead of an interpreted loop.  A wrapper may hold several
+    compiled kernels (one per loop length); each one is invoked with the same
+    converted arguments, and the (single, optional) reduction result is
+    returned."""
     index_ctype = parent.index_type.to_ctype()
     symbol_order = symbols.get_symbol_order()
     arg_count = len(symbol_order)
@@ -242,8 +233,18 @@ def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_la
                     ]
     lines += [
         '    assert None not in ret',
-        '    return self._inner.call(*ret)',
     ]
+    if inner_count == 1:
+        lines.append('    return self._inner[0].call(*ret)')
+    else:
+        lines += ['    ret_val = None']
+        for i in range(inner_count):
+            lines += [
+                f'    r{i} = self._inner[{i}].call(*ret)',
+                f'    if r{i} is not None:',
+                f'        ret_val = r{i}',
+            ]
+        lines.append('    return ret_val')
     exec('\n'.join(lines), globals)  # noqa: S102
     return globals['__invoke']
 
@@ -845,16 +846,15 @@ class _FunctionCompiler:
         assert not isinstance(ret, ComplexValue)
         return ret
 
-    def _compile_assignment(self, typed_expr: TypedAssignExpr, tid: Value):
-        expr = typed_expr.expr
-
+    def _compile_assignment(self, expr: AssignExpr, tid: Value):
+        expr_shape = self._type_cache.get_shape(expr.lhs)
         if self._standard_layout is StandardLayoutMode.NONE:
-            if len(typed_expr.shape) == 0:
+            if len(expr_shape) == 0:
                 # scalar assignment: no array subscripts to unpack
                 subscripts: _SubscriptsInfo = _RealSubscriptsInfo(())
             else:
                 shape: list[Value] = []
-                for i in typed_expr.shape:
+                for i in expr_shape:
                     type = self._type_cache.get_type(i)
                     assert isinstance(type, ap.IntType), f"integer type expected for shape, got {type}"
                     value = self.compile_non_complex_expr(i, _RealSubscriptsInfo(()))
@@ -898,7 +898,7 @@ class _FunctionCompiler:
         # then read by a later assignment), so drop the cached expression values
         self._expr_cache.clear()
 
-    def compile_assignments(self, exprs: list[TypedAssignExpr], tid: Value):
+    def compile_assignments(self, exprs: list[AssignExpr], tid: Value):
         assert not self._finished
         self._finished = True
 
@@ -909,16 +909,21 @@ class _FunctionCompiler:
 
 class CompiledWrapper:
     @override
-    def __init__(self, parent: 'JitCompiler', symbols: _SymbolScope, inner: CompiledBackendFunction, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
+    def __init__(self, parent: 'JitCompiler', symbols: _SymbolScope, inner: tuple[CompiledBackendFunction, ...], standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
         self._parent = parent
         self._symbols = symbols
         self._inner = inner
         self.standard_layout = standard_layout
-        self._invoke = _gen_call_invoke(symbols, parent, standard_layout)
+        self._invoke = _gen_call_invoke(symbols, parent, standard_layout, len(inner))
 
     def call(self, *values: Any) -> Any:
-        """Call the compiled kernel with the arguments in the order of the symbols
-        passed to ``compile_assignments``/``compile_reduction``."""
+        """Call the compiled kernels with the arguments in the order of the symbols
+        passed to ``compile_assignments``/``compile_reduction``.
+
+        When the wrapper holds several kernels (one per loop length), they are
+        invoked in the order their loop lengths first appear among the
+        assignments; the result of the (optional) reduction kernel is returned.
+        """
         return self._invoke(self, values)
 
     @override
@@ -926,17 +931,7 @@ class CompiledWrapper:
         return f"CompiledWrapper(symbols={self._symbols}, inner={self._inner})"
 
     def print_all(self):
-        return self._inner.print_all()
-
-class TypedReductionExpr:
-    def __init__(self, expr: Expr, ctx: TypeResolver) -> None:
-        self.expr = expr
-        # get_shape returns the shape in natural axis order (outermost first,
-        # like numpy's ``.shape``); the loop unpacking consumes it as-is
-        self.shape = ctx.get_shape(expr)
-
-    def total_size(self):
-        return Times.make(self.shape).normalize()
+        return [line for inner in self._inner for line in inner.print_all()]
 
 class _AssignmentsKernel(LoopKernel):
     @override
@@ -944,17 +939,22 @@ class _AssignmentsKernel(LoopKernel):
         type_cache = type_resolver
         self._parent = parent
         self._type_cache = type_cache
-        self._exprs: list[TypedAssignExpr] = [TypedAssignExpr(a, type_cache) for a in exprs]
-        self._reduction: TypedReductionExpr | None = None
+        self._exprs = exprs
+        # validate that every assignment broadcasts into its left-hand side:
+        # rank mismatches (rhs has more axes than lhs) are rejected here, while
+        # per-axis size mismatches are verified against the concrete shapes at
+        # call time
+        for expr in exprs:
+            type_cache.merge_expr_shapes(expr.lhs, expr.rhs, True)
+        self._reduction = reduction
         self.reduction_type: LowerType | None = None
         if reduction is not None:
-            self._reduction = TypedReductionExpr(reduction, type_cache)
             reduction_type = type_cache.get_type(reduction)
             if isinstance(reduction_type, ap.IntType):
                 # integer sums follow the C convention of being signed
                 reduction_type = ap.IntType(reduction_type.bits, True)
             self.reduction_type = reduction_type
-        self._total_size = _check_and_get_total_size(self._exprs, self._reduction, type_cache)
+        self._loop_size = _check_and_get_loop_size(self._exprs, self._reduction, type_cache)
         self._helper = CompileHelper(parent)
         self.symbol_scope = _SymbolScope(type_cache)
         for symbol in args:
@@ -981,15 +981,10 @@ class _AssignmentsKernel(LoopKernel):
         the expressions are not compatible."""
         if requested is StandardLayoutMode.NONE:
             return StandardLayoutMode.NONE
-        if len(self._exprs) > 0:
-            loop_rank = len(self._exprs[0].shape)
-        else:
-            assert self._reduction is not None
-            loop_rank = len(self._reduction.shape)
         dim_of = self._type_cache.get_symbol_dimension
         failures: list[str] = []
 
-        def check_slice_chain(expr: Slice) -> None:
+        def check_slice_chain(expr: Slice, loop_rank: int) -> None:
             # the sliced sub-expression must itself be standard layout, i.e. free of
             # slices, rolls and flips, so that the axes of the slice equal the axes
             # of the underlying arrays
@@ -1020,7 +1015,7 @@ class _AssignmentsKernel(LoopKernel):
                     f"{requested.value} layout"
                 )
 
-        def walk(expr: Expr) -> None:
+        def walk(expr: Expr, loop_rank: int) -> None:
             if isinstance(expr, Roll):
                 failures.append("np.roll is not supported in standard layout kernels")
             elif isinstance(expr, Flip):
@@ -1028,7 +1023,7 @@ class _AssignmentsKernel(LoopKernel):
             elif isinstance(expr, Coord):
                 failures.append("coord is not supported in standard layout kernels")
             elif isinstance(expr, Slice):
-                check_slice_chain(expr)
+                check_slice_chain(expr, loop_rank)
             elif isinstance(expr, SymbolShape):
                 # shape values are scalars; they do not access array data
                 return
@@ -1041,13 +1036,18 @@ class _AssignmentsKernel(LoopKernel):
                     )
             else:
                 for child in expr.subexpressions():
-                    walk(child)
+                    walk(child, loop_rank)
 
-        for typed in self._exprs:
-            walk(typed.expr.lhs)
-            walk(typed.expr.rhs)
+        for expr in self._exprs:
+            # the loop rank of an assignment is the rank of its left-hand side;
+            # assignments in one kernel may have different ranks as long as their
+            # total loop sizes match
+            loop_rank = len(self._type_cache.get_shape(expr.lhs))
+            walk(expr.lhs, loop_rank)
+            walk(expr.rhs, loop_rank)
         if self._reduction is not None:
-            walk(self._reduction.expr)
+            loop_rank = len(self._type_cache.get_shape(self._reduction))
+            walk(self._reduction, loop_rank)
         if len(failures) > 0:
             return StandardLayoutMode.NONE
         return requested
@@ -1064,8 +1064,8 @@ class _AssignmentsKernel(LoopKernel):
     def compile_total_size(self, begin: BasicBlock, args: tuple[Value, ...]) -> tuple[BasicBlock, Value]:
         cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope,
                                standard_layout=self._standard_layout)
-        value = cp.compile_non_complex_expr(self._total_size, _RealSubscriptsInfo(()))
-        type = cp._type_cache.get_type(self._total_size)
+        value = cp.compile_non_complex_expr(self._loop_size, _RealSubscriptsInfo(()))
+        type = cp._type_cache.get_type(self._loop_size)
         assert isinstance(type, ap.IntType), f"integer type expected for total size, got {type}"
         return begin, value
 
@@ -1078,7 +1078,7 @@ class _AssignmentsKernel(LoopKernel):
         if self._reduction is not None:
             if self._standard_layout is StandardLayoutMode.NONE:
                 shape: list[Value] = []
-                for i in self._reduction.shape:
+                for i in self._type_cache.get_shape(self._reduction):
                     size_type = cp._type_cache.get_type(i)
                     assert isinstance(size_type, ap.IntType), f"integer type expected for shape, got {size_type}"
                     shape.append(cp.compile_non_complex_expr(i, _RealSubscriptsInfo(())))
@@ -1087,7 +1087,7 @@ class _AssignmentsKernel(LoopKernel):
                 )
             else:
                 subscripts = _StandardLayoutSubscriptInfo(self._standard_layout, loop_var, {})
-            value = cp.compile_expr(self._reduction.expr, subscripts)
+            value = cp.compile_expr(self._reduction, subscripts)
         return begin, value
 
 class SumReductionKernel(ReductionKernel):
@@ -1139,6 +1139,21 @@ class SumReductionKernel(ReductionKernel):
 _F64 = ap.FloatType(64)
 _U64 = ap.IntType(64, False)
 
+def _group_by_loop_sizes(exprs: list[AssignExpr], type_resolver: TypeResolver) -> dict[Expr, list[AssignExpr]]:
+    groups: dict[Expr, list[AssignExpr]] = {}
+    # collect all the shape constraints first
+    for expr in exprs:
+        type_resolver.merge_expr_shapes(expr.lhs, expr.rhs)
+
+    for expr in exprs:
+        size = type_resolver.loop_size(expr.lhs)
+        if size not in groups:
+            groups[size] = []
+        groups[size].append(expr)
+
+    return groups
+
+
 class JitCompiler(TypesConfig):
     def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64):
         self._backend = backend
@@ -1153,14 +1168,48 @@ class JitCompiler(TypesConfig):
             sym for sym in by_ref_symbols
             if sym in written and type_resolver.symbol_types[sym].dimension == 0
         }
-        kernel = _AssignmentsKernel(self, args, exprs, type_resolver, effective_by_ref, reduction, standard_layout)
-        reduction_kernel: ReductionKernel | None = None
+        # split the assignments by loop length: array assignments and scalar (0-d)
+        # assignments cannot share one parallel loop, so each distinct total size
+        # compiles its own kernel.  The kernels are invoked in the order their
+        # loop length first appears among the assignments; interleaved
+        # dependencies between different loop lengths are not supported.
+        groups = _group_by_loop_sizes(exprs, type_resolver)
+        reduction_size = None
         if reduction is not None:
-            assert kernel.reduction_type is not None
-            reduction_kernel = SumReductionKernel(kernel.reduction_type, kernel._helper)
-        compiled = self._backend.compile_paralell_loop(kernel, reduction_kernel)
+            reduction_size = type_resolver.loop_size(reduction)
+        # (exprs, reduction) of every kernel to compile, in invocation order
+        specs: list[tuple[list[AssignExpr], Expr | None]] = []
+        reduction_done = reduction is None
+        for loop_size, group_exprs in groups.items():
+            cur_reduction = None
+            if not reduction_done and reduction_size == loop_size:
+                cur_reduction = reduction
+                reduction_done = True
+            specs.append((group_exprs, cur_reduction))
+        if not reduction_done:
+            # the reduction is its own loop (e.g. compile_reduction)
+            specs.append(([], reduction))
 
-        return CompiledWrapper(self, kernel.symbol_scope, compiled, standard_layout=kernel._standard_layout)
+        compiled_fns: list[CompiledBackendFunction] = []
+        primary_scope: _SymbolScope | None = None
+        invoke_layout = StandardLayoutMode.NONE
+        for group_exprs, cur_reduction in specs:
+            kernel = _AssignmentsKernel(self, args, group_exprs, type_resolver, effective_by_ref, cur_reduction, standard_layout)
+
+            reduction_kernel: ReductionKernel | None = None
+            if cur_reduction is not None:
+                assert kernel.reduction_type is not None
+                reduction_kernel = SumReductionKernel(kernel.reduction_type, kernel._helper)
+
+            compiled_fns.append(self._backend.compile_paralell_loop(kernel, reduction_kernel))
+            if primary_scope is None:
+                primary_scope = kernel.symbol_scope
+            else:
+                primary_scope.slice_checks.extend(kernel.symbol_scope.slice_checks)
+            if kernel._standard_layout is not StandardLayoutMode.NONE:
+                invoke_layout = standard_layout
+        assert primary_scope is not None
+        return CompiledWrapper(self, primary_scope, tuple(compiled_fns), standard_layout=invoke_layout)
 
     def compile_reduction(self, args: list[Symbol], expr: Expr, type_resolver: TypeResolver, by_ref_symbols: set[Symbol] | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         return self.compile_assignments(args, [], type_resolver, by_ref_symbols or set(), reduction=expr, standard_layout=standard_layout)
