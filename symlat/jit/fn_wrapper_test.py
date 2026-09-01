@@ -119,6 +119,97 @@ class JitWrapperTest(TestCase):
         f(a, b, 3)
         assert_almost_equal(a, a0 + b * 3)
 
+    def test_ndim_rank_dispatch(self):
+        # ndim is a plain Python value during tracing, so it can drive
+        # compile-time control flow: each rank compiles its own kernel
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            if a.ndim == 1:
+                a += b
+            else:
+                a += np.roll(b, 1, axis=0)
+
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        f(a, b)
+        assert_almost_equal(a, b)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        assert_almost_equal(a, np.roll(b, 1, axis=0))
+        self.assertEqual(len(f._cache), 2)
+
+    def test_ndim_drives_axis_loop(self):
+        # range(a.ndim) is unrolled at trace time, so a single jitted function
+        # works for any rank
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            for axis in range(a.ndim):
+                a += np.roll(b, 1, axis=axis)
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        assert_almost_equal(a, np.roll(b, 1, axis=0) + np.roll(b, 1, axis=1))
+
+    def test_shape_and_ndim_of_derived_expressions(self):
+        # shape/ndim are available on intermediate expressions, not just
+        # parameters; they resolve through the TypeResolver while tracing
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            assert (a + b).ndim == 2
+            assert len((a + b).shape) == 2
+            assert (a + b).shape == a.shape
+            assert (a * b).ndim == 2
+            assert a[1].ndim == 1
+            assert a[1, 2].ndim == 0
+            assert len(a[1].shape) == 1
+            assert len(a[1, 2].shape) == 0
+            assert np.roll(b, 1, axis=0).ndim == 2
+            assert np.flip(b, axis=None).ndim == 2
+            assert len(np.roll(b, 1, axis=0)[1].shape) == 1
+            a += b
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        f(a, b)
+        assert_almost_equal(a, b)
+
+    def test_coords_of_derived_shape(self):
+        # a derived shape can feed coords()/coord() like a parameter shape
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            x = coords((a + b).shape)
+            a += b * x[0]
+
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        b0 = b.copy()
+        f(a, b)
+        i = np.arange(4)[:, None]
+        assert_almost_equal(a, b0 * i)
+
+    def test_shape_and_ndim_of_scalar_arguments(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, dt):
+            assert dt.ndim == 0
+            assert len(dt.shape) == 0
+            a += dt
+
+        a = np.zeros(5)
+        f(a, 3.0)
+        assert_almost_equal(a, np.full(5, 3.0))
+
     def test_complex_arrays(self):
         wrapper = Wrapper()
 

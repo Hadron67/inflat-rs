@@ -50,7 +50,6 @@ from .type import (
     FloatType,
     IntType,
     LowerType,
-    SymbolShape,
     SymbolTypeDesc,
     TypeResolver,
 )
@@ -93,12 +92,13 @@ def _as_expr(value) -> Expr:
 class _Trace:
     """Records the assignments performed while the function is being traced."""
 
-    def __init__(self) -> None:
+    def __init__(self, type_resolver: TypeResolver) -> None:
         self.assigns: list[AssignExpr] = []
         # each ``np.sum`` in the traced body is recorded here as a placeholder
         # symbol (in first-seen order); the reductions are compiled from this
         # registry and the placeholders take their place in the expressions
         self.sums: dict[Sum, Symbol] = {}
+        self.type_resolver = type_resolver
 
     def sum_placeholder(self, sum_node: Sum) -> Symbol:
         """Return the placeholder symbol assigned to a ``Sum`` node, creating
@@ -108,8 +108,8 @@ class _Trace:
             self.sums[sum_node] = Symbol(_SUM_PREFIX + (str(len(self.sums)),))
         return self.sums[sum_node]
 
-    def make_param_probe(self, name: tuple[str, ...], rank: int) -> '_Probe':
-        return _Probe(self, Symbol(name), rank)
+    def make_param_probe(self, name: tuple[str, ...]) -> '_Probe':
+        return _Probe(self, Symbol(name))
 
     def record(self, target: '_Probe', op: str, value) -> None:
         if not isinstance(target._expr, Symbol):
@@ -120,27 +120,22 @@ class _Trace:
 class _Probe:
     """Records an element-wise operation by building an ``Expr`` tree."""
 
-    __slots__ = ('_expr', '_ndim', '_trace')
+    __slots__ = ('_expr', '_trace')
 
-    def __init__(self, trace: _Trace, expr: Expr, ndim: int | None = None) -> None:
+    def __init__(self, trace: _Trace, expr: Expr) -> None:
         self._trace = trace
         self._expr = expr
-        self._ndim = ndim
 
     def _new(self, expr: Expr) -> '_Probe':
         return _Probe(self._trace, expr)
 
     @property
     def ndim(self) -> int:
-        if self._ndim is None:
-            raise ValueError("ndim is not set")
-        return self._ndim
+        return len(self.shape)
 
     @property
     def shape(self) -> tuple[Expr, ...]:
-        if self._ndim is not None and isinstance(self._expr, Symbol):
-            return tuple(SymbolShape(self._expr, i) for i in range(self._ndim))
-        raise ValueError("shape is not available for this expression")
+        return self._trace.type_resolver.get_shape(self._expr)
 
     # --- binary arithmetic ------------------------------------------------
     def __add__(self, other):
@@ -278,7 +273,7 @@ class _Probe:
         # negative axes are normalized and out-of-range axes are rejected when
         # the rank is known, so they fail while tracing instead of during
         # kernel generation
-        ndim = array._ndim
+        ndim = array.ndim
         if axes is not None and ndim is not None:
             normalized: list[int] = []
             for ax in axes:
@@ -530,10 +525,8 @@ def _gen_args_converter(signature: Signature) -> Callable:
 
 def _create_one_probe_arg(trace: _Trace, snode: SignatureNode, name: tuple[str, ...]) -> Any:
     match snode:
-        case ArrayArgNode():
-            return trace.make_param_probe(name, snode.rank)
-        case ScalarArgNode():
-            return trace.make_param_probe(name, 0)
+        case ArrayArgNode() | ScalarArgNode():
+            return trace.make_param_probe(name)
         case ComptimeValueArgNode():
             return snode.value
         case TupleArgNode():
@@ -681,14 +674,14 @@ class _JittedFunction:
             return self
         return functools.partial(self.__call__, instance)
 
-    def _trace(self, key: _JitCacheKey) -> tuple[list[AssignExpr], dict[Sum, Symbol]]:
+    def _trace(self, key: _JitCacheKey, type_resolver: TypeResolver) -> tuple[list[AssignExpr], dict[Sum, Symbol]]:
         """Trace the function body; returns the recorded assignments together
         with the ``Sum`` -> placeholder symbol registry (in first-seen order).
 
         Compile-time arguments are traced with their constant value, so they are
         baked into the expression trees (which also enables compile-time control
         flow); the other arguments are traced with probes."""
-        trace = _Trace()
+        trace = _Trace(type_resolver)
         positional, keyword = _create_probe_args(trace, key.signature, self._args_info)
         result = self._fn(*positional, **keyword)
         if result is not None:
@@ -884,10 +877,11 @@ class _JittedFunction:
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
         )
-        assigns, sums = self._trace(key)
-        assigns = [a.normalize() for a in assigns]
         context = {sym: SymbolTypeDesc(lower_type, dim) for _, sym, lower_type, dim, _ in runtime}
         resolver = TypeResolver(context, compiler)
+
+        assigns, sums = self._trace(key, resolver)
+        assigns = [a.normalize() for a in assigns]
         # each traced ``Sum`` is compiled as a reduction kernel whose scalar
         # result is passed to the main kernel as an extra argument; the
         # placeholder symbols are typed by those results in the shared resolver
