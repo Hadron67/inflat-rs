@@ -1139,7 +1139,7 @@ class SumReductionKernel(ReductionKernel):
 _F64 = ap.FloatType(64)
 _U64 = ap.IntType(64, False)
 
-def _group_by_loop_sizes(exprs: list[AssignExpr], type_resolver: TypeResolver) -> dict[Expr, list[AssignExpr]]:
+def _group_by_loop_sizes(exprs: list[AssignExpr], reduction: Expr | None, type_resolver: TypeResolver) -> list[tuple[list[AssignExpr], Expr | None]]:
     groups: dict[Expr, list[AssignExpr]] = {}
     # collect all the shape constraints first
     for expr in exprs:
@@ -1151,8 +1151,22 @@ def _group_by_loop_sizes(exprs: list[AssignExpr], type_resolver: TypeResolver) -
             groups[size] = []
         groups[size].append(expr)
 
-    return groups
-
+    reduction_size = None
+    if reduction is not None:
+        reduction_size = type_resolver.loop_size(reduction)
+    # (exprs, reduction) of every kernel to compile, in invocation order
+    specs: list[tuple[list[AssignExpr], Expr | None]] = []
+    reduction_done = reduction is None
+    for loop_size, group_exprs in groups.items():
+        cur_reduction = None
+        if not reduction_done and reduction_size == loop_size:
+            cur_reduction = reduction
+            reduction_done = True
+        specs.append((group_exprs, cur_reduction))
+    if not reduction_done:
+        # the reduction is its own loop (e.g. compile_reduction)
+        specs.append(([], reduction))
+    return specs
 
 class JitCompiler(TypesConfig):
     def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64):
@@ -1173,22 +1187,7 @@ class JitCompiler(TypesConfig):
         # compiles its own kernel.  The kernels are invoked in the order their
         # loop length first appears among the assignments; interleaved
         # dependencies between different loop lengths are not supported.
-        groups = _group_by_loop_sizes(exprs, type_resolver)
-        reduction_size = None
-        if reduction is not None:
-            reduction_size = type_resolver.loop_size(reduction)
-        # (exprs, reduction) of every kernel to compile, in invocation order
-        specs: list[tuple[list[AssignExpr], Expr | None]] = []
-        reduction_done = reduction is None
-        for loop_size, group_exprs in groups.items():
-            cur_reduction = None
-            if not reduction_done and reduction_size == loop_size:
-                cur_reduction = reduction
-                reduction_done = True
-            specs.append((group_exprs, cur_reduction))
-        if not reduction_done:
-            # the reduction is its own loop (e.g. compile_reduction)
-            specs.append(([], reduction))
+        specs = _group_by_loop_sizes(exprs, reduction, type_resolver)
 
         compiled_fns: list[CompiledBackendFunction] = []
         primary_scope: _SymbolScope | None = None
