@@ -249,9 +249,6 @@ class TypeResolver:
         self._shape_cache: dict[Expr, tuple[Expr, ...]] = {}
         self.symbol_types = symbol_types
         self.resolved_shapes: dict[SymbolShape, Expr] = {}
-        # (length expr, index) pairs recorded while compiling slices; the bounds
-        # are verified against the concrete array dimensions at call time
-        self.slice_checks: list[tuple[Expr, int]] = []
         self.type_config = type_config
 
     def get_symbol_type(self, expr: Symbol):

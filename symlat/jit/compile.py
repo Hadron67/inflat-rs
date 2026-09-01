@@ -197,7 +197,7 @@ def _gen_call_invoke(symbols: '_SymbolScope', parent: 'JitCompiler', standard_la
             '    if v != s:',
             '        raise ValueError(f"resolved shape {v} does not match {s}")',
         ]
-    for length, index in type_cache.slice_checks:
+    for length, index in symbols.slice_checks:
         lines += [
             f'    d = {shape_eval(length)}',
             f'    if d is not None and not -d <= {index} < d:',
@@ -253,6 +253,7 @@ class _SymbolScope:
         self._symbol_order: list[Symbol] = []
         self._args: list[LowerType] = []
         self.type_cache = type_cache
+        self.slice_checks: list[tuple[Expr, int]] = []
 
     def get_symbol(self, symbol: Symbol):
         return self._symbol_values[symbol]
@@ -344,9 +345,12 @@ class _FunctionCompiler:
         self._expr_cache: dict[tuple[Any, ...], MaybeComplexValue] = {}
         self._subscript_cache: dict[tuple[tuple[Value, ...], tuple[Value, ...]], Value] = {}
         self._finished: bool = False
-        self._type_cache = symbol_scope.type_cache
         self._standard_layout = standard_layout
         self._debug = debug
+
+    @property
+    def _type_cache(self):
+        return self._symbol_scope.type_cache
 
     def _add(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
         left = self._helper.coerce(self._block, left, left_type, result_type)
@@ -444,7 +448,7 @@ class _FunctionCompiler:
         for axis, raw_index in subscripts.shifts.items():
             # record the bounds check; it is verified against the concrete
             # dimension at call time
-            self._type_cache.slice_checks.append((SymbolShape(symbol, axis), raw_index))
+            self._symbol_scope.slice_checks.append((SymbolShape(symbol, axis), raw_index))
             length = self._args[sym.shape[axis]]
             idx = self._normalize_slice_index(length, raw_index)
             stride = self._args[sym.strides[axis]]
@@ -469,7 +473,7 @@ class _FunctionCompiler:
             length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
             # record the bounds check; it is verified against the concrete
             # dimension at call time
-            self._type_cache.slice_checks.append((cur_shape[axis], index))
+            self._symbol_scope.slice_checks.append((cur_shape[axis], index))
             entries.append((axis, self._normalize_slice_index(length, index)))
         if dim == r:
             # the loop covers every axis of the sliced expression: keep the loop
@@ -510,7 +514,7 @@ class _FunctionCompiler:
             length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
             # record the bounds check; it is verified against the concrete
             # dimension at call time
-            self._type_cache.slice_checks.append((cur_shape[axis], index))
+            self._symbol_scope.slice_checks.append((cur_shape[axis], index))
             value_at[axis] = self._normalize_slice_index(length, index)
         for j, axis in enumerate(surviving):
             value_at[axis] = subscripts.subscripts[j]
