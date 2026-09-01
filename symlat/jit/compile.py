@@ -936,7 +936,7 @@ class CompiledWrapper:
 
 class _AssignmentsKernel(LoopKernel):
     @override
-    def __init__(self, parent: 'JitCompiler', args: list[Symbol], exprs: list[AssignExpr], type_resolver: TypeResolver, by_ref_symbols: set[Symbol], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
+    def __init__(self, parent: 'JitCompiler', symbol_scope: _SymbolScope, exprs: list[AssignExpr], type_resolver: TypeResolver, reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
         type_cache = type_resolver
         self._parent = parent
         self._type_cache = type_cache
@@ -957,9 +957,7 @@ class _AssignmentsKernel(LoopKernel):
             self.reduction_type = reduction_type
         self._loop_size = _check_and_get_loop_size(self._exprs, self._reduction, type_cache)
         self._helper = CompileHelper(parent)
-        self.symbol_scope = _SymbolScope(type_cache)
-        for symbol in args:
-            self.symbol_scope.add_symbol(symbol, by_ref_symbols)
+        self.symbol_scope = symbol_scope
         self._standard_layout = self._check_standard_layout(standard_layout)
 
     @staticmethod
@@ -1183,6 +1181,11 @@ class JitCompiler(TypesConfig):
             sym for sym in by_ref_symbols
             if sym in written and type_resolver.symbol_types[sym].dimension == 0
         }
+
+        symbol_scope = _SymbolScope(type_resolver)
+        for symbol in args:
+            symbol_scope.add_symbol(symbol, effective_by_ref)
+
         # split the assignments by loop length: array assignments and scalar (0-d)
         # assignments cannot share one parallel loop, so each distinct total size
         # compiles its own kernel.  The kernels are invoked in the order their
@@ -1191,10 +1194,9 @@ class JitCompiler(TypesConfig):
         specs = _group_by_loop_sizes(exprs, reduction, type_resolver)
 
         compiled_fns: list[CompiledBackendFunction] = []
-        primary_scope: _SymbolScope | None = None
         invoke_layout = StandardLayoutMode.NONE
         for group_exprs, cur_reduction in specs:
-            kernel = _AssignmentsKernel(self, args, group_exprs, type_resolver, effective_by_ref, cur_reduction, standard_layout)
+            kernel = _AssignmentsKernel(self, symbol_scope, group_exprs, type_resolver, cur_reduction, standard_layout)
 
             reduction_kernel: ReductionKernel | None = None
             if cur_reduction is not None:
@@ -1202,14 +1204,9 @@ class JitCompiler(TypesConfig):
                 reduction_kernel = SumReductionKernel(kernel.reduction_type, kernel._helper)
 
             compiled_fns.append(self._backend.compile_paralell_loop(kernel, reduction_kernel))
-            if primary_scope is None:
-                primary_scope = kernel.symbol_scope
-            else:
-                primary_scope.slice_checks.extend(kernel.symbol_scope.slice_checks)
             if kernel._standard_layout is not StandardLayoutMode.NONE:
                 invoke_layout = standard_layout
-        assert primary_scope is not None
-        return CompiledWrapper(self, primary_scope, tuple(compiled_fns), standard_layout=invoke_layout)
+        return CompiledWrapper(self, symbol_scope, tuple(compiled_fns), standard_layout=invoke_layout)
 
     def compile_reduction(self, args: list[Symbol], expr: Expr, type_resolver: TypeResolver, by_ref_symbols: set[Symbol] | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         return self.compile_assignments(args, [], type_resolver, by_ref_symbols or set(), reduction=expr, standard_layout=standard_layout)
