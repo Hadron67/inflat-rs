@@ -17,7 +17,8 @@ import functools
 import inspect
 import operator
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, is_dataclass
 from inspect import Parameter
 from typing import Any, Literal, overload
 
@@ -354,6 +355,45 @@ class _Probe:
         raise TypeError("comparisons are not supported in jitted functions")
 
 
+_active_trace: ContextVar['_Trace | None'] = ContextVar('symlat_active_trace', default=None)
+
+def evaluate_expr(expr: Expr, subs: dict[Expr, Any] | None = None) -> Any:
+    """Turn a symbolic expression into a value usable inside a jitted function.
+
+    ``expr`` is a plain :class:`symlat.expr.Expr` (e.g. a potential written in
+    terms of placeholder symbols).  ``subs`` first replaces the symbols of
+    ``expr``: each value is either a traced value (a probe of the running
+    function, substituted by its symbol), an ``Expr``, or a plain constant
+    (baked into the expression).  The result behaves like any other traced
+    value: it can be combined with arrays and scalars and reduced with
+    ``np.sum``.
+
+    Only usable while a jitted function is being traced, i.e. inside the body
+    of a function decorated with ``Wrapper.jit``.
+    """
+    trace = _active_trace.get()
+    if trace is None:
+        raise TypeError(
+            "evaluate_expr can only be called inside a jitted function"
+        )
+    if subs is not None:
+        replaced: dict[Expr, Expr] = {}
+        for key, value in subs.items():
+            if isinstance(value, _Probe):
+                # substitute the symbol traced for the value
+                replaced[key] = value._expr
+            elif isinstance(value, Expr):
+                replaced[key] = value
+            else:
+                if isinstance(value, np.integer):
+                    value = int(value)
+                elif isinstance(value, np.floating):
+                    value = float(value)
+                replaced[key] = Expr.as_expr(value)
+        expr = expr.replace(replaced)
+    return _Probe(trace, expr)
+
+
 def _determine_layout(values) -> StandardLayoutMode:
     """Pick the kernel layout that matches the actual array arguments.
 
@@ -683,7 +723,11 @@ class _JittedFunction:
         flow); the other arguments are traced with probes."""
         trace = _Trace(type_resolver)
         positional, keyword = _create_probe_args(trace, key.signature, self._args_info)
-        result = self._fn(*positional, **keyword)
+        token = _active_trace.set(trace)
+        try:
+            result = self._fn(*positional, **keyword)
+        finally:
+            _active_trace.reset(token)
         if result is not None:
             raise TypeError(
                 f"{self.__name__}() must not return values; mutate the input arrays in place "
@@ -737,9 +781,21 @@ class _JittedFunction:
         try:
             self._infer_arg_type(value)
         except TypeError:
+            if is_dataclass(value) and not isinstance(value, type):
+                # immutable (frozen) dataclasses are pure data: bake the whole
+                # value as a compile-time constant instead of inlining its fields
+                try:
+                    hash(value)
+                except TypeError:
+                    pass  # a mutable dataclass is inlined like other objects
+                else:
+                    return True
             if getattr(value, '__dict__', None) is not None:
                 # general objects with instance attributes are inlined instead of
                 # being baked as compile-time constants
+                return False
+            if isinstance(value, dict):
+                # plain dicts are inlined like the ``**kwargs`` container
                 return False
             try:
                 hash(value)
@@ -779,6 +835,16 @@ class _JittedFunction:
                 entries.add((name, node))
                 next_pos += count
             return DictArgNode(frozenset(entries), type=type(value)), next_pos - runtime_arg_pos
+        if isinstance(value, dict):
+            # a plain dict attribute/value is inlined like the ``**kwargs``
+            # container: its values are looked up by key at kernel-call time
+            next_pos = runtime_arg_pos
+            entries = set()
+            for name in sorted(value):
+                node, count = self._classify(-1, value[name], next_pos)
+                entries.add((name, node))
+                next_pos += count
+            return DictArgNode(frozenset(entries), type=dict), next_pos - runtime_arg_pos
         raise TypeError(f"unsupported argument type: {type(value).__name__}")
 
     def _build_signature(self, fixed: list[Any], variadic: list[Any], keyword: dict[str, Any]) -> Signature:

@@ -10,7 +10,22 @@ S=\int d^{d+1}x\sqrt{-g}\left[\frac{1}{2\kappa}R-\Lambda-\frac12 g^{\mu\nu}\part
 \[
 ds^2=-dt^2+a^2(t)\delta_{ij}dx^i dx^j .
 \]
-空间维数为 \(d\)，空间体积 \(V=L^d\)，格点数 \(M=N^d\)，格距 \(h=L/N\)，每个格点体积 \(h^d\)。
+空间维数为 \(d\)，每个空间方向的物理长度为 \(L_i\ (i=1,\dots,d)\)，格点数为 \(N_i\)，格距为  
+\[
+h_i = \frac{L_i}{N_i},\qquad i=1,\dots,d .
+\]
+总格点数为  
+\[
+M = \prod_{i=1}^d N_i,
+\]
+每个格点的体积为  
+\[
+h_{\rm vol} = \prod_{i=1}^d h_i .
+\]
+空间总体积为  
+\[
+V = \prod_{i=1}^d L_i = M h_{\rm vol}.
+\]
 
 ## 2. 辅助变量与离散哈密顿量
 
@@ -20,7 +35,7 @@ b=a^{d/2},\qquad \pi_b=\frac{2}{d}a^{1-d/2}\pi_a .
 \]
 场量 \(\phi_i\) 定义在格点 \(i\)，其共轭动量为  
 \[
-p_i=\pi_\phi(x_i)\,h^d .
+p_i=\pi_\phi(x_i)\,h_{\rm vol} .
 \]
 
 离散化后的总哈密顿量为  
@@ -31,12 +46,12 @@ H=K_1+K_2+K_3,
 \[
 \begin{aligned}
 K_1&=-\frac{\kappa d}{8(d-1)V}\,\pi_b^2,\\[4pt]
-K_2&=\frac{1}{2b^2 h^d}\sum_i p_i^2,\\[4pt]
-K_3&=\frac12 b^{2-4/d}h^{d-2}\sum_{\langle ij\rangle}(\phi_i-\phi_j)^2
-+b^2 h^d\sum_i\bigl[V(\phi_i)+\Lambda\bigr].
+K_2&=\frac{1}{2b^2 h_{\rm vol}}\sum_i p_i^2,\\[4pt]
+K_3&=\frac12 b^{2-4/d}\sum_{k=1}^d \frac{h_{\rm vol}}{h_k^2}\sum_{\langle ij\rangle_k}(\phi_i-\phi_j)^2
++b^2 h_{\rm vol}\sum_i\bigl[V(\phi_i)+\Lambda\bigr].
 \end{aligned}
 \]
-这里 \(\langle ij\rangle\) 表示最近邻格点对，\(\pi_b\) 为全局共轭动量，与 \(b\) 共轭。
+这里 \(\langle ij\rangle_k\) 表示沿第 \(k\) 个空间方向的最近邻格点对（每对只计一次），\(\pi_b\) 为全局共轭动量，与 \(b\) 共轭。
 
 每一项都不含同一对共轭坐标：
 - \(K_1\) 只含 \(\pi_b\);
@@ -66,17 +81,17 @@ b \leftarrow b-\frac{\kappa d}{4(d-1)V}\pi_b\,\tau
 
 运动方程：
 \[
-\dot\phi_i=\frac{\partial K_2}{\partial p_i}=\frac{p_i}{b^2 h^d},\qquad
+\dot\phi_i=\frac{\partial K_2}{\partial p_i}=\frac{p_i}{b^2 h_{\rm vol}},\qquad
 \dot p_i=0,\qquad
 \dot b=0,\qquad
 \dot\pi_b=-\frac{\partial K_2}{\partial b}
-=\frac{\sum_i p_i^2}{b^3 h^d}.
+=\frac{\sum_i p_i^2}{b^3 h_{\rm vol}}.
 \]
 更新为  
 \[
-\phi_i \leftarrow \phi_i+\frac{p_i}{b^2 h^d}\,\tau,
+\phi_i \leftarrow \phi_i+\frac{p_i}{b^2 h_{\rm vol}}\,\tau,
 \qquad
-\pi_b \leftarrow \pi_b+\frac{\sum_i p_i^2}{b^3 h^d}\,\tau
+\pi_b \leftarrow \pi_b+\frac{\sum_i p_i^2}{b^3 h_{\rm vol}}\,\tau
 \]
 其他变量不变。
 
@@ -91,28 +106,31 @@ b \leftarrow b-\frac{\kappa d}{4(d-1)V}\pi_b\,\tau
 \[
 \frac{\partial K_3}{\partial \phi_i}
 =
-b^{2-4/d}h^{d-2}\sum_{j\sim i}(\phi_i-\phi_j)
-+b^2 h^d V'(\phi_i),
+b^{2-4/d}\sum_{k=1}^d \frac{h_{\rm vol}}{h_k^2}
+\sum_{j\in{\rm nbr}_k(i)}(\phi_i-\phi_j)
++b^2 h_{\rm vol} V'(\phi_i),
 \]
+其中 \(\mathrm{nbr}_k(i)\) 表示格点 \(i\) 沿第 \(k\) 个方向的两个最近邻格点（若使用周期性边界条件，通常为两个；若格点数过少需注意边界处理）。
 \[
 \frac{\partial K_3}{\partial b}
 =
-\left(1-\frac2d\right)b^{1-4/d}h^{d-2}
-\sum_{\langle ij\rangle}(\phi_i-\phi_j)^2
-+2b h^d\sum_i\bigl[V(\phi_i)+\Lambda\bigr].
+\left(1-\frac2d\right)b^{1-4/d}\sum_{k=1}^d \frac{h_{\rm vol}}{h_k^2}
+\sum_{\langle ij\rangle_k}(\phi_i-\phi_j)^2
++2b h_{\rm vol}\sum_i\bigl[V(\phi_i)+\Lambda\bigr].
 \]
 更新为  
 \[
 p_i \leftarrow p_i-\tau\left[
-b^{2-4/d}h^{d-2}\sum_{j\sim i}(\phi_i-\phi_j)
-+b^2 h^d V'(\phi_i)
+b^{2-4/d}\sum_{k=1}^d \frac{h_{\rm vol}}{h_k^2}
+\sum_{j\in{\rm nbr}_k(i)}(\phi_i-\phi_j)
++b^2 h_{\rm vol} V'(\phi_i)
 \right]
 \]
 \[
 \pi_b \leftarrow \pi_b-\tau\left[
-\left(1-\frac2d\right)b^{1-4/d}h^{d-2}
-\sum_{\langle ij\rangle}(\phi_i-\phi_j)^2
-+2b h^d\sum_i\bigl(V(\phi_i)+\Lambda\bigr)
+\left(1-\frac2d\right)b^{1-4/d}\sum_{k=1}^d \frac{h_{\rm vol}}{h_k^2}
+\sum_{\langle ij\rangle_k}(\phi_i-\phi_j)^2
++2b h_{\rm vol}\sum_i\bigl[V(\phi_i)+\Lambda\bigr]
 \right]
 \]
 其他变量不变。
@@ -137,5 +155,6 @@ e^{w_3\tau K_3}
 
 ## 5. 备注
 
+- 若所有方向的格距相同，即 \(h_1=\cdots=h_d=h\)，则 \(h_{\rm vol}=h^d\)，上述公式退化为各向同性情形。
 - 引力动能项符号为负，这是引力约束动力学的标准结果。
-- 上述离散化使用前向差分（求和后等价于后向差分），变分后自然得到标准三点拉普拉斯，保持哈密顿结构，适合保辛演化。
+- 上述离散化使用前向差分（求和后等价于后向差分），变分后自然得到各方向标准三点拉普拉斯，保持哈密顿结构，适合保辛演化。

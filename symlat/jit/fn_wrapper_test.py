@@ -1,4 +1,5 @@
 import ctypes
+from dataclasses import dataclass
 from typing import Any
 from unittest import TestCase
 
@@ -6,8 +7,8 @@ import numpy as np
 from llvmlite import binding as llvm
 from numpy.testing import assert_almost_equal
 
-from ..expr import coord, coords
-from .fn_wrapper import Wrapper
+from ..expr import Int, Symbol, coord, coords
+from .fn_wrapper import Wrapper, evaluate_expr
 
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
@@ -1203,4 +1204,101 @@ class ObjectInliningTest(TestCase):
         f(x, obj=Test(a, b))
         assert_almost_equal(x, a * b)
 
-all_tests = [JitWrapperTest, ObjectInliningTest]
+    def test_object_inlining_with_dict_attr(self):
+        # a plain dict attribute is inlined like the **kwargs container
+        wrapper = Wrapper()
+
+        class Test:
+            def __init__(self, a: np.ndarray, b: np.ndarray):
+                self.a = a
+                self.b = b
+                self.params = {'coef': 2.0, 'off': 1.0}
+
+            @wrapper.jit()
+            def run(self, dt: float):
+                self.a += self.b * self.params['coef'] * dt + self.params['off']
+
+        np.random.seed(6)
+        a = np.zeros((4, 5))
+        b = np.random.rand(4, 5)
+        Test(a, b).run(0.5)
+        assert_almost_equal(a, b * 2.0 * 0.5 + 1.0)
+
+    def test_frozen_dataclass_is_baked(self):
+        # immutable (frozen) dataclass arguments are pure data: they are baked
+        # as compile-time constants instead of being inlined field by field
+        wrapper = Wrapper()
+
+        @dataclass(frozen=True)
+        class Coeff:
+            scale: float
+            shift: float
+
+        @wrapper.jit()
+        def f(a, b, coeff):
+            a += b * coeff.scale + coeff.shift
+
+        np.random.seed(7)
+        a = np.zeros(6)
+        b = np.random.rand(6)
+        f(a, b, Coeff(2.0, 1.0))
+        assert_almost_equal(a, b * 2.0 + 1.0)
+        # a different compile-time value compiles a separate kernel
+        a = np.zeros(6)
+        f(a, b, Coeff(0.5, 3.0))
+        assert_almost_equal(a, b * 0.5 + 3.0)
+        self.assertEqual(len(f._cache), 2)
+
+class EvaluateExprTest(TestCase):
+    def test_evaluate_expr_with_probe_substitution(self):
+        # evaluate_expr turns a plain expression into a traced value, with the
+        # symbols replaced by the traced values passed in ``subs``
+        wrapper = Wrapper()
+        phi = Symbol(('phi',))
+        expr = phi * phi * 2
+
+        @wrapper.jit()
+        def f(a, b, c):
+            a += evaluate_expr(expr, {phi: b}) + c
+
+        np.random.seed(10)
+        a = np.zeros(6)
+        b = np.random.rand(6)
+        f(a, b, 3.0)
+        assert_almost_equal(a, b * b * 2 + 3.0)
+
+    def test_evaluate_expr_with_constant_substitution(self):
+        wrapper = Wrapper()
+        phi = Symbol(('phi',))
+        m = Symbol(('param', 'm'))
+        expr = m * phi
+
+        @wrapper.jit()
+        def f(a, b):
+            a += evaluate_expr(expr, {phi: b, m: 1.5})
+
+        np.random.seed(11)
+        a = np.zeros(5)
+        b = np.random.rand(5)
+        f(a, b)
+        assert_almost_equal(a, b * 1.5)
+
+    def test_evaluate_expr_in_sum(self):
+        wrapper = Wrapper()
+        phi = Symbol(('phi',))
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sum(evaluate_expr(phi * phi + 1, {phi: b}))
+
+        np.random.seed(12)
+        a = np.zeros((3, 4))
+        b = np.random.rand(3, 4)
+        f(a, b)
+        assert_almost_equal(a, np.full((3, 4), np.sum(b * b + 1)))
+
+    def test_evaluate_expr_outside_jit_raises(self):
+        with self.assertRaises(TypeError):
+            evaluate_expr(Int(1))
+
+all_tests = [JitWrapperTest, ObjectInliningTest, EvaluateExprTest]
