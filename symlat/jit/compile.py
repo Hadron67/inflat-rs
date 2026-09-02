@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, override
 
 import numpy as np
+from llvmlite import binding as llvm
 
 from ..expr import (
     AssignExpr,
@@ -30,22 +31,29 @@ from ..expr import (
 from . import type as ap
 from .backend import (
     Backend,
-    CompiledBackendFunction,
     DebugInterface,
     LoopKernel,
     ReductionKernel,
 )
-from .helper import CompileHelper, ComplexValue, MaybeComplexValue
+from .helper import (
+    _GLOBAL_HELPERS,
+    CompileHelper,
+    ComplexValue,
+    MaybeComplexValue,
+)
 from .llvm import (
     Add,
     BasicBlock,
     FAdd,
     FloatType,
     FloatValue,
+    Function,
     IntType,
     IntValue,
+    Module,
     Ordering,
     Value,
+    VoidType,
     VoidValue,
 )
 from .type import (
@@ -275,14 +283,14 @@ class _SymbolScope:
         self._args.append(type)
         return ret
 
-    def add_symbol(self, symbol: Symbol, by_ref: set[Symbol] | None = None):
+    def add_symbol(self, symbol: Symbol, is_ref: bool = False):
         """Register one function argument.  The registration order is the positional
         argument order of the compiled function."""
         if symbol in self._symbol_values:
             raise ValueError(f"duplicate symbol {symbol} in function arguments")
         lower_type = self.type_cache.get_symbol_type(symbol)
         dim = self.type_cache.get_symbol_dimension(symbol)
-        is_ref = by_ref is not None and symbol in by_ref
+        ret: SymbolArgInfo | None = None
         if dim == 0:
             if is_ref:
                 # scalar references are passed as pointers so that writes
@@ -908,6 +916,50 @@ class _FunctionCompiler:
 
         return self._block
 
+class CompiledBackendFunction:
+    @override
+    def __init__(self, mod: Module, entry_name: str, args_type: tuple[type[ctypes._CDataType], ...], ret_type: type[ctypes._CDataType] | None) -> None:
+        self._mod = mod
+
+        target = llvm.Target.from_default_triple()
+        tm = target.create_target_machine()
+
+        llvm_mod = llvm.parse_assembly('\n'.join(mod.write()))
+        llvm_mod.verify()
+
+        backing_mod = llvm.parse_assembly('')
+        engine = llvm.create_mcjit_compiler(backing_mod, tm)
+        self._engine = engine
+        engine.add_module(llvm_mod)
+
+        # map every externally declared function to a symbol of the process:
+        # first the python-side helpers (e.g. echo), then the shared libraries
+        # (e.g. libomp); llvm intrinsics are lowered by llvm itself
+        libc = ctypes.CDLL(None)
+        helper_of = dict(_GLOBAL_HELPERS)
+        for f in llvm_mod.functions:
+            if not f.is_declaration:
+                continue
+            addr = helper_of.get(f.name)
+            if addr is None:
+                try:
+                    addr = ctypes.cast(getattr(libc, f.name), ctypes.c_void_p).value
+                except AttributeError:
+                    continue
+            engine.add_global_mapping(f, addr)
+        engine.finalize_object()
+        engine.run_static_constructors()
+
+        entry_type = ctypes.CFUNCTYPE(ret_type, *args_type)
+        addr = engine.get_function_address(entry_name)
+        self._entry: ctypes._CFunctionType = ctypes.cast(addr, entry_type)
+
+    def call(self, *args):
+        return self._entry(*args)
+
+    def print_all(self) -> list[str]:
+        return self._mod.write()
+
 class CompiledWrapper:
     @override
     def __init__(self, parent: 'JitCompiler', symbols: _SymbolScope, inner: tuple[CompiledBackendFunction, ...], standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> None:
@@ -1138,7 +1190,13 @@ class SumReductionKernel(ReductionKernel):
 _F64 = ap.FloatType(64)
 _U64 = ap.IntType(64, False)
 
-def _group_by_loop_sizes(exprs: list[AssignExpr], reduction: Expr | None, type_resolver: TypeResolver) -> list[tuple[list[AssignExpr], Expr | None]]:
+@dataclass
+class _CompileSpec:
+    assigns: list[AssignExpr]
+    reduction: Expr | None
+    size: Expr
+
+def _group_by_loop_sizes(exprs: list[AssignExpr], reduction: Expr | None, type_resolver: TypeResolver) -> list[_CompileSpec]:
     groups: dict[Expr, list[AssignExpr]] = {}
     # collect all the shape constraints first
     for expr in exprs:
@@ -1154,17 +1212,18 @@ def _group_by_loop_sizes(exprs: list[AssignExpr], reduction: Expr | None, type_r
     if reduction is not None:
         reduction_size = type_resolver.loop_size(reduction)
     # (exprs, reduction) of every kernel to compile, in invocation order
-    specs: list[tuple[list[AssignExpr], Expr | None]] = []
+    specs: list[_CompileSpec] = []
     reduction_done = reduction is None
     for loop_size, group_exprs in groups.items():
         cur_reduction = None
         if not reduction_done and reduction_size == loop_size:
             cur_reduction = reduction
             reduction_done = True
-        specs.append((group_exprs, cur_reduction))
+        specs.append(_CompileSpec(group_exprs, cur_reduction, loop_size))
     if not reduction_done:
+        assert reduction_size is not None
         # the reduction is its own loop (e.g. compile_reduction)
-        specs.append(([], reduction))
+        specs.append(_CompileSpec([], reduction, reduction_size))
     return specs
 
 class JitCompiler(TypesConfig):
@@ -1184,7 +1243,7 @@ class JitCompiler(TypesConfig):
 
         symbol_scope = _SymbolScope(type_resolver)
         for symbol in args:
-            symbol_scope.add_symbol(symbol, effective_by_ref)
+            symbol_scope.add_symbol(symbol, symbol in effective_by_ref)
 
         # split the assignments by loop length: array assignments and scalar (0-d)
         # assignments cannot share one parallel loop, so each distinct total size
@@ -1195,18 +1254,58 @@ class JitCompiler(TypesConfig):
 
         compiled_fns: list[CompiledBackendFunction] = []
         invoke_layout = StandardLayoutMode.NONE
-        for group_exprs, cur_reduction in specs:
-            kernel = _AssignmentsKernel(self, symbol_scope, group_exprs, type_resolver, cur_reduction, standard_layout)
+        for spec in specs:
+            kernel = _AssignmentsKernel(self, symbol_scope, spec.assigns, type_resolver, spec.reduction, standard_layout)
 
             reduction_kernel: ReductionKernel | None = None
-            if cur_reduction is not None:
+            if spec.reduction is not None:
                 assert kernel.reduction_type is not None
                 reduction_kernel = SumReductionKernel(kernel.reduction_type, kernel._helper)
 
-            compiled_fns.append(self._backend.compile_paralell_loop(kernel, reduction_kernel))
+            compiled_fns.append(self._compile_kernel(kernel, reduction_kernel))
             if kernel._standard_layout is not StandardLayoutMode.NONE:
                 invoke_layout = standard_layout
         return CompiledWrapper(self, symbol_scope, tuple(compiled_fns), standard_layout=invoke_layout)
+
+    def _compile_kernel(self, kernel: LoopKernel, reduction_kernel: ReductionKernel | None) -> CompiledBackendFunction:
+        """Create the external function of one kernel and JIT-compile it.
+
+        The external function is the C-visible entry point: it takes the kernel
+        arguments (in symbol order) and returns the reduction result, or void.
+        With a reduction the accumulator is allocated and zero-initialised in
+        the entry block; the backend reduces into it while the parallel loop
+        runs, and the tail block it returns loads the result and returns it.
+        """
+        arg_types = kernel.get_args()
+        ret_type: LowerType | None = None
+        if reduction_kernel is not None:
+            ret_type = reduction_kernel.get_type()
+
+        fn = Function('main')
+        fn.add_args(*(t.to_llvm_type() for t in arg_types))
+        fn.set_return_type(VoidType() if ret_type is None else ret_type.to_llvm_type())
+
+        reduction_ptr = None
+        if reduction_kernel is not None:
+            assert ret_type is not None
+            reduction_ptr = fn.entry.alloca(ret_type.to_llvm_type())
+            reduction_kernel.store_initial_value(fn.entry, reduction_ptr)
+
+        block = self._backend.compile_paralell_loop(fn.entry, fn.get_args(), kernel, reduction_kernel, reduction_ptr)
+        if reduction_ptr is not None:
+            block.ret(block.load(reduction_ptr))
+        else:
+            block.ret(VoidValue())
+
+        mod = Module()
+        mod.add_recursively(values=[fn])
+        assert fn.name is not None
+        return CompiledBackendFunction(
+            mod,
+            fn.name,
+            tuple(t.to_ctype() for t in arg_types),
+            None if ret_type is None else ret_type.to_ctype(),
+        )
 
     def compile_reduction(self, args: list[Symbol], expr: Expr, type_resolver: TypeResolver, by_ref_symbols: set[Symbol] | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         return self.compile_assignments(args, [], type_resolver, by_ref_symbols or set(), reduction=expr, standard_layout=standard_layout)

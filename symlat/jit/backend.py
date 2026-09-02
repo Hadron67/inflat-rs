@@ -1,19 +1,9 @@
-import ctypes
 from abc import abstractmethod
 
 from .helper import MaybeComplexValue
 from .llvm import BasicBlock, IntType, Ordering, Value
 from .type import LowerType
 
-
-class CompiledBackendFunction:
-    @abstractmethod
-    def call(self, *args: ctypes._CDataType) -> ctypes._CDataType | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def print_all(self) -> list[str]:
-        raise NotImplementedError
 
 class DebugInterface:
     @abstractmethod
@@ -51,6 +41,22 @@ class ReductionKernel:
         raise NotImplementedError
 
 class Backend:
+    """A backend that can emit one parallel loop into an existing function.
+
+    The enclosing (external) function is owned by the caller: ``compile.py``
+    declares its arguments, feeds their entry block to
+    :meth:`compile_paralell_loop` and JIT-compiles the finished function.  A
+    backend only knows how to generate the loop itself.
+    """
+
     @abstractmethod
-    def compile_paralell_loop(self, kernel: LoopKernel, reduction: ReductionKernel | None = None) -> CompiledBackendFunction:
+    def compile_paralell_loop(self, block: BasicBlock, args: tuple[Value, ...], kernel: LoopKernel, reduction: ReductionKernel | None = None, reduction_ptr: Value | None = None) -> BasicBlock:
+        """Emit one parallel loop at ``block`` of the current function.
+
+        ``args`` holds the values of the enclosing function's arguments, in the
+        order of ``kernel.get_args()``.  When ``reduction`` is given,
+        ``reduction_ptr`` is the caller-owned accumulator the parallel region
+        reduces into; it already holds the initial value.  Returns the block
+        where execution resumes once the loop has finished.
+        """
         raise NotImplementedError
