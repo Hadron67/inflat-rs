@@ -1111,10 +1111,10 @@ class FMul(BinaryOp):
         match lhs, rhs:
             case FloatValue(a, t), FloatValue(b, _):
                 return FloatValue(a * b, t)
-            case FloatValue(0, t), _:
-                return FloatValue(0, t)
-            case _, FloatValue(0, t):
-                return FloatValue(0, t)
+            case FloatValue(0.0, t), _:
+                return FloatValue(0.0, t)
+            case _, FloatValue(0.0, t):
+                return FloatValue(0.0, t)
         return None
 
 class FSub(BinaryOp):

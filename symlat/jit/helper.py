@@ -103,10 +103,14 @@ class CompileHelper:
                 raise TypeError(f"cannot coerce type {value_type} to {target_type}")
             case ap.FloatType():
                 assert not isinstance(value, ComplexValue)
-                return ComplexValue(value, target_type.type.to_llvm_value(0))
+                # the imaginary part of a real value is exactly zero
+                return ComplexValue(value, target_type.type.to_llvm_value(0.0))
             case ap.IntType():
                 assert not isinstance(value, ComplexValue)
-                return ComplexValue(block.int_to_float(value, self.llvm_real_type), FloatValue(0, self.llvm_real_type))
+                return ComplexValue(
+                    block.int_to_float(value, self.llvm_real_type),
+                    FloatValue(0.0, self.llvm_real_type),
+                )
             case _:
                 raise TypeError(f"cannot coerce type {value_type} to complex")
 
