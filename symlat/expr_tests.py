@@ -31,7 +31,7 @@ from .expr import (
     symbols,
 )
 
-x, y, z = symbols('x', 'y', 'z')
+x, y, z, w = symbols('x', 'y', 'z', 'w')
 
 class LogicalEvaluationTests(TestCase):
     def test_bool_literal(self):
@@ -92,6 +92,26 @@ class LogicalEvaluationTests(TestCase):
         self.assertEqual(If(Bool(True), x, y).normalize(), x)
         self.assertEqual(If(Bool(False), x, y).normalize(), y)
         self.assertIsInstance(If(Eq(x, Int(0)), x, y).normalize(), If)
+
+class FlatExprTests(TestCase):
+    def test_collect_sub_exprs(self):
+        self.assertEqual(Plus((x, Plus((y, z)), w)).collect_sub_exprs(), [x, y, z, w])
+        self.assertEqual(Times((x, Times((y, z)), w)).collect_sub_exprs(), [x, y, z, w])
+        self.assertEqual(And((x, And((y, z)), w)).collect_sub_exprs(), [x, y, z, w])
+        self.assertEqual(Or((x, Or((y, z)), w)).collect_sub_exprs(), [x, y, z, w])
+        # siblings are not affected by flattening
+        self.assertEqual(Plus((x, Times((y, z)), w)).collect_sub_exprs(), [x, Times((y, z)), w])
+
+    def test_flatness_property(self):
+        # f(...a, f(...b), ...c) normalizes like f(...a, ...b, ...c)
+        self.assertEqual(Plus((x, Plus((y, z)), w)).normalize(), Plus((x, y, z, w)).normalize())
+        self.assertEqual(Times((x, Times((y, z)), w)).normalize(), Times((x, y, z, w)).normalize())
+
+    def test_normalized_child_is_spliced(self):
+        # a child that normalizes back into the flat family is spliced in too
+        self.assertEqual(Plus((If(Bool(True), x + y, z), w)).normalize(), (x + y + w).normalize())
+        self.assertEqual(Plus((If(Bool(False), x, y + z), w)).normalize(), (y + z + w).normalize())
+        self.assertEqual(Times((If(Bool(True), x * y, z), w)).normalize(), (x * y * w).normalize())
 
 class ConstantEvaluationTests(TestCase):
     def test_int(self):
@@ -542,4 +562,6 @@ all_tests = [
     ComplexExpressionNormalizationTests,
     MapReplaceTests,
     IndexingNormalizeTests,
+    LogicalEvaluationTests,
+    FlatExprTests,
 ]

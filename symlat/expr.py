@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, dataclass_transform, override
+from typing import Any, cast, dataclass_transform, override
 
 from .util import SubExprFnBuilder
 
@@ -575,8 +575,33 @@ def symbol(name: str) -> Symbol:
 def symbols(*names: str) -> tuple[Symbol, ...]:
     return tuple(symbol(n) for n in names)
 
+class FlatExpr(Expr):
+    """Base class of associative ("flat") expressions.
+
+    A flat expression obeys ``f(...a, f(...b), ...c) === f(...a, ...b, ...c)``:
+    a child of the same class can be spliced into the operand list, so the
+    class offers one canonical way to collect the operands of a whole chain.
+    """
+
+    children: tuple[Expr, ...]
+
+    def collect_sub_exprs(self) -> list[Expr]:
+        """All sub-expressions, with nested nodes of the same class spliced in.
+
+        The operands keep their natural left-to-right order.
+        """
+        ret: list[Expr] = []
+        pending: list[Expr] = list(reversed(self.children))
+        while len(pending) > 0:
+            child = pending.pop()
+            if isinstance(child, type(self)):
+                pending.extend(reversed(child.children))
+            else:
+                ret.append(child)
+        return ret
+
 @exprclass
-class Plus(Expr):
+class Plus(FlatExpr):
     children: tuple[Expr, ...]
 
     @staticmethod
@@ -587,31 +612,8 @@ class Plus(Expr):
             return children[0]
         return Plus(children)
 
-    @staticmethod
-    def connect_terms(*start: Expr) -> tuple[Expr, ...]:
-        todo = list(start)
-        ret: list[Expr] = []
-        while len(todo) > 1:
-            expr = todo.pop()
-            if isinstance(expr, Plus):
-                todo.extend(expr.children)
-            else:
-                ret.append(expr)
-        return tuple(ret)
-
     def input_form(self) -> str:
         return "(" + " + ".join(child.input_form() for child in self.children) + ")"
-
-    def _collect_terms(self) -> list[Expr]:
-        todo = list(self.children)
-        ret: list[Expr] = []
-        while todo:
-            child = todo.pop()
-            if isinstance(child, Plus):
-                todo.extend(child.children)
-            else:
-                ret.append(child)
-        return ret
 
     @staticmethod
     def _separate_constant_terms(terms: list[Expr]) -> tuple[Constant, list[Expr]]:
@@ -626,7 +628,18 @@ class Plus(Expr):
 
     @override
     def normalize(self) -> 'Expr':
-        constant_term, other_terms = self._separate_constant_terms([expr.normalize() for expr in self._collect_terms()])
+        # collect the flat operands first; a child may normalize back into this
+        # flat family (e.g. an ``If`` whose condition is constant), so splice
+        # the normalized result in and keep going
+        terms: list[Expr] = []
+        pending: list[Expr] = self.collect_sub_exprs()
+        while len(pending) > 0:
+            child = pending.pop().normalize()
+            if isinstance(child, Plus):
+                pending.extend(reversed(child.children))
+            else:
+                terms.append(child)
+        constant_term, other_terms = self._separate_constant_terms(terms)
 
         term_to_factor: dict[Expr, Constant] = {}
         for term in other_terms:
@@ -661,7 +674,7 @@ def peer_type(types: tuple[Expr, ...]) -> Expr:
     return ret
 
 @exprclass
-class Times(Expr):
+class Times(FlatExpr):
     children: tuple[Expr, ...]
 
     @staticmethod
@@ -671,18 +684,6 @@ class Times(Expr):
         if len(children) == 1:
             return children[0]
         return Times(children)
-
-    @staticmethod
-    def connect_factors(*start) -> list[Expr]:
-        todo = list(start)
-        ret: list[Expr] = []
-        while len(todo) > 1:
-            expr = todo.pop()
-            if isinstance(expr, Times):
-                todo.extend(expr.children)
-            else:
-                ret.append(expr)
-        return ret
 
     def input_form(self) -> str:
         return "(" + " * ".join(child.input_form() for child in self.children) + ")"
@@ -698,17 +699,6 @@ class Times(Expr):
                 other_factors.append(child)
         return constant_factor.const_normalize(), tuple(other_factors)
 
-    def _collect_factors(self) -> list[Expr]:
-        todo = list(self.children)
-        ret: list[Expr] = []
-        while todo:
-            child = todo.pop()
-            if isinstance(child, Times):
-                todo.extend(child.children)
-            else:
-                ret.append(child)
-        return ret
-
     @override
     def separate_constant_coefficient(self) -> tuple['Constant', 'Expr']:
         constant_factor, other_factors = Times._separate_factors_and_power(self.children)
@@ -716,13 +706,17 @@ class Times(Expr):
 
     @override
     def normalize(self) -> 'Expr':
+        # collect the flat factors first; a child may normalize back into this
+        # flat family (e.g. a power of a product), so splice the normalized
+        # result in and keep going
         factors: list[Expr] = []
-        for child in self._collect_factors():
-            n = child.normalize()
-            if isinstance(n, Times):
-                factors.extend(n.children)
+        pending: list[Expr] = self.collect_sub_exprs()
+        while len(pending) > 0:
+            child = pending.pop().normalize()
+            if isinstance(child, Times):
+                pending.extend(reversed(child.children))
             else:
-                factors.append(n)
+                factors.append(child)
         constant_factor, other_factors = Times._separate_factors_and_power(tuple(factors))
 
         # simple case
@@ -875,8 +869,43 @@ class Bool(Expr):
     def input_form(self) -> str:
         return 'true' if self.value else 'false'
 
+def _fold_bool_chain(cls: type, is_and: bool, children: tuple[Expr, ...]) -> Expr:
+    """Fold one chain of ``And`` (``is_and``) or ``Or`` operands.
+
+    Normalizes each operand, splices nested chains of the same class back in,
+    applies the absorbing/identity boolean literals and drops duplicates.
+    """
+    absorbing = Bool(not is_and)
+    identity = Bool(is_and)
+    terms: list[Expr] = []
+    pending: list[Expr] = list(reversed(children))
+    while len(pending) > 0:
+        child = pending.pop().normalize()
+        if isinstance(child, cls):
+            pending.extend(reversed(cast(FlatExpr, child).children))
+        elif isinstance(child, Bool):
+            if child == absorbing:
+                return absorbing
+            if child != identity:
+                terms.append(child)
+        else:
+            terms.append(child)
+    if len(terms) == 0:
+        return identity
+    if len(terms) == 1:
+        return terms[0]
+    terms.sort(key=lambda e: e)
+    # drop duplicates: ``x and x`` is just ``x``
+    kept: list[Expr] = []
+    for term in terms:
+        if len(kept) == 0 or term != kept[-1]:
+            kept.append(term)
+    if len(kept) == 1:
+        return kept[0]
+    return cls(tuple(kept))
+
 @exprclass
-class And(Expr):
+class And(FlatExpr):
     """The logical conjunction of several conditions."""
 
     children: tuple[Expr, ...]
@@ -887,43 +916,10 @@ class And(Expr):
 
     @override
     def normalize(self) -> 'Expr':
-        # flatten nested conjunctions, then fold the ``True``/``False`` literals
-        terms: list[Expr] = []
-        todo: list[Expr] = list(self.children)
-        while len(todo) > 0:
-            child = todo.pop()
-            if isinstance(child, And):
-                todo.extend(child.children)
-            else:
-                child = child.normalize()
-                if isinstance(child, And):
-                    todo.extend(child.children)
-                else:
-                    terms.append(child)
-        kept: list[Expr] = []
-        for term in terms:
-            if isinstance(term, Bool):
-                if not term.value:
-                    # False absorbs everything in a conjunction
-                    return Bool(False)
-            else:
-                kept.append(term)
-        if len(kept) == 0:
-            return Bool(True)
-        if len(kept) == 1:
-            return kept[0]
-        kept.sort(key=lambda e: e)
-        # drop duplicates: ``x and x`` is just ``x``
-        deduped: list[Expr] = []
-        for term in kept:
-            if len(deduped) == 0 or term != deduped[-1]:
-                deduped.append(term)
-        if len(deduped) == 1:
-            return deduped[0]
-        return And(tuple(deduped))
+        return _fold_bool_chain(And, True, self.children)
 
 @exprclass
-class Or(Expr):
+class Or(FlatExpr):
     """The logical disjunction of several conditions."""
 
     children: tuple[Expr, ...]
@@ -934,40 +930,7 @@ class Or(Expr):
 
     @override
     def normalize(self) -> 'Expr':
-        # flatten nested disjunctions, then fold the ``True``/``False`` literals
-        terms: list[Expr] = []
-        todo: list[Expr] = list(self.children)
-        while len(todo) > 0:
-            child = todo.pop()
-            if isinstance(child, Or):
-                todo.extend(child.children)
-            else:
-                child = child.normalize()
-                if isinstance(child, Or):
-                    todo.extend(child.children)
-                else:
-                    terms.append(child)
-        kept: list[Expr] = []
-        for term in terms:
-            if isinstance(term, Bool):
-                if term.value:
-                    # True absorbs everything in a disjunction
-                    return Bool(True)
-            else:
-                kept.append(term)
-        if len(kept) == 0:
-            return Bool(False)
-        if len(kept) == 1:
-            return kept[0]
-        kept.sort(key=lambda e: e)
-        # drop duplicates: ``x or x`` is just ``x``
-        deduped: list[Expr] = []
-        for term in kept:
-            if len(deduped) == 0 or term != deduped[-1]:
-                deduped.append(term)
-        if len(deduped) == 1:
-            return deduped[0]
-        return Or(tuple(deduped))
+        return _fold_bool_chain(Or, False, self.children)
 
 @exprclass
 class Not(Expr):
@@ -987,6 +950,13 @@ class Not(Expr):
         if isinstance(expr, Not):
             # double negation cancels out
             return expr.expr
+        match expr:
+            case Eq(lhs, rhs):
+                # negating an equality is the inequality (this stays correct
+                # for NaN: ``not oeq`` has the same truth table as ``une``)
+                return Ne(lhs, rhs)
+            case Ne(lhs, rhs):
+                return Eq(lhs, rhs)
         return Not(expr) if expr is not self.expr else self
 
 
