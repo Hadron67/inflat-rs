@@ -904,6 +904,18 @@ class BasicBlock(LocalValue):
     def icmp(self, op: 'IcmpOp', signed: bool, lhs: Value, rhs: Value):
         return self.emit(Icmp(op, signed, lhs, rhs))
 
+    def fcmp(self, op: 'IcmpOp', lhs: Value, rhs: Value):
+        return self.emit(Fcmp(op, lhs, rhs))
+
+    def and_(self, lhs: Value, rhs: Value):
+        return self.emit(Binary(AndOp(), lhs, rhs))
+
+    def or_(self, lhs: Value, rhs: Value):
+        return self.emit(Binary(OrOp(), lhs, rhs))
+
+    def xor(self, lhs: Value, rhs: Value):
+        return self.emit(Binary(XorOp(), lhs, rhs))
+
     def phi(self, *incomings: 'tuple[Value, BasicBlock]'):
         ret = self.emit(Phi(*incomings))
         assert isinstance(ret, Phi)
@@ -1165,6 +1177,42 @@ class SDiv(BinaryOp):
         match lhs, rhs:
             case IntValue(a, t), IntValue(b, _):
                 return IntValue(a // b, t)
+        return None
+
+class AndOp(BinaryOp):
+    @override
+    def head_name(self) -> str:
+        return 'and'
+
+    @override
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a & b, t)
+        return None
+
+class OrOp(BinaryOp):
+    @override
+    def head_name(self) -> str:
+        return 'or'
+
+    @override
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a | b, t)
+        return None
+
+class XorOp(BinaryOp):
+    @override
+    def head_name(self) -> str:
+        return 'xor'
+
+    @override
+    def try_evaluate(self, lhs: Value, rhs: Value) -> Value | None:
+        match lhs, rhs:
+            case IntValue(a, t), IntValue(b, _):
+                return IntValue(a ^ b, t)
         return None
 
 class UDiv(BinaryOp):
@@ -1631,6 +1679,49 @@ class Icmp(Inst):
         lhs = self.lhs.stringify_value(name_context, local_counter)
         rhs = self.rhs.stringify_value(name_context, local_counter)
         return f"icmp {op} {type} {lhs}, {rhs}"
+
+    @override
+    def get_type(self) -> Type:
+        return BOOL_TYPE
+
+@gen_get_children
+class Fcmp(Inst):
+    """A floating-point comparison, producing an ``i1``.
+
+    The predicate names follow LLVM: ``eq``/``ne`` become ``oeq``/``une`` and
+    the ordering predicates take the ``o`` (ordered) prefix, so that a ``NaN``
+    operand compares false everywhere, matching numpy semantics.
+    """
+
+    op: IcmpOp
+    lhs: Value
+    rhs: Value
+    type: FloatType
+
+    @override
+    def __init__(self, op: IcmpOp, lhs: Value, rhs: Value) -> None:
+        lhs_type = lhs.get_type()
+        rhs_type = rhs.get_type()
+        assert isinstance(lhs_type, FloatType), f"float type expected, got {lhs_type}"
+        assert lhs_type == rhs_type, f"types mismatch: {lhs_type} and {rhs_type}"
+        self.type = lhs_type
+        self.op = op
+        self.lhs = lhs
+        self.rhs = rhs
+
+    @override
+    def stringify_inst(self, name_context: NameContext, local_counter: ObjectCounter[LocalValue]) -> str:
+        match self.op:
+            case IcmpOp.EQ:
+                op = 'oeq'
+            case IcmpOp.NE:
+                op = 'une'
+            case _:
+                op = 'o' + self.op.value
+        type = self.type.stringify(name_context)
+        lhs = self.lhs.stringify_value(name_context, local_counter)
+        rhs = self.rhs.stringify_value(name_context, local_counter)
+        return f"fcmp {op} {type} {lhs}, {rhs}"
 
     @override
     def get_type(self) -> Type:

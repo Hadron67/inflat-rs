@@ -18,7 +18,7 @@ from .llvm import (
     PointerType,
     Value,
 )
-from .type import ComplexFloatType, LowerType, TypesConfig
+from .type import BoolType, ComplexFloatType, LowerType, TypesConfig
 
 
 @dataclass
@@ -130,6 +130,10 @@ class CompileHelper:
 
     def coerce(self, block: BasicBlock, value: MaybeComplexValue, value_type: ap.LowerType, target_type: ap.LowerType) -> MaybeComplexValue:
         match target_type:
+            case BoolType():
+                assert isinstance(value_type, BoolType), f"expected bool type, got {value_type}"
+                assert not isinstance(value, ComplexValue)
+                return value
             case ap.ComplexFloatType():
                 return self.coerce_to_complex_type(block, value, value_type, target_type)
             case ap.FloatType():

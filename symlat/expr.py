@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import dataclass_transform, override
+from typing import Any, dataclass_transform, override
 
 from .util import SubExprFnBuilder
 
@@ -19,6 +19,9 @@ class Expr:
         match expr:
             case str():
                 return Symbol(tuple(['root'] + expr.split('.')))
+            case bool():
+                # must be tested before ``int``: ``bool`` subclasses ``int``
+                return Bool(expr)
             case int():
                 return Int(expr)
             case float():
@@ -861,6 +864,326 @@ class Conj(Expr):
                 return expr
             case _:
                 return Conj(expr) if expr is not self.expr else self
+
+@exprclass
+class Bool(Expr):
+    """A boolean literal (``True``/``False``)."""
+
+    value: bool
+
+    @override
+    def input_form(self) -> str:
+        return 'true' if self.value else 'false'
+
+@exprclass
+class And(Expr):
+    """The logical conjunction of several conditions."""
+
+    children: tuple[Expr, ...]
+
+    @override
+    def input_form(self) -> str:
+        return "(" + " and ".join(child.input_form() for child in self.children) + ")"
+
+    @override
+    def normalize(self) -> 'Expr':
+        # flatten nested conjunctions, then fold the ``True``/``False`` literals
+        terms: list[Expr] = []
+        todo: list[Expr] = list(self.children)
+        while len(todo) > 0:
+            child = todo.pop()
+            if isinstance(child, And):
+                todo.extend(child.children)
+            else:
+                child = child.normalize()
+                if isinstance(child, And):
+                    todo.extend(child.children)
+                else:
+                    terms.append(child)
+        kept: list[Expr] = []
+        for term in terms:
+            if isinstance(term, Bool):
+                if not term.value:
+                    # False absorbs everything in a conjunction
+                    return Bool(False)
+            else:
+                kept.append(term)
+        if len(kept) == 0:
+            return Bool(True)
+        if len(kept) == 1:
+            return kept[0]
+        kept.sort(key=lambda e: e)
+        # drop duplicates: ``x and x`` is just ``x``
+        deduped: list[Expr] = []
+        for term in kept:
+            if len(deduped) == 0 or term != deduped[-1]:
+                deduped.append(term)
+        if len(deduped) == 1:
+            return deduped[0]
+        return And(tuple(deduped))
+
+@exprclass
+class Or(Expr):
+    """The logical disjunction of several conditions."""
+
+    children: tuple[Expr, ...]
+
+    @override
+    def input_form(self) -> str:
+        return "(" + " or ".join(child.input_form() for child in self.children) + ")"
+
+    @override
+    def normalize(self) -> 'Expr':
+        # flatten nested disjunctions, then fold the ``True``/``False`` literals
+        terms: list[Expr] = []
+        todo: list[Expr] = list(self.children)
+        while len(todo) > 0:
+            child = todo.pop()
+            if isinstance(child, Or):
+                todo.extend(child.children)
+            else:
+                child = child.normalize()
+                if isinstance(child, Or):
+                    todo.extend(child.children)
+                else:
+                    terms.append(child)
+        kept: list[Expr] = []
+        for term in terms:
+            if isinstance(term, Bool):
+                if term.value:
+                    # True absorbs everything in a disjunction
+                    return Bool(True)
+            else:
+                kept.append(term)
+        if len(kept) == 0:
+            return Bool(False)
+        if len(kept) == 1:
+            return kept[0]
+        kept.sort(key=lambda e: e)
+        # drop duplicates: ``x or x`` is just ``x``
+        deduped: list[Expr] = []
+        for term in kept:
+            if len(deduped) == 0 or term != deduped[-1]:
+                deduped.append(term)
+        if len(deduped) == 1:
+            return deduped[0]
+        return Or(tuple(deduped))
+
+@exprclass
+class Not(Expr):
+    """The logical negation of a condition."""
+
+    expr: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"not({self.expr.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        expr = self.expr.normalize()
+        if isinstance(expr, Bool):
+            return Bool(not expr.value)
+        if isinstance(expr, Not):
+            # double negation cancels out
+            return expr.expr
+        return Not(expr) if expr is not self.expr else self
+
+
+def _const_cmp(op: str, lhs: Expr, rhs: Expr) -> bool | None:
+    """Evaluate ``lhs op rhs`` on constants exactly when possible.
+
+    Returns ``None`` when the comparison cannot be decided from the constant
+    values alone, so the caller keeps a symbolic comparison node.  Structural
+    shortcuts (e.g. ``x == x``) are deliberately not taken: they would change
+    the floating-point semantics (``NaN != NaN``).
+    """
+    # complex numbers only support equality; compare the components
+    if isinstance(lhs, Complex) or isinstance(rhs, Complex):
+        if op not in ('eq', 'ne') or not isinstance(lhs, Complex) or not isinstance(rhs, Complex):
+            return None
+        l_re = _const_cmp('eq', lhs.re, rhs.re)
+        l_im = _const_cmp('eq', lhs.im, rhs.im)
+        if l_re is None or l_im is None:
+            return None
+        if op == 'eq':
+            return l_re and l_im
+        return (not l_re) or (not l_im)
+    # exact integer/rational comparison via cross multiplication
+    def ratio(expr: Expr) -> tuple[int, int] | None:
+        match expr:
+            case Int(value):
+                return (value, 1)
+            case Rational(numerator, denominator):
+                return (numerator, denominator) if denominator > 0 else None
+            case _:
+                return None
+    l = ratio(lhs)
+    r = ratio(rhs)
+    if l is not None and r is not None:
+        (ln, ld), (rn, rd) = l, r
+        a = ln * rd
+        b = rn * ld
+        match op:
+            case 'eq':
+                return a == b
+            case 'ne':
+                return a != b
+            case 'lt':
+                return a < b
+            case 'le':
+                return a <= b
+            case 'gt':
+                return a > b
+            case 'ge':
+                return a >= b
+    # floats: Python comparisons match the ordered LLVM predicates (NaN
+    # compares false everywhere, including ``eq``)
+    if isinstance(lhs, Float) and isinstance(rhs, Float):
+        l, r = lhs.value, rhs.value
+        match op:
+            case 'eq':
+                return l == r
+            case 'ne':
+                return l != r
+            case 'lt':
+                return l < r
+            case 'le':
+                return l <= r
+            case 'gt':
+                return l > r
+            case 'ge':
+                return l >= r
+    return None
+
+
+def _normalize_cmp(op: str, cls: type, expr: Any, lhs: Expr, rhs: Expr) -> Expr:
+    lhs = lhs.normalize()
+    rhs = rhs.normalize()
+    folded = _const_cmp(op, lhs, rhs)
+    if folded is not None:
+        return Bool(folded)
+    if lhs is expr.lhs and rhs is expr.rhs:
+        return expr
+    return cls(lhs, rhs)
+
+@exprclass
+class Eq(Expr):
+    """Element-wise equality comparison."""
+
+    lhs: Expr
+    rhs: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"({self.lhs.input_form()} == {self.rhs.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        return _normalize_cmp('eq', Eq, self, self.lhs, self.rhs)
+
+@exprclass
+class Ne(Expr):
+    """Element-wise inequality comparison."""
+
+    lhs: Expr
+    rhs: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"({self.lhs.input_form()} != {self.rhs.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        return _normalize_cmp('ne', Ne, self, self.lhs, self.rhs)
+
+@exprclass
+class Lt(Expr):
+    """Element-wise ``<`` comparison."""
+
+    lhs: Expr
+    rhs: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"({self.lhs.input_form()} < {self.rhs.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        return _normalize_cmp('lt', Lt, self, self.lhs, self.rhs)
+
+@exprclass
+class Le(Expr):
+    """Element-wise ``<=`` comparison."""
+
+    lhs: Expr
+    rhs: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"({self.lhs.input_form()} <= {self.rhs.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        return _normalize_cmp('le', Le, self, self.lhs, self.rhs)
+
+@exprclass
+class Gt(Expr):
+    """Element-wise ``>`` comparison."""
+
+    lhs: Expr
+    rhs: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"({self.lhs.input_form()} > {self.rhs.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        return _normalize_cmp('gt', Gt, self, self.lhs, self.rhs)
+
+@exprclass
+class Ge(Expr):
+    """Element-wise ``>=`` comparison."""
+
+    lhs: Expr
+    rhs: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"({self.lhs.input_form()} >= {self.rhs.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        return _normalize_cmp('ge', Ge, self, self.lhs, self.rhs)
+
+@exprclass
+class If(Expr):
+    """An element-wise conditional: ``then_expr`` where ``cond`` holds, and
+    ``else_expr`` elsewhere.
+
+    Compiles to a real branch (``br`` + ``phi``), so the branch that is not
+    taken is never evaluated.
+    """
+
+    cond: Expr
+    then_expr: Expr
+    else_expr: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"if({self.cond.input_form()}, {self.then_expr.input_form()}, {self.else_expr.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        cond = self.cond.normalize()
+        if isinstance(cond, Bool):
+            return (self.then_expr if cond.value else self.else_expr).normalize()
+        then_expr = self.then_expr.normalize()
+        else_expr = self.else_expr.normalize()
+        if cond is self.cond and then_expr is self.then_expr and else_expr is self.else_expr:
+            return self
+        return If(cond, then_expr, else_expr)
 
 @exprclass
 class Roll(Expr):

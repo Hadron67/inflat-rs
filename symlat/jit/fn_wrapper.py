@@ -27,14 +27,25 @@ from llvmlite import binding as llvm
 from typing_extensions import override
 
 from ..expr import (
+    And,
     AssignExpr,
+    Bool,
     Conj,
     Cos,
+    Eq,
     Exp,
     Expr,
     Flip,
+    Ge,
+    Gt,
+    If,
     Int,
+    Le,
     Ln,
+    Lt,
+    Ne,
+    Not,
+    Or,
     Power,
     Rational,
     Roll,
@@ -76,11 +87,22 @@ _BIN_UFUNCS = {
     'power': lambda l, r: l ** r,
 }
 
+_COMPARE_UFUNCS = {
+    'equal': Eq,
+    'not_equal': Ne,
+    'less': Lt,
+    'less_equal': Le,
+    'greater': Gt,
+    'greater_equal': Ge,
+}
+
 
 def _as_expr(value) -> Expr:
     """Convert a probe or a Python/numpy constant into an ``Expr``."""
     if isinstance(value, _Probe):
         return value._expr
+    if isinstance(value, np.bool_):
+        value = bool(value)
     if isinstance(value, np.integer):
         value = int(value)
     elif isinstance(value, np.floating):
@@ -89,6 +111,21 @@ def _as_expr(value) -> Expr:
         return Expr.as_expr(value)
     except ValueError as e:
         raise TypeError(f"unsupported operand of type {type(value).__name__} in jitted function") from e
+
+
+def _as_bool_expr(value) -> Expr:
+    """Convert the operand of a logical operation into a boolean expression.
+
+    Non-probe constants follow numpy truthiness: a nonzero value is ``True``.
+    """
+    if isinstance(value, _Probe):
+        return value._expr
+    if isinstance(value, np.bool_):
+        return Bool(bool(value))
+    try:
+        return Bool(bool(value))
+    except ValueError as e:
+        raise TypeError(f"unsupported logical operand of type {type(value).__name__} in jitted function") from e
 
 
 class _Trace:
@@ -206,6 +243,41 @@ class _Probe:
         """Alias of :meth:`conj`."""
         return self.conj()
 
+    # --- comparisons and boolean logic -----------------------------------
+    def __eq__(self, other) -> Any:
+        # element-wise comparison; returns a traced boolean probe
+        return self._new(Eq(self._expr, _as_expr(other)))
+
+    def __ne__(self, other) -> Any:
+        return self._new(Ne(self._expr, _as_expr(other)))
+
+    def __lt__(self, other) -> '_Probe':
+        return self._new(Lt(self._expr, _as_expr(other)))
+
+    def __le__(self, other) -> '_Probe':
+        return self._new(Le(self._expr, _as_expr(other)))
+
+    def __gt__(self, other) -> '_Probe':
+        return self._new(Gt(self._expr, _as_expr(other)))
+
+    def __ge__(self, other) -> '_Probe':
+        return self._new(Ge(self._expr, _as_expr(other)))
+
+    def __and__(self, other) -> '_Probe':
+        return self._new(And((self._expr, _as_bool_expr(other))))
+
+    def __rand__(self, other) -> '_Probe':
+        return self._new(And((_as_bool_expr(other), self._expr)))
+
+    def __or__(self, other) -> '_Probe':
+        return self._new(Or((self._expr, _as_bool_expr(other))))
+
+    def __ror__(self, other) -> '_Probe':
+        return self._new(Or((_as_bool_expr(other), self._expr)))
+
+    def __invert__(self) -> '_Probe':
+        return self._new(Not(self._expr))
+
     # --- indexing and slicing -------------------------------------------
     def __getitem__(self, key):
         expr = self._expr
@@ -238,6 +310,8 @@ class _Probe:
             return self._np_sum(*args, **kwargs)
         if func is np.flip:
             return self._np_flip(*args, **kwargs)
+        if func is np.where:
+            return self._np_where(*args, **kwargs)
         return NotImplemented
 
     def _np_sum(self, array, **kwargs):
@@ -254,6 +328,19 @@ class _Probe:
         # the compiled kernels cannot lower a Sum node, so it is replaced by a
         # placeholder scalar symbol now and compiled as a reduction later
         return self._new(self._trace.sum_placeholder(Sum(array._expr)))
+
+    def _np_where(self, cond, x, y):
+        """Element-wise selection, mapping to an :class:`If` expression.
+
+        The condition must be a traced value; ``x``/``y`` may be traced values
+        or constants."""
+        if not isinstance(cond, _Probe):
+            raise TypeError("np.where requires a traced condition in jitted functions")
+        if x is None or y is None:
+            raise TypeError("np.where requires both x and y in jitted functions")
+        x_expr = x._expr if isinstance(x, _Probe) else _as_expr(x)
+        y_expr = y._expr if isinstance(y, _Probe) else _as_expr(y)
+        return self._new(If(cond._expr, x_expr, y_expr))
 
     def _np_roll(self, array, shift, axis=None):
         if not isinstance(array, _Probe):
@@ -315,6 +402,8 @@ class _Probe:
                 return self._new(Conj(arg._expr))
             if name == 'sqrt':
                 return self._new(Power(arg._expr, Rational(1, 2)))
+            if name == 'logical_not':
+                return self._new(Not(arg._expr))
             fn = _FUNC_MAP.get(name)
             if fn is None:
                 raise TypeError(f"unsupported numpy function {name!r} in jitted function")
@@ -326,6 +415,13 @@ class _Probe:
                 return NotImplemented
             l = lhs._expr if isinstance(lhs, _Probe) else _as_expr(lhs)
             r = rhs._expr if isinstance(rhs, _Probe) else _as_expr(rhs)
+            cmp_cls = _COMPARE_UFUNCS.get(name)
+            if cmp_cls is not None:
+                return self._new(cmp_cls(l, r))
+            if name == 'logical_and':
+                return self._new(And((_as_bool_expr(lhs), _as_bool_expr(rhs))))
+            if name == 'logical_or':
+                return self._new(Or((_as_bool_expr(lhs), _as_bool_expr(rhs))))
             fn = _BIN_UFUNCS.get(name)
             if fn is None:
                 raise TypeError(f"unsupported numpy function {name!r} in jitted function")
@@ -333,8 +429,15 @@ class _Probe:
         return NotImplemented
 
     # --- operations that make no sense on a traced value ------------------
+    def __index__(self) -> int:
+        raise TypeError("using a traced value as an index is not supported in jitted functions")
+
+    # --- guarded fallbacks -------------------------------------------------
     def __bool__(self) -> bool:
-        raise TypeError("branching on a traced value is not supported in jitted functions")
+        # Python control flow cannot branch on a traced value; use ``np.where``
+        # (an ``If`` expression) for element-wise conditionals instead
+        raise TypeError("branching on a traced value is not supported in jitted functions; "
+                        "use np.where for element-wise conditionals")
 
     def __float__(self) -> float:
         raise TypeError("converting a traced value to a Python float is not supported in jitted functions")
@@ -344,27 +447,6 @@ class _Probe:
 
     def __complex__(self) -> complex:
         raise TypeError("converting a traced value to a Python complex is not supported in jitted functions")
-
-    def __index__(self) -> int:
-        raise TypeError("using a traced value as an index is not supported in jitted functions")
-
-    def __eq__(self, other) -> bool:
-        raise TypeError("comparisons are not supported in jitted functions")
-
-    def __ne__(self, other) -> bool:
-        raise TypeError("comparisons are not supported in jitted functions")
-
-    def __lt__(self, other) -> bool:
-        raise TypeError("comparisons are not supported in jitted functions")
-
-    def __le__(self, other) -> bool:
-        raise TypeError("comparisons are not supported in jitted functions")
-
-    def __gt__(self, other) -> bool:
-        raise TypeError("comparisons are not supported in jitted functions")
-
-    def __ge__(self, other) -> bool:
-        raise TypeError("comparisons are not supported in jitted functions")
 
 
 _active_trace: ContextVar['_Trace | None'] = ContextVar('symlat_active_trace', default=None)

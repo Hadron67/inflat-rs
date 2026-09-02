@@ -9,17 +9,28 @@ import numpy as np
 from llvmlite import binding as llvm
 
 from ..expr import (
+    And,
     AssignExpr,
+    Bool,
     Complex,
     Conj,
     Coord,
     Cos,
+    Eq,
     Exp,
     Expr,
     Flip,
     Float,
+    Ge,
+    Gt,
+    If,
     Int,
+    Le,
     Ln,
+    Lt,
+    Ne,
+    Not,
+    Or,
     Plus,
     Power,
     Rational,
@@ -43,6 +54,8 @@ from .helper import (
     MaybeComplexValue,
 )
 from .llvm import (
+    BOOL_FALSE,
+    BOOL_TRUE,
     Add,
     BasicBlock,
     FAdd,
@@ -60,6 +73,7 @@ from .llvm import (
 )
 from .serial import SerialBackend
 from .type import (
+    BoolType,
     ComplexFloatType,
     LowerType,
     SymbolShape,
@@ -352,11 +366,14 @@ class _FunctionCompiler:
     ) -> None:
         self.parent = parent
         self._args = args
-        self._block = block
         self._symbol_scope = symbol_scope
         self._helper = helper
+        # expression compilation is threaded through basic blocks: an ``If``
+        # branches and its value materialises at a merge block, so the caches
+        # are keyed by the block the value was produced in (an SSA value is
+        # only reusable while the compilation sits in that same block)
         self._expr_cache: dict[tuple[Any, ...], MaybeComplexValue] = {}
-        self._subscript_cache: dict[tuple[tuple[Value, ...], tuple[Value, ...]], Value] = {}
+        self._subscript_cache: dict[tuple[Any, ...], Value] = {}
         self._finished: bool = False
         self._standard_layout = standard_layout
         self._debug = debug
@@ -365,67 +382,67 @@ class _FunctionCompiler:
     def _type_cache(self):
         return self._symbol_scope.type_cache
 
-    def _add(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
-        left = self._helper.coerce(self._block, left, left_type, result_type)
-        right = self._helper.coerce(self._block, right, right_type, result_type)
+    def _add(self, block: BasicBlock, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
+        left = self._helper.coerce(block, left, left_type, result_type)
+        right = self._helper.coerce(block, right, right_type, result_type)
         if isinstance(result_type, ComplexFloatType):
-            return self._helper.complex_add(self._block, left, right)
+            return self._helper.complex_add(block, left, right)
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.add(left, right)
+        return block.add(left, right)
 
-    def _sub(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
-        left = self._helper.coerce(self._block, left, left_type, result_type)
-        right = self._helper.coerce(self._block, right, right_type, result_type)
+    def _sub(self, block: BasicBlock, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
+        left = self._helper.coerce(block, left, left_type, result_type)
+        right = self._helper.coerce(block, right, right_type, result_type)
         if isinstance(result_type, ComplexFloatType):
-            return self._helper.complex_sub(self._block, left, right)
+            return self._helper.complex_sub(block, left, right)
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.sub(left, right)
+        return block.sub(left, right)
 
-    def _mul(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
-        left = self._helper.coerce(self._block, left, left_type, result_type)
-        right = self._helper.coerce(self._block, right, right_type, result_type)
+    def _mul(self, block: BasicBlock, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
+        left = self._helper.coerce(block, left, left_type, result_type)
+        right = self._helper.coerce(block, right, right_type, result_type)
         if isinstance(result_type, ComplexFloatType):
-            return self._helper.complex_mul(self._block, left, right)
+            return self._helper.complex_mul(block, left, right)
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.mul(left, right)
+        return block.mul(left, right)
 
-    def _div(self, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
-        left = self._helper.coerce(self._block, left, left_type, result_type)
-        right = self._helper.coerce(self._block, right, right_type, result_type)
+    def _div(self, block: BasicBlock, left: MaybeComplexValue, left_type: ap.LowerType, right: MaybeComplexValue, right_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
+        left = self._helper.coerce(block, left, left_type, result_type)
+        right = self._helper.coerce(block, right, right_type, result_type)
         if isinstance(result_type, ComplexFloatType):
-            return self._helper.complex_div(self._block, left, right)
+            return self._helper.complex_div(block, left, right)
         assert not isinstance(left, ComplexValue) and not isinstance(right, ComplexValue)
-        return self._block.div(left, right, True)
+        return block.div(left, right, True)
 
-    def _sqrt(self, expr: MaybeComplexValue, type: ap.LowerType) -> MaybeComplexValue:
+    def _sqrt(self, block: BasicBlock, expr: MaybeComplexValue, type: ap.LowerType) -> MaybeComplexValue:
         if isinstance(type, ComplexFloatType):
             raise NotImplementedError
         assert not isinstance(expr, ComplexValue)
-        return self._block.sqrt(expr)
+        return block.sqrt(expr)
 
-    def _int_pow(self, base: MaybeComplexValue, base_type: ap.LowerType, exp: int, result_type: LowerType) -> MaybeComplexValue:
+    def _int_pow(self, block: BasicBlock, base: MaybeComplexValue, base_type: ap.LowerType, exp: int, result_type: LowerType) -> MaybeComplexValue:
         neg = False
         if exp < 0:
             exp = -exp
             neg = True
         ret = base
         for _ in range(exp - 1):
-            ret = self._mul(ret, base_type, base, base_type, base_type)
-        ret = self._helper.coerce(self._block, ret, base_type, result_type)
+            ret = self._mul(block, ret, base_type, base, base_type, base_type)
+        ret = self._helper.coerce(block, ret, base_type, result_type)
         if neg:
-            ret = self._div(result_type.to_llvm_type().from_int(1), result_type, ret, result_type, result_type)
+            ret = self._div(block, result_type.to_llvm_type().from_int(1), result_type, ret, result_type, result_type)
         return ret
 
-    def _pow(self, base: MaybeComplexValue, base_type: ap.LowerType, exp: MaybeComplexValue, exp_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
-        base = self._helper.coerce(self._block, base, base_type, result_type)
-        exp = self._helper.coerce(self._block, exp, result_type, result_type)
+    def _pow(self, block: BasicBlock, base: MaybeComplexValue, base_type: ap.LowerType, exp: MaybeComplexValue, exp_type: ap.LowerType, result_type: LowerType) -> MaybeComplexValue:
+        base = self._helper.coerce(block, base, base_type, result_type)
+        exp = self._helper.coerce(block, exp, result_type, result_type)
         if isinstance(result_type, ComplexFloatType):
             raise NotImplementedError
         assert not isinstance(base, ComplexValue) and not isinstance(exp, ComplexValue)
-        return self._block.pow(base, exp)
+        return block.pow(base, exp)
 
-    def _store(self, ptr: Value, value: MaybeComplexValue):
-        b = self._block
+    def _store(self, block: BasicBlock, ptr: Value, value: MaybeComplexValue):
+        b = block
         match value:
             case ComplexValue(re, im):
                 b.store(b.get_element_ptr(ptr, 0, 0), re)
@@ -433,25 +450,25 @@ class _FunctionCompiler:
             case _:
                 b.store(ptr, value)
 
-    def _normalize_slice_index(self, length: Value, index: int) -> Value:
+    def _normalize_slice_index(self, block: BasicBlock, length: Value, index: int) -> Value:
         """Normalize a (possibly negative) slice index to ``index mod length``."""
         h = self._helper
         if index >= 0:
             return IntValue(index, h.llvm_index_type)
         abs_index = IntValue(-index, h.llvm_index_type)
         # ceil(abs_index / length)
-        multiples = self._block.div(
-            self._block.add(abs_index, self._block.sub(length, IntValue(1, h.llvm_index_type))),
+        multiples = block.div(
+            block.add(abs_index, block.sub(length, IntValue(1, h.llvm_index_type))),
             length,
             False,
         )
-        return self._block.rem(
-            self._block.add(IntValue(index, h.llvm_index_type), self._block.mul(multiples, length)),
+        return block.rem(
+            block.add(IntValue(index, h.llvm_index_type), block.mul(multiples, length)),
             length,
             False,
         )
 
-    def _flat_array_index(self, symbol: Symbol, subscripts: _StandardLayoutSubscriptInfo) -> Value:
+    def _flat_array_index(self, block: BasicBlock, symbol: Symbol, subscripts: _StandardLayoutSubscriptInfo) -> Value:
         """Compute the linear index of an array in standard layout mode: the flat
         subscript plus, for every sliced axis, the (normalized) slice index times the
         stride of that axis."""
@@ -463,12 +480,12 @@ class _FunctionCompiler:
             # dimension at call time
             self._symbol_scope.slice_checks.append((SymbolShape(symbol, axis), raw_index))
             length = self._args[sym.shape[axis]]
-            idx = self._normalize_slice_index(length, raw_index)
+            idx = self._normalize_slice_index(block, length, raw_index)
             stride = self._args[sym.strides[axis]]
-            index = self._block.add(index, self._block.mul(idx, stride))
+            index = block.add(index, block.mul(idx, stride))
         return index
 
-    def _compile_slice_chain(self, expr: Slice, subscripts: _RealSubscriptsInfo) -> MaybeComplexValue:
+    def _compile_slice_chain(self, block: BasicBlock, expr: Slice, subscripts: _RealSubscriptsInfo) -> tuple[BasicBlock, MaybeComplexValue]:
         """Compile a sliced expression with the loop subscripts: fix the sliced
         axes at their indices and address the base expression.
 
@@ -483,18 +500,18 @@ class _FunctionCompiler:
         for axis, index in expr.axes:
             if axis < 0 or axis >= dim:
                 raise IndexError(f"slice axis {axis} is out of bounds for {cur}")
-            length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
+            block, length = self.compile_non_complex_expr(block, cur_shape[axis], _RealSubscriptsInfo(()))
             # record the bounds check; it is verified against the concrete
             # dimension at call time
             self._symbol_scope.slice_checks.append((cur_shape[axis], index))
-            entries.append((axis, self._normalize_slice_index(length, index)))
+            entries.append((axis, self._normalize_slice_index(block, length, index)))
         if dim == r:
             # the loop covers every axis of the sliced expression: keep the loop
             # subscripts and replace the value at the fixed axes
             v: list[Value] = list(subscripts.subscripts)
             for axis, index in entries:
                 v[axis] = index
-            return self.compile_expr(cur, _RealSubscriptsInfo(tuple(v)))
+            return self.compile_expr(block, cur, _RealSubscriptsInfo(tuple(v)))
         # the loop does not cover every axis: the sliced expression is broadcast,
         # so the surviving axes (ascending) receive the trailing-aligned loop
         # subscripts and the fixed axes receive their indices
@@ -505,9 +522,9 @@ class _FunctionCompiler:
         for j, axis in enumerate(surviving):
             value_at[axis] = subscripts.subscripts[r - r_rhs + j]
         v = [value_at[axis] for axis in range(dim)]
-        return self.compile_expr(cur, _RealSubscriptsInfo(tuple(v)))
+        return self.compile_expr(block, cur, _RealSubscriptsInfo(tuple(v)))
 
-    def _compile_slice_lvalue(self, expr: Slice, subscripts: _RealSubscriptsInfo) -> tuple[Value, LowerType]:
+    def _compile_slice_lvalue(self, block: BasicBlock, expr: Slice, subscripts: _RealSubscriptsInfo) -> tuple[BasicBlock, tuple[Value, LowerType]]:
         """Compile the lvalue of a slice expression, e.g. ``a[0]`` or ``a[:, 3]``.
 
         Every fixed axis is addressed at its index; the surviving axes receive
@@ -524,17 +541,17 @@ class _FunctionCompiler:
         for axis, index in expr.axes:
             if axis < 0 or axis >= dim:
                 raise IndexError(f"slice axis {axis} is out of bounds for {cur}")
-            length = self.compile_non_complex_expr(cur_shape[axis], _RealSubscriptsInfo(()))
+            block, length = self.compile_non_complex_expr(block, cur_shape[axis], _RealSubscriptsInfo(()))
             # record the bounds check; it is verified against the concrete
             # dimension at call time
             self._symbol_scope.slice_checks.append((cur_shape[axis], index))
-            value_at[axis] = self._normalize_slice_index(length, index)
+            value_at[axis] = self._normalize_slice_index(block, length, index)
         for j, axis in enumerate(surviving):
             value_at[axis] = subscripts.subscripts[j]
         v = [value_at[axis] for axis in range(dim)]
-        return self._compile_lvalue(cur, _RealSubscriptsInfo(tuple(v)))
+        return self._compile_lvalue(block, cur, _RealSubscriptsInfo(tuple(v)))
 
-    def _compile_unpack_subscripts(self, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
+    def _compile_unpack_subscripts(self, block: BasicBlock, sizes: tuple[Value, ...], packed: Value) -> tuple[Value, ...]:
         """Unpack the flat loop index into one subscript per axis.
 
         ``sizes`` is the shape in natural axis order (outermost first, like
@@ -543,73 +560,113 @@ class _FunctionCompiler:
         assert len(sizes) > 0
         ret: list[Value] = []
         for size in reversed(sizes[1:]):
-            ret.append(self._block.rem(packed, size, False))
-            packed = self._block.div(packed, size, False)
+            ret.append(block.rem(packed, size, False))
+            packed = block.div(packed, size, False)
         ret.append(packed)
         return tuple(reversed(ret))
 
-    def _compile_subscript_no_cache(self, strides: tuple[Value, ...], subscripts: tuple[Value, ...]) -> Value:
+    def _compile_subscript_no_cache(self, block: BasicBlock, strides: tuple[Value, ...], subscripts: tuple[Value, ...]) -> Value:
         assert len(subscripts) >= len(strides), f"incompatible subscripts {subscripts} and strides {strides}"
         assert len(strides) > 0
-        index = self._block.mul(subscripts[-1], strides[-1])
+        index = block.mul(subscripts[-1], strides[-1])
         for i in range(1, min(len(strides), len(subscripts))):
-            index = self._block.add(index, self._block.mul(subscripts[-1 - i], strides[-1 - i]))
+            index = block.add(index, block.mul(subscripts[-1 - i], strides[-1 - i]))
         return index
 
-    def _compile_subscript(self, strides: tuple[Value, ...], subscripts: tuple[Value, ...]) -> Value:
-        cache_key = (subscripts, strides)
+    def _compile_subscript(self, block: BasicBlock, strides: tuple[Value, ...], subscripts: tuple[Value, ...]) -> Value:
+        cache_key = (block, subscripts, strides)
         if cache_key in self._subscript_cache:
             return self._subscript_cache[cache_key]
-        index = self._compile_subscript_no_cache(strides, subscripts)
+        index = self._compile_subscript_no_cache(block, strides, subscripts)
         self._subscript_cache[cache_key] = index
         return index
 
-    def _compile_array_symbol_access(self, info: ArrayArgInfo, subscripts: tuple[Value, ...]) -> Value:
-        index = self._compile_subscript(tuple(self._args[i] for i in info.strides), subscripts)
-        return self._block.get_element_ptr(
+    def _compile_array_symbol_access(self, block: BasicBlock, info: ArrayArgInfo, subscripts: tuple[Value, ...]) -> Value:
+        index = self._compile_subscript(block, tuple(self._args[i] for i in info.strides), subscripts)
+        return block.get_element_ptr(
             self._args[info.ptr],
             index,
         )
 
-    def _from_lower_real_value(self, value: Value, lower_type: LowerType):
-        return self._helper.coerce_lower_type(self._block, value, lower_type, self.parent.real_type)
+    def _from_lower_real_value(self, block: BasicBlock, value: Value, lower_type: LowerType):
+        return self._helper.coerce_lower_type(block, value, lower_type, self.parent.real_type)
 
-    def _echo(self, *args: tuple[MaybeComplexValue, ap.LowerType] | str):
+    def _echo(self, block: BasicBlock, *args: tuple[MaybeComplexValue, ap.LowerType] | str):
         if self._debug is not None:
             converted_args: list[Value | str] = []
             for arg in args:
                 if isinstance(arg, tuple):
                     if isinstance(arg[1], ap.ComplexFloatType):
-                        re, im = self._helper.expand_complex_value(self._block, arg[0])
+                        re, im = self._helper.expand_complex_value(block, arg[0])
                         converted_args.extend(['complex(', re, ', ', im, ')'])
                     else:
                         assert not isinstance(arg[0], ComplexValue)
                         converted_args.append(arg[0])
                 else:
                     converted_args.append(arg)
-            self._debug.echo(self._block, *converted_args)
+            self._debug.echo(block, *converted_args)
 
-    def _compile_expr_no_cache(self, expr: Expr, subscripts: _SubscriptsInfo) -> MaybeComplexValue:
+    def _compile_compare(self, block: BasicBlock, op: IcmpOp, lhs: Expr, rhs: Expr, subscripts: _SubscriptsInfo) -> tuple[BasicBlock, Value]:
+        """Compile an element-wise comparison into an ``i1`` value.
+
+        Numeric operands are promoted to a common type first; complex operands
+        support only equality, comparing the real and imaginary parts."""
+        lhs_type = self._type_cache.get_type(lhs)
+        rhs_type = self._type_cache.get_type(rhs)
+        if isinstance(lhs_type, ComplexFloatType) or isinstance(rhs_type, ComplexFloatType):
+            if op not in (IcmpOp.EQ, IcmpOp.NE):
+                raise TypeError("ordering comparisons are not defined for complex numbers")
+            peer_type = get_peer_types(lhs_type, rhs_type)
+            block, lv = self.compile_expr(block, lhs, subscripts)
+            block, rv = self.compile_expr(block, rhs, subscripts)
+            lv = self._helper.coerce(block, lv, lhs_type, peer_type)
+            rv = self._helper.coerce(block, rv, rhs_type, peer_type)
+            l_re, l_im = self._helper.expand_complex_value(block, lv)
+            r_re, r_im = self._helper.expand_complex_value(block, rv)
+            re_cmp = block.fcmp(op, l_re, r_re)
+            im_cmp = block.fcmp(op, l_im, r_im)
+            if op == IcmpOp.EQ:
+                return block, block.and_(re_cmp, im_cmp)
+            return block, block.or_(re_cmp, im_cmp)
+        peer_type = get_peer_types(lhs_type, rhs_type)
+        block, lv = self.compile_expr(block, lhs, subscripts)
+        block, rv = self.compile_expr(block, rhs, subscripts)
+        lv = self._helper.coerce(block, lv, lhs_type, peer_type)
+        rv = self._helper.coerce(block, rv, rhs_type, peer_type)
+        assert not isinstance(lv, ComplexValue) and not isinstance(rv, ComplexValue)
+        match peer_type:
+            case BoolType():
+                return block, block.icmp(op, False, lv, rv)
+            case ap.IntType(_, signed):
+                return block, block.icmp(op, signed, lv, rv)
+            case ap.FloatType():
+                return block, block.fcmp(op, lv, rv)
+            case _:
+                raise TypeError(f"unsupported comparison operands {lhs_type} and {rhs_type}")
+
+    def _compile_expr_no_cache(self, block: BasicBlock, expr: Expr, subscripts: _SubscriptsInfo) -> tuple[BasicBlock, MaybeComplexValue]:
         h = self._helper
 
         expr_type = self._type_cache.get_type(expr)
         match expr:
             case Int(value):
-                return IntValue(value, h.llvm_index_type)
+                return block, IntValue(value, h.llvm_index_type)
             case Rational(numerator, denominator):
-                return FloatValue(numerator / denominator, h.llvm_real_type)
+                return block, FloatValue(numerator / denominator, h.llvm_real_type)
             case Float(value):
-                return FloatValue(value, h.llvm_real_type)
+                return block, FloatValue(value, h.llvm_real_type)
+            case Bool(value):
+                return block, (BOOL_TRUE if value else BOOL_FALSE)
             case Complex(re, im):
                 assert isinstance(expr_type, ap.ComplexFloatType)
-                re_value = self.compile_non_complex_expr(re, subscripts)
-                im_value = self.compile_non_complex_expr(im, subscripts)
+                block, re_value = self.compile_non_complex_expr(block, re, subscripts)
+                block, im_value = self.compile_non_complex_expr(block, im, subscripts)
                 re_type = self._type_cache.get_type(re)
                 im_type = self._type_cache.get_type(im)
-                re_value = self._helper.coerce(self._block, re_value, re_type, expr_type.type)
-                im_value = self._helper.coerce(self._block, im_value, im_type, expr_type.type)
+                re_value = self._helper.coerce(block, re_value, re_type, expr_type.type)
+                im_value = self._helper.coerce(block, im_value, im_type, expr_type.type)
                 assert not isinstance(re_value, ComplexValue) and not isinstance(im_value, ComplexValue)
-                return ComplexValue(re_value, im_value)
+                return block, ComplexValue(re_value, im_value)
             case Symbol():
                 sym = self._symbol_scope.get_symbol(expr)
                 lower_type = self._type_cache.get_symbol_type(expr)
@@ -617,27 +674,27 @@ class _FunctionCompiler:
                 match sym:
                     case ScalarArgInfo(is_ref=True):
                         # scalar references are passed as pointers; dereference on read
-                        ret = self._block.load(self._args[sym.value])
+                        ret = block.load(self._args[sym.value])
                     case ScalarArgInfo():
                         ret = self._args[sym.value]
                     case ArrayArgInfo():
                         match subscripts:
                             case _RealSubscriptsInfo(s):
-                                ret = self._block.load(self._compile_array_symbol_access(sym, s))
+                                ret = block.load(self._compile_array_symbol_access(block, sym, s))
                             case _StandardLayoutSubscriptInfo():
                                 # standard layout: the loop variable is the linear array index
-                                ret = self._block.load(
-                                    self._block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(expr, subscripts))
+                                ret = block.load(
+                                    block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(block, expr, subscripts))
                                 )
                     case _:
                         raise NotImplementedError
                 assert ret is not None
-                return self._helper.coerce(self._block, ret, lower_type, expr_type)
+                return block, self._helper.coerce(block, ret, lower_type, expr_type)
             case SymbolShape(symbol, index):
                 sym = self._symbol_scope.get_symbol(symbol)
                 assert isinstance(sym, ArrayArgInfo), "SymbolShape must be used with an array symbol"
                 assert index < len(sym.shape), "SymbolShape index out of bounds"
-                return self._args[sym.shape[index]]
+                return block, self._args[sym.shape[index]]
             case Coord(axis, _):
                 # the coordinate is the loop subscript along the given axis
                 match subscripts:
@@ -646,7 +703,7 @@ class _FunctionCompiler:
                             raise IndexError(
                                 f"coord axis {axis} is out of bounds for a {len(s)}-dimensional loop"
                             )
-                        return s[axis]
+                        return block, s[axis]
                     case _StandardLayoutSubscriptInfo():
                         raise TypeError("coord is not supported in standard layout kernels")
             case Roll():
@@ -670,7 +727,7 @@ class _FunctionCompiler:
                         raise IndexError(
                             f"np.roll axis {axis} is out of bounds for the loop"
                         )
-                    length = self.compile_non_complex_expr(expr_shape[axis], _RealSubscriptsInfo(()))
+                    block, length = self.compile_non_complex_expr(block, expr_shape[axis], _RealSubscriptsInfo(()))
                     length_type = self._type_cache.get_type(expr_shape[axis])
                     assert isinstance(length_type, ap.IntType), "length must be an integer"
                     # new index = (subscript - amount) mod length; add enough
@@ -678,18 +735,18 @@ class _FunctionCompiler:
                     # well-defined
                     abs_amount = IntValue(abs(amount), h.llvm_index_type)
                     # ceil(abs_amount / length)
-                    multiples = self._block.div(
-                        self._block.add(abs_amount, self._block.sub(length, IntValue(1, h.llvm_index_type))),
+                    multiples = block.div(
+                        block.add(abs_amount, block.sub(length, IntValue(1, h.llvm_index_type))),
                         length,
                         False,
                     )
-                    new_index = self._block.add(
-                        self._block.add(sub[subscript_index], IntValue(-amount, h.llvm_index_type)),
-                        self._block.mul(multiples, length),
+                    new_index = block.add(
+                        block.add(sub[subscript_index], IntValue(-amount, h.llvm_index_type)),
+                        block.mul(multiples, length),
                     )
-                    new_index = self._block.rem(new_index, length, False)
+                    new_index = block.rem(new_index, length, False)
                     sub = sub[:subscript_index] + (new_index,) + sub[subscript_index + 1:]
-                return self.compile_expr(expr.expr, _RealSubscriptsInfo(tuple(sub)))
+                return self.compile_expr(block, expr.expr, _RealSubscriptsInfo(tuple(sub)))
             case Flip():
                 assert isinstance(subscripts, _RealSubscriptsInfo), "cannot compile Flip in standard layout mode"
                 expr_shape = self._type_cache.get_shape(expr.expr)
@@ -705,19 +762,19 @@ class _FunctionCompiler:
                 for axis in axes:
                     if axis < 0:
                         axis += len(expr_shape)
-                    length = self.compile_non_complex_expr(expr_shape[axis], _RealSubscriptsInfo(()))
+                    block, length = self.compile_non_complex_expr(block, expr_shape[axis], _RealSubscriptsInfo(()))
                     subscript_index = len(sub) - len(expr_shape) + axis
                     if subscript_index < 0 or subscript_index >= len(sub):
                         raise IndexError(
                             f"np.flip axis {axis} is out of bounds for the loop"
                         )
                     # new index = length - 1 - subscript
-                    new_index = self._block.sub(
-                        self._block.sub(length, IntValue(1, h.llvm_index_type)),
+                    new_index = block.sub(
+                        block.sub(length, IntValue(1, h.llvm_index_type)),
                         sub[subscript_index],
                     )
                     sub = sub[:subscript_index] + (new_index,) + sub[subscript_index + 1:]
-                return self.compile_expr(expr.expr, _RealSubscriptsInfo(tuple(sub)))
+                return self.compile_expr(block, expr.expr, _RealSubscriptsInfo(tuple(sub)))
             case Slice():
                 match subscripts:
                     case _StandardLayoutSubscriptInfo(mode, subscript, shifts):
@@ -732,80 +789,150 @@ class _FunctionCompiler:
                                 )
                             new_shifts[axis] = index
                         return self.compile_expr(
-                            expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
+                            block, expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
                         )
                     case _RealSubscriptsInfo(s):
-                        return self._compile_slice_chain(expr, subscripts)
+                        return self._compile_slice_chain(block, expr, subscripts)
             case Plus(children):
                 ret_type = self._type_cache.get_type(children[0])
-                ret = self.compile_expr(children[0], subscripts)
+                block, ret = self.compile_expr(block, children[0], subscripts)
                 for child in children[1:]:
-                    child_value = self.compile_expr(child, subscripts)
+                    block, child_value = self.compile_expr(block, child, subscripts)
                     child_type = self._type_cache.get_type(child)
-                    ret = self._add(ret, ret_type, child_value, child_type, expr_type)
+                    ret = self._add(block, ret, ret_type, child_value, child_type, expr_type)
                     # the accumulator now has the result type; use it for the next
                     # operand instead of the stale type of the first child
                     ret_type = expr_type
-                return ret
+                return block, ret
             case Times(children):
                 ret_type = self._type_cache.get_type(children[0])
-                ret = self.compile_expr(children[0], subscripts)
+                block, ret = self.compile_expr(block, children[0], subscripts)
                 for child in children[1:]:
-                    child_value = self.compile_expr(child, subscripts)
+                    block, child_value = self.compile_expr(block, child, subscripts)
                     child_type = self._type_cache.get_type(child)
-                    ret = self._mul(ret, ret_type, child_value, child_type, expr_type)
+                    ret = self._mul(block, ret, ret_type, child_value, child_type, expr_type)
                     ret_type = expr_type
-                return ret
+                return block, ret
             case Power(_, exponent):
                 base_type = self._type_cache.get_type(expr.base)
-                base = self.compile_expr(expr.base, subscripts)
+                block, base = self.compile_expr(block, expr.base, subscripts)
                 match exponent:
                     case Int(exp_value):
-                        return self._int_pow(base, base_type, exp_value, expr_type)
+                        return block, self._int_pow(block, base, base_type, exp_value, expr_type)
                     case Rational(num, 2):
-                        s = self._sqrt(h.coerce(self._block, base, base_type, expr_type), expr_type)
-                        return self._int_pow(s, expr_type, num, expr_type)
+                        s = self._sqrt(block, h.coerce(block, base, base_type, expr_type), expr_type)
+                        return block, self._int_pow(block, s, expr_type, num, expr_type)
                     case _:
-                        base = h.coerce(self._block, base, base_type, expr_type)
+                        base = h.coerce(block, base, base_type, expr_type)
                         exp_type = self._type_cache.get_type(exponent)
-                        exp = h.coerce(self._block, self.compile_expr(exponent, subscripts), exp_type, expr_type)
-                        return self._pow(base, base_type, exp, exp_type, expr_type)
+                        block, exp = self.compile_expr(block, exponent, subscripts)
+                        exp = h.coerce(block, exp, exp_type, expr_type)
+                        return block, self._pow(block, base, base_type, exp, exp_type, expr_type)
             case Sin(expr):
-                arg = self.compile_expr(expr, subscripts)
-                arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
+                block, arg = self.compile_expr(block, expr, subscripts)
+                arg = h.coerce(block, arg, self._type_cache.get_type(expr), expr_type)
                 assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
                 assert not isinstance(arg, ComplexValue)
-                return self._block.sin(arg)
+                return block, block.sin(arg)
             case Cos(expr):
-                arg = self.compile_expr(expr, subscripts)
-                arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
-                assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
+                block, arg = self.compile_expr(block, expr, subscripts)
+                arg = h.coerce(block, arg, self._type_cache.get_type(expr), expr_type)
+                assert isinstance(expr_type, ap.FloatType), "cos currently only supports real types"
                 assert not isinstance(arg, ComplexValue)
-                return self._block.cos(arg)
+                return block, block.cos(arg)
             case Ln(expr):
-                arg = self.compile_expr(expr, subscripts)
-                arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
-                assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
+                block, arg = self.compile_expr(block, expr, subscripts)
+                arg = h.coerce(block, arg, self._type_cache.get_type(expr), expr_type)
+                assert isinstance(expr_type, ap.FloatType), "ln currently only supports real types"
                 assert not isinstance(arg, ComplexValue)
-                return self._block.ln(arg)
+                return block, block.ln(arg)
             case Exp(expr):
-                arg = self.compile_expr(expr, subscripts)
-                arg = h.coerce(self._block, arg, self._type_cache.get_type(expr), expr_type)
-                assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
+                block, arg = self.compile_expr(block, expr, subscripts)
+                arg = h.coerce(block, arg, self._type_cache.get_type(expr), expr_type)
+                assert isinstance(expr_type, ap.FloatType), "exp currently only supports real types"
                 assert not isinstance(arg, ComplexValue)
-                return self._block.exp(arg)
+                return block, block.exp(arg)
             case Conj(expr):
-                arg = self.compile_expr(expr, subscripts)
+                block, arg = self.compile_expr(block, expr, subscripts)
                 arg_type = self._type_cache.get_type(expr)
                 if not isinstance(arg_type, ComplexFloatType):
                     # conjugation is the identity on real values
-                    return arg
-                re, im = self._helper.expand_complex_value(self._block, arg)
-                return ComplexValue(re, self._block.fneg(im))
+                    return block, arg
+                re, im = self._helper.expand_complex_value(block, arg)
+                return block, ComplexValue(re, block.fneg(im))
+            case Not(expr):
+                block, value = self.compile_expr(block, expr, subscripts)
+                assert not isinstance(value, ComplexValue)
+                return block, block.xor(value, BOOL_TRUE)
+            case And(children):
+                block, value = self.compile_expr(block, children[0], subscripts)
+                assert not isinstance(value, ComplexValue)
+                for child in children[1:]:
+                    block, child_value = self.compile_expr(block, child, subscripts)
+                    assert not isinstance(child_value, ComplexValue)
+                    value = block.and_(value, child_value)
+                return block, value
+            case Or(children):
+                block, value = self.compile_expr(block, children[0], subscripts)
+                assert not isinstance(value, ComplexValue)
+                for child in children[1:]:
+                    block, child_value = self.compile_expr(block, child, subscripts)
+                    assert not isinstance(child_value, ComplexValue)
+                    value = block.or_(value, child_value)
+                return block, value
+            case Eq(lhs, rhs):
+                return self._compile_compare(block, IcmpOp.EQ, lhs, rhs, subscripts)
+            case Ne(lhs, rhs):
+                return self._compile_compare(block, IcmpOp.NE, lhs, rhs, subscripts)
+            case Lt(lhs, rhs):
+                return self._compile_compare(block, IcmpOp.LT, lhs, rhs, subscripts)
+            case Le(lhs, rhs):
+                return self._compile_compare(block, IcmpOp.LE, lhs, rhs, subscripts)
+            case Gt(lhs, rhs):
+                return self._compile_compare(block, IcmpOp.GT, lhs, rhs, subscripts)
+            case Ge(lhs, rhs):
+                return self._compile_compare(block, IcmpOp.GE, lhs, rhs, subscripts)
+            case If(cond, then_expr, else_expr):
+                # real branch: evaluate the condition, jump into one of the two
+                # branches, and merge their values with a phi at the join block
+                block, cond_value = self.compile_expr(block, cond, subscripts)
+                assert not isinstance(cond_value, ComplexValue)
+                cond_type = cond_value.get_type()
+                assert isinstance(cond_type, IntType) and cond_type.bits == 1, \
+                    "the condition of an if expression must be a boolean value"
+                then_block = BasicBlock()
+                else_block = BasicBlock()
+                merge_block = BasicBlock()
+                block.br(cond_value, then_block, else_block)
+                then_type = self._type_cache.get_type(then_expr)
+                else_type = self._type_cache.get_type(else_expr)
+                result_type = self._type_cache.get_type(expr)
+                block, then_value = self.compile_expr(then_block, then_expr, subscripts)
+                then_value = self._helper.coerce(block, then_value, then_type, result_type)
+                then_tail = block
+                block, else_value = self.compile_expr(else_block, else_expr, subscripts)
+                else_value = self._helper.coerce(block, else_value, else_type, result_type)
+                else_tail = block
+                if isinstance(result_type, ComplexFloatType):
+                    then_re, then_im = self._helper.expand_complex_value(then_tail, then_value)
+                    else_re, else_im = self._helper.expand_complex_value(else_tail, else_value)
+                    then_tail.jmp(merge_block)
+                    else_tail.jmp(merge_block)
+                    re = merge_block.phi((then_re, then_tail))
+                    re.add_incoming(else_re, else_tail)
+                    im = merge_block.phi((then_im, then_tail))
+                    im.add_incoming(else_im, else_tail)
+                    return merge_block, ComplexValue(re, im)
+                then_tail.jmp(merge_block)
+                else_tail.jmp(merge_block)
+                assert not isinstance(then_value, ComplexValue) and not isinstance(else_value, ComplexValue)
+                value = merge_block.phi((then_value, then_tail))
+                value.add_incoming(else_value, else_tail)
+                return merge_block, value
 
         raise TypeError(f'unsupported expression: {expr}')
 
-    def _compile_lvalue(self, expr: Expr, subscripts: _SubscriptsInfo) -> tuple[Value, LowerType]:
+    def _compile_lvalue(self, block: BasicBlock, expr: Expr, subscripts: _SubscriptsInfo) -> tuple[BasicBlock, tuple[Value, LowerType]]:
         match expr:
             case Symbol():
                 sym = self._symbol_scope.get_symbol(expr)
@@ -815,15 +942,15 @@ class _FunctionCompiler:
                     case ScalarArgInfo(is_ref=True):
                         # a scalar reference can be assigned to: the pointer is the
                         # lvalue itself
-                        return self._args[sym.value], lower_type
+                        return block, (self._args[sym.value], lower_type)
                     case ScalarArgInfo():
                         raise TypeError(f"cannot use {expr} as left-value")
                     case ArrayArgInfo():
                         match subscripts:
                             case _RealSubscriptsInfo(s):
-                                return self._compile_array_symbol_access(sym, s), lower_type
+                                return block, (self._compile_array_symbol_access(block, sym, s), lower_type)
                             case _StandardLayoutSubscriptInfo():
-                                return self._block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(expr, subscripts)), lower_type
+                                return block, (block.get_element_ptr(self._args[sym.ptr], self._flat_array_index(block, expr, subscripts)), lower_type)
             case Slice():
                 match subscripts:
                     case _StandardLayoutSubscriptInfo(mode, subscript, shifts):
@@ -838,10 +965,10 @@ class _FunctionCompiler:
                                 )
                             new_shifts[axis] = index
                         return self._compile_lvalue(
-                            expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
+                            block, expr.expr, _StandardLayoutSubscriptInfo(mode, subscript, new_shifts)
                         )
                     case _RealSubscriptsInfo(s):
-                        return self._compile_slice_lvalue(expr, subscripts)
+                        return self._compile_slice_lvalue(block, expr, subscripts)
         raise ValueError(f"cannot use {expr} as left-value")
 
     def _expr_cache_key(self, expr: Expr, subscripts: _SubscriptsInfo) -> tuple[Any, ...]:
@@ -853,20 +980,28 @@ class _FunctionCompiler:
             case _:
                 raise TypeError(f"unexpected subscripts info {type(subscripts).__name__}")
 
-    def compile_expr(self, expr: Expr, subscripts: _SubscriptsInfo) -> MaybeComplexValue:
-        cache_key = self._expr_cache_key(expr, subscripts)
+    def compile_expr(self, block: BasicBlock, expr: Expr, subscripts: _SubscriptsInfo) -> tuple[BasicBlock, MaybeComplexValue]:
+        """Compile an expression into ``block``.
+
+        Returns the tail block where compilation resumes and the produced
+        value.  The value lives in the tail block: compiling an ``If`` branches
+        and materialises its value with a ``phi`` at the join block, so the
+        tail differs from ``block`` there."""
+        cache_key = (block, self._expr_cache_key(expr, subscripts))
         if cache_key in self._expr_cache:
-            return self._expr_cache[cache_key]
-        result = self._compile_expr_no_cache(expr, subscripts)
-        self._expr_cache[cache_key] = result
-        return result
+            return block, self._expr_cache[cache_key]
+        tail, value = self._compile_expr_no_cache(block, expr, subscripts)
+        # key the cache by the block that defines the value: a value is only
+        # reusable while the compilation sits in that very block
+        self._expr_cache[(tail, self._expr_cache_key(expr, subscripts))] = value
+        return tail, value
 
-    def compile_non_complex_expr(self, expr: Expr, subscripts: _SubscriptsInfo) -> Value:
-        ret = self.compile_expr(expr, subscripts)
+    def compile_non_complex_expr(self, block: BasicBlock, expr: Expr, subscripts: _SubscriptsInfo) -> tuple[BasicBlock, Value]:
+        block, ret = self.compile_expr(block, expr, subscripts)
         assert not isinstance(ret, ComplexValue)
-        return ret
+        return block, ret
 
-    def _compile_assignment(self, expr: AssignExpr, tid: Value):
+    def _compile_assignment(self, block: BasicBlock, expr: AssignExpr, tid: Value) -> BasicBlock:
         expr_shape = self._type_cache.get_shape(expr.lhs)
         if self._standard_layout is StandardLayoutMode.NONE:
             if len(expr_shape) == 0:
@@ -877,15 +1012,16 @@ class _FunctionCompiler:
                 for i in expr_shape:
                     type = self._type_cache.get_type(i)
                     assert isinstance(type, ap.IntType), f"integer type expected for shape, got {type}"
-                    value = self.compile_non_complex_expr(i, _RealSubscriptsInfo(()))
+                    block, value = self.compile_non_complex_expr(block, i, _RealSubscriptsInfo(()))
                     shape.append(value)
-                subscripts = _RealSubscriptsInfo(self._compile_unpack_subscripts(tuple(shape), tid))
+                subscripts = _RealSubscriptsInfo(self._compile_unpack_subscripts(block, tuple(shape), tid))
         else:
             # standard layout: use the flat loop variable directly as the array index
             subscripts = _StandardLayoutSubscriptInfo(self._standard_layout, tid, {})
-        lhs_ptr, lhs_type = self._compile_lvalue(expr.lhs, subscripts)
+        block, lhs = self._compile_lvalue(block, expr.lhs, subscripts)
+        lhs_ptr, lhs_type = lhs
 
-        rhs_value = self.compile_expr(expr.rhs, subscripts)
+        block, rhs_value = self.compile_expr(block, expr.rhs, subscripts)
         rhs_type = self._type_cache.get_type(expr.rhs)
 
         result_value = None
@@ -893,39 +1029,40 @@ class _FunctionCompiler:
         result_type = get_peer_types(lhs_type, rhs_type)
 
         def make_lhs():
-            return self._block.load(lhs_ptr)
+            return block.load(lhs_ptr)
         match expr.op:
             case '':
                 result_value = rhs_value
             case '+':
-                result_value = self._add(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                result_value = self._add(block, make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
                 final_type = result_type
             case '-':
-                result_value = self._sub(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                result_value = self._sub(block, make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
                 final_type = result_type
             case '*':
-                result_value = self._mul(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                result_value = self._mul(block, make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
                 final_type = result_type
             case '/':
-                result_value = self._div(make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
+                result_value = self._div(block, make_lhs(), lhs_type, rhs_value, rhs_type, result_type)
                 final_type = result_type
             case _:
                 raise ValueError(f"unknown op {expr.op}")
-        result_value = self._helper.coerce(self._block, result_value, final_type, lhs_type)
-        self._store(lhs_ptr, result_value)
+        result_value = self._helper.coerce(block, result_value, final_type, lhs_type)
+        self._store(block, lhs_ptr, result_value)
         # the store may change the value of an expression read while an earlier
         # assignment was compiled (e.g. a scalar reference that is written and
         # then read by a later assignment), so drop the cached expression values
         self._expr_cache.clear()
+        return block
 
-    def compile_assignments(self, exprs: list[AssignExpr], tid: Value):
+    def compile_assignments(self, block: BasicBlock, exprs: list[AssignExpr], tid: Value) -> BasicBlock:
         assert not self._finished
         self._finished = True
 
         for expr in exprs:
-            self._compile_assignment(expr, tid)
+            block = self._compile_assignment(block, expr, tid)
 
-        return self._block
+        return block
 
 class CompiledBackendFunction:
     @override
@@ -1126,16 +1263,16 @@ class _AssignmentsKernel(LoopKernel):
     def compile_total_size(self, begin: BasicBlock, args: tuple[Value, ...]) -> tuple[BasicBlock, Value]:
         cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope,
                                standard_layout=self._standard_layout)
-        value = cp.compile_non_complex_expr(self._loop_size, _RealSubscriptsInfo(()))
+        block, value = cp.compile_non_complex_expr(begin, self._loop_size, _RealSubscriptsInfo(()))
         type = cp._type_cache.get_type(self._loop_size)
         assert isinstance(type, ap.IntType), f"integer type expected for total size, got {type}"
-        return begin, value
+        return block, value
 
     @override
     def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface | None) -> tuple[BasicBlock, MaybeComplexValue]:
         cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope, debug=debug,
                                standard_layout=self._standard_layout)
-        cp.compile_assignments(self._exprs, loop_var)
+        block = cp.compile_assignments(begin, self._exprs, loop_var)
         value: MaybeComplexValue = VoidValue()
         if self._reduction is not None:
             if self._standard_layout is StandardLayoutMode.NONE:
@@ -1143,14 +1280,15 @@ class _AssignmentsKernel(LoopKernel):
                 for i in self._type_cache.get_shape(self._reduction):
                     size_type = cp._type_cache.get_type(i)
                     assert isinstance(size_type, ap.IntType), f"integer type expected for shape, got {size_type}"
-                    shape.append(cp.compile_non_complex_expr(i, _RealSubscriptsInfo(())))
+                    block, s = cp.compile_non_complex_expr(block, i, _RealSubscriptsInfo(()))
+                    shape.append(s)
                 subscripts: _SubscriptsInfo = _RealSubscriptsInfo(
-                    cp._compile_unpack_subscripts(tuple(shape), loop_var) if len(shape) > 0 else ()
+                    cp._compile_unpack_subscripts(block, tuple(shape), loop_var) if len(shape) > 0 else ()
                 )
             else:
                 subscripts = _StandardLayoutSubscriptInfo(self._standard_layout, loop_var, {})
-            value = cp.compile_expr(self._reduction, subscripts)
-        return begin, value
+            block, value = cp.compile_expr(block, self._reduction, subscripts)
+        return block, value
 
 class SumReductionKernel(ReductionKernel):
     @override

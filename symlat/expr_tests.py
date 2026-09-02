@@ -1,13 +1,24 @@
 from unittest import TestCase
 
 from .expr import (
+    And,
+    Bool,
     Complex,
     Cos,
+    Eq,
     Exp,
     Expr,
     Float,
+    Ge,
+    Gt,
+    If,
     Int,
+    Le,
     Ln,
+    Lt,
+    Ne,
+    Not,
+    Or,
     Plus,
     Power,
     Rational,
@@ -21,6 +32,66 @@ from .expr import (
 )
 
 x, y, z = symbols('x', 'y', 'z')
+
+class LogicalEvaluationTests(TestCase):
+    def test_bool_literal(self):
+        self.assertEqual(S(True), Bool(True))
+        self.assertEqual(S(False), Bool(False))
+        self.assertEqual(Bool(True).normalize(), Bool(True))
+        self.assertEqual(Bool(False).normalize(), Bool(False))
+
+    def test_and(self):
+        self.assertEqual(And((x, y)).normalize(), And((x, y)))
+        self.assertEqual(And((x, Bool(False))).normalize(), Bool(False))
+        self.assertEqual(And((Bool(False), x, y)).normalize(), Bool(False))
+        self.assertEqual(And((x, Bool(True))).normalize(), x)
+        self.assertEqual(And((Bool(True), Bool(True))).normalize(), Bool(True))
+        self.assertEqual(And((x, x)).normalize(), x)
+        # flattening: And(And(a, b), c) == And(a, b, c)
+        self.assertEqual(And((And((x, y)), z)).normalize(), And((x, y, z)))
+        self.assertEqual(And((y, x)).normalize(), And((x, y)))
+
+    def test_or(self):
+        self.assertEqual(Or((x, y)).normalize(), Or((x, y)))
+        self.assertEqual(Or((x, Bool(True))).normalize(), Bool(True))
+        self.assertEqual(Or((Bool(True), x, y)).normalize(), Bool(True))
+        self.assertEqual(Or((x, Bool(False))).normalize(), x)
+        self.assertEqual(Or((Bool(False), Bool(False))).normalize(), Bool(False))
+        self.assertEqual(Or((x, x)).normalize(), x)
+        self.assertEqual(Or((Or((x, y)), z)).normalize(), Or((x, y, z)))
+
+    def test_not(self):
+        self.assertEqual(Not(Bool(True)).normalize(), Bool(False))
+        self.assertEqual(Not(Bool(False)).normalize(), Bool(True))
+        self.assertEqual(Not(Not(x)).normalize(), x)
+        self.assertEqual(Not(x).normalize(), Not(x))
+        self.assertEqual(Not(Eq(x, Int(0))).normalize(), Ne(x, Int(0)))
+
+    def test_comparisons_fold_on_constants(self):
+        self.assertEqual(Eq(Int(1), Int(1)).normalize(), Bool(True))
+        self.assertEqual(Eq(Int(1), Int(2)).normalize(), Bool(False))
+        self.assertEqual(Ne(Int(1), Int(2)).normalize(), Bool(True))
+        self.assertEqual(Lt(Int(1), Int(2)).normalize(), Bool(True))
+        self.assertEqual(Le(Int(2), Int(2)).normalize(), Bool(True))
+        self.assertEqual(Gt(Int(2), Int(1)).normalize(), Bool(True))
+        self.assertEqual(Ge(Int(1), Int(2)).normalize(), Bool(False))
+        self.assertEqual(Eq(Rational(1, 2), Rational(2, 4)).normalize(), Bool(True))
+        self.assertEqual(Lt(Rational(1, 2), Rational(2, 3)).normalize(), Bool(True))
+        self.assertEqual(Eq(Float(0.5), Float(0.5)).normalize(), Bool(True))
+        self.assertEqual(Lt(Float(1.5), Float(0.5)).normalize(), Bool(False))
+        self.assertEqual(Eq(S(1 + 2j), S(1 + 2j)).normalize(), Bool(True))
+        self.assertEqual(Eq(S(1 + 2j), S(1 - 2j)).normalize(), Bool(False))
+
+    def test_comparisons_keep_symbols(self):
+        # no structural shortcuts: ``x == x`` stays symbolic (NaN semantics)
+        self.assertEqual(Eq(x, x).normalize(), Eq(x, x))
+        self.assertIsInstance(Eq(x, Int(0)).normalize(), Eq)
+        self.assertIsInstance(Lt(x, y).normalize(), Lt)
+
+    def test_if(self):
+        self.assertEqual(If(Bool(True), x, y).normalize(), x)
+        self.assertEqual(If(Bool(False), x, y).normalize(), y)
+        self.assertIsInstance(If(Eq(x, Int(0)), x, y).normalize(), If)
 
 class ConstantEvaluationTests(TestCase):
     def test_int(self):

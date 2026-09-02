@@ -20,7 +20,7 @@ def _jitted_from_source(wrapper: Wrapper, source: str, name: str):
     Used for tests whose function bodies are intentionally invalid Python
     (undefined names etc.), so that static analyzers do not flag them.
     """
-    namespace: dict[str, Any] = {'__name__': 'jittest'}
+    namespace: dict[str, Any] = {'__name__': 'jittest', 'np': np}
     exec(compile(source, '<jittest>', 'exec'), namespace)  # noqa: S102
     return wrapper.jit()(namespace[name])
 
@@ -1082,6 +1082,228 @@ class JitWrapperTest(TestCase):
         assert_almost_equal(a, np.roll(b, 2, axis=0))
         self.assertEqual(len(f._cache), 2)
 
+    def test_where_scalar_and_array(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(a > b, a, b)
+
+        np.random.seed(3)
+        a = np.random.rand(4, 5)
+        b = np.random.rand(4, 5)
+        out = np.zeros_like(a)
+        f(a, b, out)
+        assert_almost_equal(out, np.where(a > b, a, b))
+
+    def test_where_with_constants(self):
+        # branches are scalar constants; the condition is a traced comparison
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, out):
+            out[:] = np.where(a > 0.5, 1.0, -1.0)
+
+        np.random.seed(4)
+        a = np.random.rand(6)
+        out = np.zeros_like(a)
+        f(a, out)
+        assert_almost_equal(out, np.where(a > 0.5, 1.0, -1.0))
+
+    def test_where_skips_division_by_zero(self):
+        # ``If`` compiles to a real branch, so the division is not evaluated
+        # where the condition is false
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(x, out):
+            out[:] = np.where(x == 0.0, 0.0, 1.0 / x)
+
+        np.random.seed(5)
+        x = np.random.rand(7)
+        x[2] = 0.0
+        out = np.zeros_like(x)
+        f(x, out)
+        expected = np.where(x == 0.0, 0.0, 1.0 / x)
+        assert_almost_equal(out, expected)
+        self.assertEqual(out[2], 0.0)
+
+    def test_nested_where(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(a > 0, np.where(b > 0, a, b), 0.0)
+
+        np.random.seed(6)
+        a = np.random.randn(8)
+        b = np.random.randn(8)
+        out = np.zeros_like(a)
+        f(a, b, out)
+        assert_almost_equal(out, np.where(a > 0, np.where(b > 0, a, b), 0.0))
+
+    def test_logical_operators(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, c, out):
+            cond = (a > 0) & (b < 0.5) & ~(c == 1.0)
+            out[:] = np.where(cond, a, b)
+
+        np.random.seed(7)
+        a = np.random.rand(9)
+        b = np.random.rand(9)
+        c = np.random.rand(9)
+        out = np.zeros_like(a)
+        f(a, b, c, out)
+        cond = (a > 0) & (b < 0.5) & ~(c == 1.0)
+        assert_almost_equal(out, np.where(cond, a, b))
+
+    def test_logical_ufuncs(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(np.logical_or(a > 0, np.logical_not(b > 0.5)), a, b)
+
+        np.random.seed(8)
+        a = np.random.rand(9)
+        b = np.random.rand(9)
+        out = np.zeros_like(a)
+        f(a, b, out)
+        expected = np.where(np.logical_or(a > 0, np.logical_not(b > 0.5)), a, b)
+        assert_almost_equal(out, expected)
+
+    def test_compare_ufuncs(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(np.equal(a, b), 1.0, 0.0)
+            out += np.where(np.less(a, b), 0.5, 0.0)
+
+        np.random.seed(9)
+        a = np.random.rand(10)
+        b = np.random.rand(10)
+        out = np.zeros_like(a)
+        f(a, b, out)
+        expected = np.where(a == b, 1.0, 0.0) + np.where(a < b, 0.5, 0.0)
+        assert_almost_equal(out, expected)
+
+    def test_where_on_int_arrays(self):
+        # integer equality/ordering comparisons (icmp) inside a branch
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, out):
+            out[:] = np.where(a == 2, 3.0, -1.0)
+            out += np.where(a < 2, 1.0, 0.0)
+
+        a = np.arange(6, dtype=np.int64) % 4
+        out = np.zeros(6)
+        f(a, out)
+        expected = np.where(a == 2, 3.0, -1.0) + np.where(a < 2, 1.0, 0.0)
+        assert_almost_equal(out, expected)
+
+    def test_where_complex_equality(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(a == b, 1.0, 0.0)
+
+        np.random.seed(10)
+        a = np.random.randn(6) + 1j * np.random.randn(6)
+        b = np.random.randn(6) + 1j * np.random.randn(6)
+        b[1] = a[1]
+        out = np.zeros(6)
+        f(a, b, out)
+        assert_almost_equal(out, np.where(a == b, 1.0, 0.0))
+
+    def test_where_complex_branches(self):
+        # both branches are complex arrays: the join merges real and imaginary parts
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(a == b, a + b, a - b)
+
+        np.random.seed(11)
+        a = np.random.randn(6) + 1j * np.random.randn(6)
+        b = np.random.randn(6) + 1j * np.random.randn(6)
+        b[0] = a[0]
+        b[3] = a[3]
+        out = np.zeros_like(a)
+        f(a, b, out)
+        assert_almost_equal(out, np.where(a == b, a + b, a - b))
+
+    def test_where_in_sum(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, s):
+            s += np.sum(np.where(a > 0, a, 0.0))
+
+        np.random.seed(12)
+        a = np.random.randn(11)
+        s = ctypes.c_double(0.0)
+        f(a, s)
+        self.assertAlmostEqual(s.value, np.sum(np.where(a > 0, a, 0.0)))
+
+    def test_if_compiles_to_branch_and_phi(self):
+        # ``If`` must be lowered with real control flow (br + phi), so the
+        # emitted IR contains a conditional branch and a phi
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, out):
+            out[:] = np.where(a > 0.5, a, 0.0)
+
+        np.random.seed(13)
+        a = np.random.rand(4)
+        out = np.zeros_like(a)
+        f(a, out)
+        ir = f.print_all()
+        # the join of the if/else branches materialises as a phi over doubles
+        self.assertTrue(any('phi double' in line for line in ir))
+
+    def test_where_standard_layout(self):
+        # contiguous arrays compile as standard-layout kernels; an ``If`` inside
+        # such a kernel must branch and merge like in the generic kernels
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(a >= b, a * b, a + b)
+
+        np.random.seed(14)
+        a = np.random.rand(8, 7)
+        b = np.random.rand(8, 7)
+        out = np.zeros_like(a)
+        f(a, b, out)
+        assert_almost_equal(out, np.where(a >= b, a * b, a + b))
+
+    def test_compare_ne_on_complex(self):
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, out):
+            out[:] = np.where(a != b, 1.0, 0.0)
+
+        ca = np.array([1 + 2j, 3 - 1j, 0.5 + 0j])
+        cb = np.array([1 + 2j, 0.0 + 0j, 0.5 + 0j])
+        out = np.zeros(3)
+        f(ca, cb, out)
+        assert_almost_equal(out, np.where(ca != cb, 1.0, 0.0))
+
+        # ordering comparisons are not defined for complex numbers
+        @wrapper.jit()
+        def bad(a, b, out):
+            out[:] = np.where(a < b, 1.0, 0.0)
+
+        with self.assertRaises(TypeError):
+            bad(ca, cb, out)
+
     def test_trace_errors(self):
         wrapper = Wrapper()
         # tracing happens lazily on the first call; errors surface there
@@ -1097,10 +1319,14 @@ class JitWrapperTest(TestCase):
         f3 = _jitted_from_source(wrapper, 'def f3(a, b):\n    return a + b\n', 'f3')
         with self.assertRaises(TypeError):
             f3(np.zeros((3, 3)), np.zeros((3, 3)))
-        # comparisons are not supported
+        # branching on a traced value is not supported (use np.where instead)
         f4 = _jitted_from_source(wrapper, 'def f4(a):\n    if a > 0:\n        pass\n', 'f4')
         with self.assertRaises(TypeError):
             f4(np.zeros((3, 3)))
+        # np.where needs a traced condition
+        f7 = _jitted_from_source(wrapper, 'def f7(a, b):\n    b[:] = np.where(1, a, a)\n', 'f7')
+        with self.assertRaises(TypeError):
+            f7(np.zeros((3, 3)), np.zeros((3, 3)))
         # no assignments in the body
         f5 = _jitted_from_source(wrapper, 'def f5(a):\n    pass\n', 'f5')
         with self.assertRaises(TypeError):

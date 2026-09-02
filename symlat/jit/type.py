@@ -4,16 +4,27 @@ from dataclasses import dataclass
 from typing import override
 
 from ..expr import (
+    And,
+    Bool,
     Complex,
     Conj,
     Coord,
     Cos,
+    Eq,
     Exp,
     Expr,
     Flip,
     Float,
+    Ge,
+    Gt,
+    If,
     Int,
+    Le,
     Ln,
+    Lt,
+    Ne,
+    Not,
+    Or,
     Plus,
     Power,
     Rational,
@@ -168,6 +179,18 @@ class ComplexFloatType(LowerType):
                 raise ValueError(f"unsupported bit size: {self.type.bits}")
 
 @dataclass(frozen=True)
+class BoolType(LowerType):
+    """A boolean value (an ``i1`` at the LLVM level)."""
+
+    @override
+    def to_ctype(self) -> type[ctypes._CDataType]:
+        return ctypes.c_bool
+
+    @override
+    def to_llvm_type(self) -> llvm.Type:
+        return llvm.BOOL_TYPE
+
+@dataclass(frozen=True)
 class PointerType(LowerType):
     type: LowerType
 
@@ -207,6 +230,10 @@ def _get_int_peer_type(type: IntType, other: LowerType) -> IntType:
     raise ValueError(f"unsupported type: {other}")
 
 def get_peer_type(type: LowerType, other: LowerType) -> LowerType:
+    if isinstance(type, BoolType) or isinstance(other, BoolType):
+        if isinstance(type, BoolType) and isinstance(other, BoolType):
+            return BoolType()
+        raise ValueError(f"cannot combine boolean and numeric values: {type} and {other}")
     if isinstance(type, ComplexFloatType):
         return _get_complex_peer_type(type, other)
     if isinstance(other, ComplexFloatType):
@@ -320,12 +347,18 @@ class TypeResolver:
         match expr:
             case Symbol():
                 return tuple(SymbolShape(expr, i) for i in range(self.symbol_types[expr].dimension))
-            case Int() | Float() | Rational() | Complex() | SymbolShape():
+            case Int() | Float() | Rational() | Complex() | Bool() | SymbolShape():
                 return ()
             case Coord():
                 return expr.shape
-            case Plus(children) | Times(children):
+            case Plus(children) | Times(children) | And(children) | Or(children):
                 return self.merge_shapes(*tuple(self.get_shape(a) for a in children))
+            case Not(expr):
+                return self.get_shape(expr)
+            case Eq(lhs, rhs) | Ne(lhs, rhs) | Lt(lhs, rhs) | Le(lhs, rhs) | Gt(lhs, rhs) | Ge(lhs, rhs):
+                return self.merge_shapes(self.get_shape(lhs), self.get_shape(rhs))
+            case If(cond, then_expr, else_expr):
+                return self.merge_shapes(self.get_shape(cond), self.get_shape(then_expr), self.get_shape(else_expr))
             case Power(base, exp):
                 return self.merge_shapes(self.get_shape(base), self.get_shape(exp))
             case UnaryNumericFunction() | Conj():
@@ -351,6 +384,8 @@ class TypeResolver:
 
     def _promote_type(self, type: LowerType) -> LowerType:
         match type:
+            case BoolType():
+                raise ValueError(f"cannot promote bool values: {type}")
             case IntType():
                 return self.type_config.index_type
             case FloatType():
@@ -371,8 +406,14 @@ class TypeResolver:
 
     def _get_type_no_cache(self, expr: Expr) -> LowerType:
         match expr:
-            case Int():
+            case Int(value):
+                if value < 0:
+                    # negative integer literals carry their own sign: coercing
+                    # them to float (or ordering comparisons) must stay signed
+                    return IntType(self.type_config.index_type.bits, True)
                 return self.type_config.index_type
+            case Bool():
+                return BoolType()
             case Float() | Rational():
                 return self.type_config.real_type
             case Complex():
@@ -395,6 +436,10 @@ class TypeResolver:
             case Conj():
                 # conjugation preserves the type (it is the identity on reals)
                 return self.get_type(expr.expr)
+            case Not() | And() | Or() | Eq() | Ne() | Lt() | Le() | Gt() | Ge():
+                return BoolType()
+            case If(_, then_expr, else_expr):
+                return get_peer_types(self.get_type(then_expr), self.get_type(else_expr))
             case Sin() | Cos() | Ln() | Exp():
                 return self._int_to_float_type(self.get_type(expr.expr))
             case _:
