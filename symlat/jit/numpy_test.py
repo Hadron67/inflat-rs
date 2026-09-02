@@ -349,6 +349,22 @@ class NumpyJitTest(TestCase):
         d[...] = np.positive(a)
         assert_almost_equal(self._data(d), data + 1)
 
+    def test_conj(self):
+        # np.conj / np.conjugate and the .conj() method conjugate complex lazy
+        # arrays and leave real ones unchanged
+        nc = JitContext(OpenMPBackend())
+
+        data = np.random.rand(4, 5) + 1j * np.random.rand(4, 5)
+        a = ArrayWrapper(nc, ArrayNode(data))
+        d = nc.zeros((4, 5), dtype=np.complex128)
+        d[...] = np.conj(a) + a.conj() + np.conjugate(a)
+        assert_almost_equal(self._data(d), np.conj(data) + np.conj(data) + np.conj(data))
+
+        r = nc.rand(3, 4)
+        e = nc.zeros((3, 4))
+        e[...] = r.conj()
+        assert_almost_equal(self._data(e), self._data(r))
+
     def test_roll_flip_are_lazy(self):
         # roll/flip only build expression trees; nothing is computed until an
         # assignment triggers the compilation

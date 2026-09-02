@@ -224,6 +224,45 @@ class JitWrapperTest(TestCase):
         step(phi, mom, 0.3)
         assert_almost_equal(phi, phi0 + mom * 0.3)
 
+    def test_conj(self):
+        # np.conj / np.conjugate and the .conj() method conjugate complex
+        # arrays element-wise and are the identity on real arrays
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b, c):
+            a += np.conj(b) + b.conj() * 2 + np.conjugate(c)
+
+        np.random.seed(8)
+        b = np.random.rand(5, 5) + 1j * np.random.rand(5, 5)
+        c = np.random.rand(5, 5) + 1j * np.random.rand(5, 5)
+        a = np.zeros((5, 5), dtype=np.complex128)
+        f(a, b, c)
+        assert_almost_equal(a, np.conj(b) + np.conj(b) * 2 + np.conj(c))
+
+        @wrapper.jit()
+        def g(a, b):
+            a += b.conjugate() + np.conj(b)
+
+        a = np.zeros(6)
+        b = np.random.rand(6)
+        g(a, b)
+        assert_almost_equal(a, 2 * b)
+
+    def test_conj_in_sum(self):
+        # conjugation works inside reductions too (|b|^2 = sum conj(b)*b)
+        wrapper = Wrapper()
+
+        @wrapper.jit()
+        def f(a, b):
+            a += np.sum(b.conj() * b)
+
+        np.random.seed(9)
+        a = np.zeros(5, dtype=np.complex128)
+        b = np.random.rand(3, 4) + 1j * np.random.rand(3, 4)
+        f(a, b)
+        assert_almost_equal(a, np.full(5, np.sum(np.conj(b) * b), dtype=np.complex128))
+
     def test_numeric_functions_and_unary_minus(self):
         wrapper = Wrapper()
 

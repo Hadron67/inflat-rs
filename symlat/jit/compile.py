@@ -11,6 +11,7 @@ from llvmlite import binding as llvm
 from ..expr import (
     AssignExpr,
     Complex,
+    Conj,
     Coord,
     Cos,
     Exp,
@@ -793,6 +794,14 @@ class _FunctionCompiler:
                 assert isinstance(expr_type, ap.FloatType), "sin currently only supports real types"
                 assert not isinstance(arg, ComplexValue)
                 return self._block.exp(arg)
+            case Conj(expr):
+                arg = self.compile_expr(expr, subscripts)
+                arg_type = self._type_cache.get_type(expr)
+                if not isinstance(arg_type, ComplexFloatType):
+                    # conjugation is the identity on real values
+                    return arg
+                re, im = self._helper.expand_complex_value(self._block, arg)
+                return ComplexValue(re, self._block.fneg(im))
 
         raise TypeError(f'unsupported expression: {expr}')
 

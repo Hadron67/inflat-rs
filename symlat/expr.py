@@ -837,6 +837,32 @@ class Exp(UnaryNumericFunction):
         return f"exp({self.expr.input_form()})"
 
 @exprclass
+class Conj(Expr):
+    """The complex conjugate of an expression."""
+
+    expr: Expr
+
+    @override
+    def input_form(self) -> str:
+        return f"conj({self.expr.input_form()})"
+
+    @override
+    def normalize(self) -> 'Expr':
+        expr = self.expr.normalize()
+        match expr:
+            case Conj(inner):
+                # conjugation is an involution
+                return inner
+            case Complex(re, im):
+                # conj(re + im i) = re - im i
+                return Complex(re, im.const_neg()).const_normalize()
+            case Constant():
+                # real constants are invariant under conjugation
+                return expr
+            case _:
+                return Conj(expr) if expr is not self.expr else self
+
+@exprclass
 class Roll(Expr):
     expr: Expr
     axes: tuple[tuple[int, int], ...] | int  # (axis, amount), and int means roll all axes

@@ -28,6 +28,7 @@ from typing_extensions import override
 
 from ..expr import (
     AssignExpr,
+    Conj,
     Cos,
     Exp,
     Expr,
@@ -196,6 +197,15 @@ class _Probe:
     def __setitem__(self, key, value):
         self._trace.record(self, '', value)
 
+    # --- complex conjugation ---------------------------------------------
+    def conj(self) -> '_Probe':
+        """The element-wise complex conjugate (identity on real arrays)."""
+        return self._new(Conj(self._expr))
+
+    def conjugate(self) -> '_Probe':
+        """Alias of :meth:`conj`."""
+        return self.conj()
+
     # --- indexing and slicing -------------------------------------------
     def __getitem__(self, key):
         expr = self._expr
@@ -301,6 +311,8 @@ class _Probe:
                 return self._new(Times((Int(-1), arg._expr)))
             if name == 'positive':
                 return self._new(arg._expr)
+            if name in ('conjugate', 'conj'):
+                return self._new(Conj(arg._expr))
             if name == 'sqrt':
                 return self._new(Power(arg._expr, Rational(1, 2)))
             fn = _FUNC_MAP.get(name)

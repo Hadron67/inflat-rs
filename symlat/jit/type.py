@@ -5,6 +5,7 @@ from typing import override
 
 from ..expr import (
     Complex,
+    Conj,
     Coord,
     Cos,
     Exp,
@@ -327,7 +328,7 @@ class TypeResolver:
                 return self.merge_shapes(*tuple(self.get_shape(a) for a in children))
             case Power(base, exp):
                 return self.merge_shapes(self.get_shape(base), self.get_shape(exp))
-            case UnaryNumericFunction():
+            case UnaryNumericFunction() | Conj():
                 return self.get_shape(expr.expr)
             case Roll() | Flip():
                 return self.get_shape(expr.expr)
@@ -390,6 +391,9 @@ class TypeResolver:
                 else:
                     return self._int_to_float_type(self.get_type(base))
             case Roll() | Slice() | Flip():
+                return self.get_type(expr.expr)
+            case Conj():
+                # conjugation preserves the type (it is the identity on reals)
                 return self.get_type(expr.expr)
             case Sin() | Cos() | Ln() | Exp():
                 return self._int_to_float_type(self.get_type(expr.expr))

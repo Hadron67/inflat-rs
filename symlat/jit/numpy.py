@@ -19,6 +19,7 @@ from typing_extensions import override
 
 from ..expr import (
     AssignExpr,
+    Conj,
     Cos,
     Exp,
     Expr,
@@ -380,6 +381,15 @@ class ArrayWrapper:
         return self
 
     # --- numpy functions: lazy roll/flip and scalar ufuncs -----------------
+    def conj(self) -> 'ArrayWrapper':
+        """Lazily conjugate the array (identity on real arrays); nothing is
+        computed until the result is assigned into a concrete array."""
+        return self._new(Conj(self.arr))
+
+    def conjugate(self) -> 'ArrayWrapper':
+        """Alias of :meth:`conj`."""
+        return self.conj()
+
     def roll(self, shift, axis=None) -> 'ArrayWrapper':
         """Lazily roll the array along ``axis`` (or the given axes); nothing is
         computed until the result is assigned into a concrete array."""
@@ -422,6 +432,8 @@ class ArrayWrapper:
                 return self._new(Times((Int(-1), arg.arr)))
             if name == 'positive':
                 return self._new(arg.arr)
+            if name in ('conjugate', 'conj'):
+                return self._new(Conj(arg.arr))
             if name == 'sqrt':
                 return self._new(Power(arg.arr, Rational(1, 2)))
             fn = _FUNC_MAP.get(name)
