@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from symlat.expr import Expr, Symbol, coords, derivative
+from symlat.expr import Expr, Symbol, derivative
 from symlat.jit.fn_wrapper import Wrapper, evaluate_expr
 
 lax = Wrapper()
@@ -122,18 +122,32 @@ def neighbor_square(phi, spacing: tuple[float, ...], h_vol: float):
     )
 
 def effective_mom(coord, spacing, size):
-    """Effective lattice momentum of a mode.
+    """Effective lattice momentum (dispersion) of a mode.
 
-    Mirrors `effective_mom` in `inflat/src/scalar.rs`.
+    Mirrors `effective_mom` in `inflat/src/scalar.rs`: with the lattice
+    Laplacian on a grid of ``size`` points and per-axis spacings ``spacing``,
+
+        omega = 2 * sqrt(sum_i (sin(pi*c_i/n_i) / dx_i)^2)
+
+    ``coord`` holds integer mode numbers ``c_i`` in ``[0, n_i)``; it may be a
+    tuple of scalars or, for vectorized use, per-axis arrays of the mode-grid
+    shape produced by ``np.indices(size)``.
     """
-    return np.sqrt(sum((np.sin(np.pi * c / n) / dx) ** 2 for c, n, dx in zip(coord, size, spacing) for c, n, dx in zip(coord, size, spacing))) * 2
+    return 2 * np.sqrt(sum((np.sin(np.pi * c / n) / dx) ** 2 for c, n, dx in zip(coord, size, spacing)))
+
 
 def _rand_complex_normal(shape: tuple[int, ...]) -> np.ndarray:
+    """I.i.d. complex Gaussians of variance 1/2 over ``shape``.
+
+    Box--Muller: ``a = sqrt(-ln X / 2) e^{2 pi i Y}`` with ``X, Y`` uniform on
+    ``[0, 1)``, i.e. both quadratures have variance 1/4 and ``E|a|^2 = 1/2``.
+    """
     ret = np.zeros(shape, dtype=np.complex128)
     r1 = np.random.rand(*shape)
     r2 = np.random.rand(*shape)
     _rand_kernel(ret, r1, r2)
     return ret
+
 
 @lax.jit()
 def _rand_kernel(ret: np.ndarray, r1: np.ndarray, r2: np.ndarray):
@@ -141,12 +155,78 @@ def _rand_kernel(ret: np.ndarray, r1: np.ndarray, r2: np.ndarray):
     amp = np.sqrt(-np.log(r2) / 2)
     ret[:] = phase * amp
 
-@lax.jit()
-def _gen_phi_tilde_kernel(ret: np.ndarray, ladder: np.ndarray, spacing: tuple[float, ...]):
-    x = coords(ret.shape)
-    k_eff = effective_mom(x, ret.shape, spacing)
+
+def _conj_pair(amp: np.ndarray) -> np.ndarray:
+    r"""Hermitian-symmetric completion ``c[m] = a[m] + conj(a[-m])``.
+
+    Each mode index ``m`` is mapped to ``-m mod N`` along every axis, so that
+    a field built from the coefficients ``c`` via ``sum_m c[m] e^{2 pi i m.n/N}``
+    is real: the coefficient of ``e^{+ik.x}`` picks up ``a_k u + a_{-k}^* u*``,
+    i.e. the ``a_k u_k + a_{-k}^\dagger u_k^*`` term of the mode expansion.
+    """
+    neg = amp
+    for axis in range(amp.ndim):
+        # flip maps m -> N-1-m, rolling by one then gives m -> N-m = -m mod N
+        neg = np.roll(np.flip(neg, axis=axis), 1, axis=axis)
+    return amp + np.conj(neg)
 
 
-def populate_noise(size: tuple[int, ...], spacing: tuple[float, ...], a: float, v_a: float):
-    phase = np.random.randn(*size) + np.random.randn(*size) * 1j
-    amp = np.exp(-np.log(np.random.rand(*size)) / 2)
+def populate_noise(
+    size: tuple[int, ...],
+    spacing: tuple[float, ...],
+    a: float,
+    v_a: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Realize the vacuum-noise initial condition of the scalar field.
+
+    Mirrors `populate_noise` in `inflat/src/scalar.rs`.  The lattice field
+    ``phi`` is evolved in cosmological time ``t`` on the FLRW background
+    ``ds^2 = -dt^2 + a^2(t) dx^2`` (see scalar_note.md).  Its fluctuations are
+    quantized through the canonically normalized field
+    ``v = a^{(d-1)/2} phi``, whose sub-horizon mode functions in conformal
+    time ``tau`` (``dt = a dtau``) are ``u_k(tau) = e^{-i omega_k tau} /
+    sqrt(2 omega_k)``, ``omega`` being the lattice dispersion
+    :func:`effective_mom`.  Sampling at ``tau = 0``,
+
+        v(x) = 1/sqrt(V) sum_{k != 0} (a_k u_k + a_{-k}^* u_k^*) e^{i k.x},
+
+    with i.i.d. complex Gaussian ``a_k`` of variance 1/2 (:func:`_rand_complex_normal`),
+    the zero mode excluded and ``V`` the comoving volume, and converting from
+    conformal to cosmological time yields the returned
+    ``(noise_phi, noise_v_phi)`` = ``(phi, d phi/dt)`` at the initial time:
+
+        phi      = v / a^n
+        dphi/dt  = (v' - n v_a v) / a^(n+1),    n = (d-1)/2,  v_a = da/dt
+
+    (at ``d = 3`` this reduces to the ``/a`` and ``/a^2`` factors of the Rust
+    reference).  To seed a :class:`ScalarField` the caller combines these with
+    a homogeneous background: ``phi += noise_phi`` and
+    ``mom_phi += noise_v_phi * a**d * h_vol``.
+
+    Args:
+        size: grid points per direction, ``N_i``.
+        spacing: lattice spacing per direction, ``h_i``.
+        a: scale factor at the initial time.
+        v_a: ``da/dt`` at the initial time (cosmological time).
+    """
+    dim = len(size)
+    n_total = math.prod(size)
+    volume = math.prod(n * h for n, h in zip(size, spacing))
+    inv_sqrt_volume = 1.0 / math.sqrt(volume)
+    # per-mode lattice frequency omega(m); the zero mode (omega = 0) is skipped
+    omega = effective_mom(np.indices(size), spacing, size)
+    u = np.divide(
+        inv_sqrt_volume,
+        np.sqrt(2 * omega),
+        out=np.zeros_like(omega),
+        where=omega > 0,
+    )
+    u_d = -1j * omega * u  # d u_k / d tau at tau = 0
+    a_hat = _rand_complex_normal(size)  # a_k, E|a_k|^2 = 1/2
+    # v and dv/dtau at tau = 0 (ifftn carries the 1/N of the inverse DFT)
+    v = np.fft.ifftn(_conj_pair(a_hat * u) * n_total * inv_sqrt_volume).real
+    v_prime = np.fft.ifftn(_conj_pair(a_hat * u_d) * n_total * inv_sqrt_volume).real
+    n = (dim - 1) / 2
+    noise_phi = v / a**n
+    noise_v_phi = (v_prime - n * v_a * v) / a ** (n + 1)
+    return noise_phi, noise_v_phi
