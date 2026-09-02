@@ -283,3 +283,10 @@ def gen_get_children(cls: type | None = None, base: type | None = None, excludes
         return wrapper(cls)
 
     return wrapper
+
+class IdentityObj:
+    def __hash__(self) -> int:
+        return object.__hash__(self)
+
+    def __eq__(self, value: object, /) -> bool:
+        return self is value

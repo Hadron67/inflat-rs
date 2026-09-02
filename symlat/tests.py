@@ -10,5 +10,6 @@ from .expr_tests import all_tests as expr_tests
 from .jit.compile_test import all_tests as compile_tests
 from .jit.fn_wrapper_test import all_tests as fn_wrapper_tests
 from .jit.numpy_test import all_tests as numpy_tests
+from .spy.spy_test import all_tests as spy_tests
 
-all_tests = compile_tests + fn_wrapper_tests + numpy_tests + expr_tests
+all_tests = compile_tests + fn_wrapper_tests + numpy_tests + expr_tests + spy_tests

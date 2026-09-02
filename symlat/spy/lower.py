@@ -1,0 +1,271 @@
+"""Lowering of the typed MIR to native code.
+
+The MIR is mapped instruction by instruction onto the textual LLVM IR
+builder of ``symlat.jit.llvm`` (the same representation the rest of
+``symlat`` uses); the generated module text is then JIT-compiled with
+``llvmlite.binding`` (MCJIT), following the pattern of
+``symlat.jit.compile.CompiledBackendFunction``.
+
+One native function is compiled per module/engine.  Calls to other spy
+functions become ``declare``d symbols that are mapped, at link time, to
+the absolute addresses of the already compiled callees (every compiled
+function keeps its engine alive, so those addresses stay valid).
+"""
+
+import ctypes
+from dataclasses import dataclass, field
+from typing import Any
+
+from llvmlite import binding as llvm
+
+from ..jit import llvm as sllvm
+from . import mir
+from .errors import CompileError
+from .type import (
+    BoolType,
+    BoolValue,
+    FloatType,
+    FloatValue,
+    IntType,
+    IntValue,
+    PointerType,
+    Type,
+    type_str,
+)
+
+llvm.initialize_native_target()
+llvm.initialize_native_asmprinter()
+
+_ICMP_OPS = {
+    'eq': sllvm.IcmpOp.EQ,
+    'ne': sllvm.IcmpOp.NE,
+    'lt': sllvm.IcmpOp.LT,
+    'le': sllvm.IcmpOp.LE,
+    'gt': sllvm.IcmpOp.GT,
+    'ge': sllvm.IcmpOp.GE,
+}
+
+_CTYPE_INT = {
+    (8, True): ctypes.c_int8,
+    (8, False): ctypes.c_uint8,
+    (16, True): ctypes.c_int16,
+    (16, False): ctypes.c_uint16,
+    (32, True): ctypes.c_int32,
+    (32, False): ctypes.c_uint32,
+    (64, True): ctypes.c_int64,
+    (64, False): ctypes.c_uint64,
+}
+
+
+def to_llvm_type(type: Type) -> sllvm.Type:
+    match type:
+        case BoolType():
+            return sllvm.IntType(1)
+        case IntType():
+            return sllvm.IntType(type.bits)
+        case FloatType():
+            return sllvm.FloatType(type.bits)
+        case PointerType(elem, _):
+            return sllvm.PointerType(to_llvm_type(elem))
+        case _:
+            raise CompileError(f"type {type_str(type)} cannot be lowered to LLVM yet")
+
+
+def to_ctype(type: Type) -> type[ctypes._CDataType]:
+    match type:
+        case BoolType():
+            return ctypes.c_bool
+        case IntType():
+            ct = _CTYPE_INT.get((type.bits, type.signed))
+            if ct is None:
+                raise CompileError(f"integer type {type_str(type)} has no ctypes mapping")
+            return ct
+        case FloatType():
+            return ctypes.c_float if type.bits == 32 else ctypes.c_double
+        case PointerType():
+            return ctypes.c_void_p
+        case _:
+            raise CompileError(f"type {type_str(type)} has no ctypes mapping")
+
+
+class _Lowerer:
+    def __init__(self, name: str, arg_types: tuple[Type, ...], ret_type: Type) -> None:
+        self._name = name
+        self._arg_types = arg_types
+        self._ret_type = ret_type
+        self._lowered: dict[object, sllvm.Value] = {}
+
+    def lower(self, fn: mir.Function) -> list[str]:
+        llvm_fn = sllvm.Function(self._name)
+        arg_values = llvm_fn.add_args(*(to_llvm_type(t) for t in self._arg_types))
+        llvm_fn.set_return_type(to_llvm_type(self._ret_type))
+        block = llvm_fn.entry
+
+        for inst in fn.insts:
+            self._lower_inst(block, llvm_fn, inst, arg_values)
+
+        mod = sllvm.Module()
+        mod.add_recursively(values=[llvm_fn])
+        return mod.write()
+
+    def _value(self, value: mir.Value, arg_values: tuple[sllvm.Value, ...]) -> sllvm.Value:
+        if isinstance(value, mir.Param):
+            return arg_values[value.index]
+        if isinstance(value, mir.Inst):
+            ret = self._lowered.get(id(value))
+            if ret is None:
+                raise CompileError('internal error: instruction not lowered yet')
+            return ret
+        if isinstance(value, BoolValue):
+            return sllvm.IntValue(1 if value.value else 0, sllvm.IntType(1))
+        if isinstance(value, IntValue):
+            return sllvm.IntValue(value.value, sllvm.IntType(value.bits))
+        if isinstance(value, FloatValue):
+            return sllvm.FloatType(value.bits).from_float(value.value)
+        raise CompileError(f'cannot lower value {value!r}')
+
+    def _lower_inst(
+        self,
+        block: sllvm.BasicBlock,
+        llvm_fn: sllvm.Function,
+        inst: mir.Inst,
+        arg_values: tuple[sllvm.Value, ...],
+    ) -> None:
+        result: sllvm.Value | None = None
+        match inst:
+            case mir.Alloca(t):
+                result = block.alloca(to_llvm_type(t.elem))
+            case mir.Store():
+                ptr = self._value(inst.ptr, arg_values)
+                value = self._value(inst.value, arg_values)
+                block.store(ptr, value)
+            case mir.Load():
+                ptr = self._value(inst.ptr, arg_values)
+                result = block.load(ptr)
+            case mir.Arith():
+                lhs = self._value(inst.lhs, arg_values)
+                rhs = self._value(inst.rhs, arg_values)
+                match inst.op:
+                    case 'add':
+                        result = block.add(lhs, rhs)
+                    case 'sub':
+                        result = block.sub(lhs, rhs)
+                    case 'mul':
+                        result = block.mul(lhs, rhs)
+                    case 'div':
+                        result = block.div(lhs, rhs, inst.signed)
+                    case 'rem':
+                        result = block.rem(lhs, rhs, inst.signed)
+                    case 'xor':
+                        result = block.xor(lhs, rhs)
+                    case _:
+                        raise CompileError(f"unsupported MIR operation '{inst.op}'")
+            case mir.Convert():
+                value = self._value(inst.value, arg_values)
+                to = to_llvm_type(inst.type)
+                match inst.kind:
+                    case 'sitofp':
+                        result = block.int_to_float(value, to)  # type: ignore[arg-type]
+                    case 'uitofp':
+                        result = block.uint_to_float(value, to)  # type: ignore[arg-type]
+                    case 'fpext':
+                        result = block.float_ext(value, to)  # type: ignore[arg-type]
+                    case 'fptrunc':
+                        result = block.float_trunc(value, to)  # type: ignore[arg-type]
+                    case 'sext':
+                        result = block.sext(value, to)  # type: ignore[arg-type]
+                    case 'zext':
+                        result = block.zext(value, to)  # type: ignore[arg-type]
+                    case 'trunc':
+                        result = block.emit(sllvm.IntTrunc(value, to))  # type: ignore[arg-type]
+                    case _:
+                        raise CompileError(f"unsupported conversion '{inst.kind}'")
+            case mir.Cmp():
+                lhs = self._value(inst.lhs, arg_values)
+                rhs = self._value(inst.rhs, arg_values)
+                op = _ICMP_OPS[inst.op]
+                if inst.kind == 'int':
+                    result = block.icmp(op, inst.signed, lhs, rhs)
+                else:
+                    result = block.fcmp(op, lhs, rhs)
+            case mir.Call():
+                ret_type = to_llvm_type(inst.type)
+                arg_llvm = tuple(to_llvm_type(mir.type_of(a)) for a in inst.args)
+                decl = sllvm.DeclareFunction(inst.callee_name, sllvm.fn_type(ret_type, *arg_llvm))
+                result = block.call(decl, *(self._value(a, arg_values) for a in inst.args))
+            case mir.Ret():
+                value = self._value(inst.value, arg_values)
+                block.ret(value)
+            case _:
+                raise CompileError(f'unsupported MIR instruction {type(inst).__name__}')
+        if result is not None:
+            self._lowered[id(inst)] = result
+
+
+@dataclass
+class NativeFn:
+    """A compiled native function of one specialization."""
+
+    name: str
+    arg_types: tuple[Type, ...]
+    ret_type: Type
+    lines: list[str] = field(default_factory=list)
+    _engine: object = None  # type: ignore[assignment]
+    _addr: int = 0
+    _entry: Any = None
+
+    def call(self, *values) -> object:
+        return self._entry(*values)
+
+    @property
+    def addr(self) -> int:
+        return self._addr
+
+    def print_all(self) -> list[str]:
+        return self.lines
+
+
+def compile_native(
+    name: str,
+    fn: mir.Function,
+    extern: dict[str, int],
+) -> NativeFn:
+    """JIT-compile one MIR function into a :class:`NativeFn`.
+
+    ``extern`` maps the symbol names of other spy functions (already
+    compiled by this context) to their addresses; every declaration the
+    generated module refers to must be resolvable from it.
+    """
+    assert name == fn.name
+    lowerer = _Lowerer(name, tuple(a.type for a in fn.args), fn.ret_type)
+    lines = lowerer.lower(fn)
+
+    target = llvm.Target.from_default_triple()
+    tm = target.create_target_machine()
+    llvm_mod = llvm.parse_assembly('\n'.join(lines))
+    llvm_mod.verify()
+
+    backing_mod = llvm.parse_assembly('')
+    engine = llvm.create_mcjit_compiler(backing_mod, tm)
+    engine.add_module(llvm_mod)
+    for f in llvm_mod.functions:
+        if not f.is_declaration:
+            continue
+        addr = extern.get(f.name)
+        if addr is None:
+            raise CompileError(
+                f"cannot resolve the external function {f.name} referenced by {name}"
+            )
+        engine.add_global_mapping(f, addr)
+    engine.finalize_object()
+    engine.run_static_constructors()
+
+    addr = engine.get_function_address(name)
+    arg_ctypes = tuple(to_ctype(t) for t in (a.type for a in fn.args))
+    proto = ctypes.CFUNCTYPE(to_ctype(fn.ret_type), *arg_ctypes)
+    entry = ctypes.cast(addr, proto)
+    ret = NativeFn(name, tuple(a.type for a in fn.args), fn.ret_type, lines)
+    ret._engine = engine
+    ret._addr = addr
+    ret._entry = entry
+    return ret
