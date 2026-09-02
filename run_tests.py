@@ -1,10 +1,12 @@
 from unittest import TestLoader, TestSuite, TextTestRunner
-import pylat.tests as tests
-import pylat.expr_tests as expr_tests
+
+from symlat import tests
 
 if __name__ == "__main__":
     suite = TestSuite()
     loader = TestLoader()
-    for t in tests.all_tests + expr_tests.all_tests:
+    # tests.all_tests aggregates every test module (compile_test,
+    # fn_wrapper_test, numpy_test and expr_tests)
+    for t in tests.all_tests:
         suite.addTest(loader.loadTestsFromTestCase(t))
     TextTestRunner(verbosity=2).run(suite)

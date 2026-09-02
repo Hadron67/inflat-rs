@@ -11,4 +11,23 @@ For changes under any of these directories, the scope part in the commit message
 
 ## Coding Guidelines
 
-* In Python sources, prefer relative imports.
+### Python specific
+* Prefer relative imports.
+* Always use type annotations.
+* Local variables should be assigned first, i.e., write
+```python
+a: Foo | None = None
+if foo():
+    a = bar()
+else:
+    a = baz()
+check(a)
+```
+instead of
+```python
+if foo():
+    a = bar()
+else:
+    a = baz()
+check(a)
+```
