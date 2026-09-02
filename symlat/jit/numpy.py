@@ -158,9 +158,9 @@ class JitContext:
         s = np.sum(a) # eager: reduces `a` over all axes to a scalar right away
     """
 
-    def __init__(self, backend: Backend) -> None:
+    def __init__(self, backend: Backend, serial_backend: Backend | None = None, min_paralell_loop_size: int = 1024) -> None:
         self.backend = backend
-        self._compiler = JitCompiler(backend)
+        self._compiler = JitCompiler(backend, serial_backend=serial_backend, min_paralell_loop_size=min_paralell_loop_size)
         # assignment structure + input/dest dtypes and ranks -> compiled kernel
         self._cache: dict[_AssignmentCacheKey, CompiledWrapper] = {}
         # reduction structure + input dtypes and ranks -> compiled kernel

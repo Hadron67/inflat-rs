@@ -48,6 +48,7 @@ from .llvm import (
     FloatType,
     FloatValue,
     Function,
+    IcmpOp,
     IntType,
     IntValue,
     Module,
@@ -56,6 +57,7 @@ from .llvm import (
     VoidType,
     VoidValue,
 )
+from .serial import SerialBackend
 from .type import (
     ComplexFloatType,
     LowerType,
@@ -1121,7 +1123,7 @@ class _AssignmentsKernel(LoopKernel):
         return begin, value
 
     @override
-    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> tuple[BasicBlock, MaybeComplexValue]:
+    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface | None) -> tuple[BasicBlock, MaybeComplexValue]:
         cp = _FunctionCompiler(self._parent, self._helper, args, begin, self.symbol_scope, debug=debug,
                                standard_layout=self._standard_layout)
         cp.compile_assignments(self._exprs, loop_var)
@@ -1227,10 +1229,14 @@ def _group_by_loop_sizes(exprs: list[AssignExpr], reduction: Expr | None, type_r
     return specs
 
 class JitCompiler(TypesConfig):
-    def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64):
+    def __init__(self, backend: Backend, real_type: ap.FloatType = _F64, index_type: ap.IntType = _U64, serial_backend: Backend | None = None, min_paralell_loop_size: int = 1024) -> None:
         self._backend = backend
         self.real_type = real_type
         self.index_type = index_type
+        self.min_paralell_loop_size = min_paralell_loop_size
+        if serial_backend is None:
+            serial_backend = SerialBackend()
+        self._serial_backend = serial_backend
 
     def compile_assignments(self, args: list[Symbol], exprs: list[AssignExpr], type_resolver: TypeResolver, by_ref_symbols: set[Symbol], reduction: Expr | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         # scalar references that are never written to do not need a pointer: pass
@@ -1267,14 +1273,14 @@ class JitCompiler(TypesConfig):
                 invoke_layout = standard_layout
         return CompiledWrapper(self, symbol_scope, tuple(compiled_fns), standard_layout=invoke_layout)
 
-    def _compile_kernel(self, kernel: LoopKernel, reduction_kernel: ReductionKernel | None) -> CompiledBackendFunction:
+    def _compile_kernel(self, kernel: _AssignmentsKernel, reduction_kernel: ReductionKernel | None) -> CompiledBackendFunction:
         """Create the external function of one kernel and JIT-compile it.
 
         The external function is the C-visible entry point: it takes the kernel
         arguments (in symbol order) and returns the reduction result, or void.
         With a reduction the accumulator is allocated and zero-initialised in
-        the entry block; the backend reduces into it while the parallel loop
-        runs, and the tail block it returns loads the result and returns it.
+        the entry block; the loop backend reduces into it while the loop runs,
+        and the tail block it returns loads the result and returns it.
         """
         arg_types = kernel.get_args()
         ret_type: LowerType | None = None
@@ -1291,11 +1297,11 @@ class JitCompiler(TypesConfig):
             reduction_ptr = fn.entry.alloca(ret_type.to_llvm_type())
             reduction_kernel.store_initial_value(fn.entry, reduction_ptr)
 
-        block = self._backend.compile_paralell_loop(fn.entry, fn.get_args(), kernel, reduction_kernel, reduction_ptr)
+        tail = self._compile_loop(fn.entry, fn.get_args(), kernel, reduction_kernel, reduction_ptr)
         if reduction_ptr is not None:
-            block.ret(block.load(reduction_ptr))
+            tail.ret(tail.load(reduction_ptr))
         else:
-            block.ret(VoidValue())
+            tail.ret(VoidValue())
 
         mod = Module()
         mod.add_recursively(values=[fn])
@@ -1306,6 +1312,47 @@ class JitCompiler(TypesConfig):
             tuple(t.to_ctype() for t in arg_types),
             None if ret_type is None else ret_type.to_ctype(),
         )
+
+    def _compile_loop(self, begin: BasicBlock, args: tuple[Value, ...], kernel: _AssignmentsKernel, reduction_kernel: ReductionKernel | None, reduction_ptr: Value | None) -> BasicBlock:
+        """Compile one kernel loop, choosing the backend by the loop size.
+
+        A loop whose size is a compile-time constant below
+        :attr:`min_paralell_loop_size` runs on the serial backend without a
+        runtime check; a loop with a constant size at or above the threshold
+        runs on the parallel backend.  Otherwise the size is only known at
+        runtime, so the function measures it and dispatches between the two.
+        """
+        loop_size = kernel._loop_size
+        if isinstance(loop_size, Int):
+            if loop_size.value < self.min_paralell_loop_size:
+                return self._serial_backend.compile_paralell_loop(begin, args, kernel, reduction_kernel, reduction_ptr)
+            return self._backend.compile_paralell_loop(begin, args, kernel, reduction_kernel, reduction_ptr)
+        return self._compile_dispatched_loop(begin, args, kernel, reduction_kernel, reduction_ptr)
+
+    def _compile_dispatched_loop(self, begin: BasicBlock, args: tuple[Value, ...], kernel: LoopKernel, reduction_kernel: ReductionKernel | None, reduction_ptr: Value | None) -> BasicBlock:
+        """Emit both a serial and a parallel copy of the loop.
+
+        The total size is measured once at ``begin``; the two copies live in
+        branch blocks and jump to a shared merge block, so the parallel
+        overhead is only paid for loops that are large enough to benefit.
+        """
+        b, total_size = kernel.compile_total_size(begin, args)
+        serial_block = BasicBlock()
+        parallel_block = BasicBlock()
+        merge_block = BasicBlock()
+        b.br(
+            b.icmp(IcmpOp.LT, False, total_size, IntValue(self.min_paralell_loop_size, kernel.get_index_type())),
+            serial_block,
+            parallel_block,
+        )
+
+        serial_tail = self._serial_backend.compile_paralell_loop(serial_block, args, kernel, reduction_kernel, reduction_ptr)
+        serial_tail.jmp(merge_block)
+
+        parallel_tail = self._backend.compile_paralell_loop(parallel_block, args, kernel, reduction_kernel, reduction_ptr)
+        parallel_tail.jmp(merge_block)
+
+        return merge_block
 
     def compile_reduction(self, args: list[Symbol], expr: Expr, type_resolver: TypeResolver, by_ref_symbols: set[Symbol] | None = None, standard_layout: StandardLayoutMode = StandardLayoutMode.NONE) -> CompiledWrapper:
         return self.compile_assignments(args, [], type_resolver, by_ref_symbols or set(), reduction=expr, standard_layout=standard_layout)

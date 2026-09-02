@@ -876,6 +876,8 @@ class _JittedFunction:
             self._wrapper._backend,
             real_type=self._wrapper._real_type,
             index_type=self._wrapper._index_type,
+            serial_backend=self._wrapper._serial_backend,
+            min_paralell_loop_size=self._wrapper._min_paralell_loop_size,
         )
         context = {sym: SymbolTypeDesc(lower_type, dim) for _, sym, lower_type, dim, _ in runtime}
         resolver = TypeResolver(context, compiler)
@@ -972,10 +974,12 @@ class Wrapper:
     ```
     """
 
-    def __init__(self, backend: Backend | None = None, real_type: FloatType | None = None, index_type: IntType | None = None) -> None:
+    def __init__(self, backend: Backend | None = None, real_type: FloatType | None = None, index_type: IntType | None = None, serial_backend: Backend | None = None, min_paralell_loop_size: int = 1024) -> None:
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
         self._backend = backend if backend is not None else OpenMPBackend()
+        self._serial_backend = serial_backend
+        self._min_paralell_loop_size = min_paralell_loop_size
         self._real_type = real_type if real_type is not None else FloatType(64)
         self._index_type = index_type if index_type is not None else IntType(64, False)
 

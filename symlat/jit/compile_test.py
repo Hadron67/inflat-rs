@@ -550,4 +550,48 @@ class SimdLayoutTests(TestCase):
         fn5.call(a5, b50)
         assert_almost_equal(a5, b50[:, 2, 3])
 
-all_tests = [TestExpr, JitTest, SimdLayoutTests]
+class SerialDispatchTests(TestCase):
+    """Tests for the serial backend and the serial/parallel dispatch of
+    :class:`JitCompiler`."""
+
+    def test_constant_small_loop_uses_serial_backend(self):
+        # 0-d scalar references make a kernel whose total size is the
+        # compile-time constant 1: below the threshold, so no parallel region
+        # is generated at all
+        x, y = symbols('x', 'y')
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_assignments([x, y], [
+            AssignExpr(x, x, '+'),
+            AssignExpr(y, x, '+'),
+        ], TypeResolver({
+            x: SymbolTypeDesc(FloatType(64), 0),
+            y: SymbolTypeDesc(FloatType(64), 0),
+        }, compiler), {x, y})
+
+        x0 = ctypes.c_double(2.0)
+        y0 = ctypes.c_double(3.0)
+        fn.call(x0, y0)
+        self.assertEqual(x0.value, 4.0)
+        self.assertEqual(y0.value, 7.0)
+        self.assertNotIn('__kmpc_fork_call', '\n'.join(fn.print_all()))
+
+    def test_runtime_dispatch(self):
+        # the loop size is only known at runtime: one kernel contains both a
+        # serial and a parallel copy, and the size measured at call time picks
+        # between them
+        a, = symbols('a')
+
+        compiler = JitCompiler(OpenMPBackend())
+        fn = compiler.compile_reduction([a], a, TypeResolver({a: SymbolTypeDesc(FloatType(64), 3)}, compiler))
+        self.assertIn('__kmpc_fork_call', '\n'.join(fn.print_all()))
+
+        np.random.seed(114514)
+        small = np.random.randn(8, 8, 8)     # 512 elements < 1024
+        large = np.random.randn(11, 11, 11)  # 1331 elements >= 1024
+        empty = np.zeros((0, 3, 4))
+        assert_almost_equal(fn.call(small), np.sum(small))
+        assert_almost_equal(fn.call(large), np.sum(large))
+        assert_almost_equal(fn.call(empty), np.sum(empty))
+
+all_tests = [TestExpr, JitTest, SimdLayoutTests, SerialDispatchTests]

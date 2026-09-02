@@ -24,7 +24,7 @@ class LoopKernel:
         raise NotImplementedError
 
     @abstractmethod
-    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface) -> tuple[BasicBlock, MaybeComplexValue]:
+    def compile_body(self, begin: BasicBlock, args: tuple[Value, ...], loop_var: Value, debug: DebugInterface | None) -> tuple[BasicBlock, MaybeComplexValue]:
         raise NotImplementedError
 
 class ReductionKernel:
