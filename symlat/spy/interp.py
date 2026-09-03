@@ -83,10 +83,11 @@ from .type import (
     PointerType as SpyPointerType,
 )
 from .type import (
-    Type as SpyType,
+    SpyFunction,
+    value_type,
 )
 from .type import (
-    value_type,
+    Type as SpyType,
 )
 
 _MAX_INLINE_DEPTH = 64
@@ -226,7 +227,7 @@ class FunctionResolver:
         raise NotImplementedError
 
     @abstractmethod
-    def resolve_call(self, entry: Any, arg_types: tuple[SpyType, ...]) -> CallTarget:
+    def resolve_call(self, entry: SpyFunction, arg_types: tuple[SpyType, ...]) -> CallTarget:
         """Resolve the native call target of one callee specialization
         (compiling it when it does not exist yet)."""
         raise NotImplementedError
@@ -682,9 +683,8 @@ class HirRunner:
             raise CompileError(
                 "spy.as can only be used at the Python call boundary, not inside spy functions"
             )
-        entry = getattr(obj, '_spy_entry', None)
-        if entry is not None:
-            return self._call_spy_function(entry, inst)
+        if isinstance(obj, SpyFunction):
+            return self._call_spy_function(obj, inst)
         if isinstance(obj, pytypes.FunctionType):
             return self._call_plain_function(obj, inst)
         raise CompileError(
@@ -779,8 +779,8 @@ class HirRunner:
                 values.append(self._const_of_py(param.default_value, formal_types[i]))
         return tuple(values), formal
 
-    def _call_spy_function(self, entry: Any, inst: hir.Call) -> InterpVal:
-        if getattr(entry, 'context', None) is not self._resolver:
+    def _call_spy_function(self, entry: SpyFunction, inst: hir.Call) -> InterpVal:
+        if entry.context is not self._resolver:
             raise CompileError(
                 f"cannot call function {entry.fn.__name__} from another JitContext"
             )

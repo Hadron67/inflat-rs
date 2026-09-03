@@ -150,10 +150,18 @@ class _Builder:
     def _resolve_global(self, name: str) -> hir.Const:
         globals = self._fn_ir.fn.__globals__
         if name in globals:
-            return hir.Const(globals[name])
+            return hir.Const(self._function_value(globals[name]))
         raise CompileError(
             f"name '{name}' is not defined in the scope of function {self._fn_ir.name}"
         )
+
+    @staticmethod
+    def _function_value(obj: Any) -> Any:
+        """Resolve a spy function to its function value: a registered
+        function carries ``_spy_entry`` (either on the raw function or on
+        its callable view), and calls of it are compiled against that
+        value (``interp`` only knows the function value kinds)."""
+        return getattr(obj, '_spy_entry', obj)
 
     def _gen_expr(self, node: ast.expr) -> hir.Value:
         fn_name = self._fn_ir.name
@@ -175,7 +183,7 @@ class _Builder:
                 ):
                     # attribute of a compile-time object (e.g. spy.type)
                     try:
-                        obj = getattr(base.value, node.attr)
+                        obj = self._function_value(getattr(base.value, node.attr))
                     except AttributeError as e:
                         raise CompileError(
                             f"compile-time value {base.value!r} has no attribute {node.attr} "

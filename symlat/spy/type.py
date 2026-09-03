@@ -18,7 +18,10 @@ are equal), which is what makes the compile-time comparisons in
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import override
+from types import FunctionType as PyFunctionType
+from typing import Any, override
+
+from . import mir
 
 INT_DEFAULT_BITS = 32
 """A plain Python ``int`` argument is mapped to this signedness/width by
@@ -92,18 +95,74 @@ class FunctionType(Type):
 # ---------------------------------------------------------------------------
 
 
-class FunctionValue(Value):
-    """Function values are also identity objects: two function values are equal if they are the same object."""
-    def __init__(self, args: tuple[FormalArg, ...], ret: Type, body: tuple[Value, ...]) -> None:
-        self.args = args
-        self.ret = ret
-        self.body = body
+@dataclass(frozen=True)
+class AnyFunction(Type):
+    """The type of a function value whose signature is not known: a lazy
+    ``@jit`` function is only typed when a call specializes it.  It has
+    no MIR mirror - such a value never crosses into runtime code."""
+
+
+class SpyFunction(Value):
+    """A function value: the compile-time value standing for a spy
+    function registered in a :class:`JitContext`.  Function values are
+    identity objects: two are equal only if they are the same object.
+
+    A value doubles as the per-function entry of its host context: it
+    holds the Python function, the function kind, the context-unique
+    base of its native symbol names and the compiled specializations.
+    The call logic itself lives in the interpreter and the host, not
+    here.
+    """
+
+    def __init__(self, fn: PyFunctionType, kind: str) -> None:
+        self.fn = fn
+        self.kind = kind  # 'jit' or 'aot'
+        # the hosting JitContext (set when the value is registered),
+        # only used when checking whether function is called within the same context
+        self.context: Any = None
+        # the context-unique base name of the native symbols
+        self.name_base = ''
+        # spy argument types -> compiled native function (see ``lower``)
+        self.specs: dict[tuple[Type, ...], Any] = {}
+        self.failed: dict[tuple[Type, ...], str] = {}
 
     def __eq__(self, value: object, /) -> bool:
         return self is value
 
     def __hash__(self) -> int:
         return object.__hash__(self)
+
+
+class LazyJitFunction(SpyFunction):
+    """The function value of a ``@jit`` function: it is only compiled
+    (and thereby typed) when a call specializes it, so as a value its
+    type is the untyped :class:`AnyFunction`."""
+
+    def __init__(self, fn: PyFunctionType) -> None:
+        super().__init__(fn, 'jit')
+
+    @override
+    def type(self) -> Type:
+        return AnyFunction()
+
+
+class FunctionValue(SpyFunction):
+    """The function value of a ``@aot`` function: compiled from its
+    type annotations when it is registered, so the value carries the
+    concrete signature and the compiled :class:`mir.Function` (calling
+    it emits a ``mir.Call`` of that function)."""
+
+    def __init__(
+        self,
+        fn: PyFunctionType,
+        args: tuple[FormalArg, ...],
+        ret: Type,
+        mir_fn: mir.Function | None = None,
+    ) -> None:
+        super().__init__(fn, 'aot')
+        self.args = args
+        self.ret = ret
+        self.mir_fn = mir_fn
 
     @override
     def type(self) -> Type:
@@ -129,6 +188,8 @@ def type_str(type: Type) -> str:
             return '*' + ('const ' if is_const else '') + type_str(elem)
         case FunctionType(args, ret):
             return f'fn({', '.join(type_str(a.type) for a in args)}) -> {type_str(ret)}'
+        case AnyFunction():
+            return 'any fn'
         case _:
             return str(type)
 

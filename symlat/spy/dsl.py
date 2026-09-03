@@ -1,8 +1,10 @@
 """The user-facing DSL: ``JitContext`` with the ``jit`` and ``aot``
 decorators.
 
-A decorated function becomes a callable wrapper.  At call time the
-wrapper
+A decorated function becomes a *function value* (``LazyJitFunction``
+for ``jit``, ``FunctionValue`` for ``aot``), mounted as ``_spy_entry``
+on the function object; Python-side calls go through a thin callable
+view bound to its context.  At call time the view
 
 1. binds the Python arguments to the formal parameters (keyword
    arguments and default values are filled in here),
@@ -30,8 +32,12 @@ from .lower import NativeFn, compile_native
 from .type import (
     BoolType,
     FloatType,
+    FormalArg,
+    FunctionValue,
     IntType,
+    LazyJitFunction,
     PointerType,
+    SpyFunction,
     Type,
     int_range,
     type_str,
@@ -124,22 +130,71 @@ def _marshal(fn_name: str, param_name: str, value: object, target: Type) -> obje
             )
 
 
-class FnEntry:
-    """One decorated function of one :class:`JitContext`."""
+class _FunctionView:
+    """A callable view of a function value.  Function values themselves
+    are pure values (the call logic lives in the interpreter and the
+    host), so Python-side calls go through this thin view bound to its
+    context.  The view exposes its value as ``_spy_entry`` (also
+    mounted on the raw function, so name resolution can find it)."""
 
-    def __init__(self, context: 'JitContext', fn: FunctionType, kind: str) -> None:
-        self.context = context
-        self.fn = fn
-        self.kind = kind  # 'jit' or 'aot'
-        # the context-unique base of the native symbol names of this
-        # function's specializations (allocated by ``JitContext``)
-        self.name_base = ''
-        self.specs: dict[tuple[Type, ...], NativeFn] = {}
-        self.failed: dict[tuple[Type, ...], str] = {}
+    __slots__ = ('_context', '_spy_entry')
 
-    def dispatch(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-        fn_ir = self.context.hir_of(self.fn)
-        name = self.fn.__name__
+    def __init__(self, context: 'JitContext', entry: SpyFunction) -> None:
+        self._context = context
+        self._spy_entry = entry
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._context._dispatch(self._spy_entry, args, kwargs)
+
+    @property
+    def __name__(self) -> str:
+        return self._spy_entry.fn.__name__
+
+    def __repr__(self) -> str:
+        entry = self._spy_entry
+        return f'<spy {entry.kind} function {entry.fn.__name__}>'
+
+
+class JitContext(FunctionResolver):
+    """A cache of compiled spy functions; functions decorated by the
+    same context may call each other (as native calls)."""
+
+    def __init__(self) -> None:
+        self._entries: dict[FunctionType, SpyFunction] = {}
+        self._hir_cache: dict[FunctionType, astgen.FunctionIR] = {}
+        self._symbols: dict[str, NativeFn] = {}
+        self._compiling: set[tuple[object, tuple[Type, ...]]] = set()
+        # allocated base names (``spy.<name>.<types>``) -> their owner;
+        # keeps the native symbols of different functions apart even when
+        # they happen to share a ``__name__``
+        self._name_owners: dict[str, SpyFunction] = {}
+
+    # -- decorators ----------------------------------------------------------
+
+    def jit(self, fn: FunctionType | None = None):
+        """``@cache.jit()``: compile lazily at the first call, using the
+        marshaled types of the arguments (annotations have no effect in
+        jit mode, except for unifying type parameters like ``T``)."""
+        if fn is not None:
+            return self._register(fn, 'jit')
+        return lambda f: self._register(f, 'jit')
+
+    def aot(self, fn: FunctionType | None = None):
+        """``@cache.aot()``: compile immediately from the (concrete)
+        type annotations, which are required for every parameter and for
+        the return type."""
+        if fn is not None:
+            return self._register(fn, 'aot')
+        return lambda f: self._register(f, 'aot')
+
+    # -- Python-side calls ---------------------------------------------------
+
+    def _dispatch(self, entry: SpyFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Bind Python arguments to the formal parameters of ``entry``
+        and call the (possibly just compiled) specialization; this is
+        what the callable view of a function value forwards to."""
+        fn_ir = self.hir_of(entry.fn)
+        name = entry.fn.__name__
         params = fn_ir.params
         param_names = [p.name for p in params]
 
@@ -163,7 +218,7 @@ class FnEntry:
                 provided.append(_candidate_type(name, param.name, present[param.name]))
             else:
                 provided.append(None)
-        formal = astgen.solve_call_types(fn_ir, self.kind, tuple(provided))
+        formal = astgen.solve_call_types(fn_ir, entry.kind, tuple(provided))
 
         marshaled: list[Any] = []
         for i, param in enumerate(params):
@@ -175,59 +230,8 @@ class FnEntry:
                 value = param.default_value
             marshaled.append(_marshal(name, param.name, value, formal[i]))
 
-        spec = self.context.ensure_spec(self, formal)
+        spec = self.ensure_spec(entry, formal)
         return spec.call(*marshaled)
-
-
-class _SpyFn:
-    __slots__ = ('_spy_entry',)
-
-    def __init__(self, entry: FnEntry) -> None:
-        self._spy_entry = entry
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self._spy_entry.dispatch(args, kwargs)
-
-    @property
-    def __name__(self) -> str:
-        return self._spy_entry.fn.__name__
-
-    def __repr__(self) -> str:
-        kind = self._spy_entry.kind
-        return f'<spy {kind} function {self._spy_entry.fn.__name__}>'
-
-
-class JitContext(FunctionResolver):
-    """A cache of compiled spy functions; functions decorated by the
-    same context may call each other (as native calls)."""
-
-    def __init__(self) -> None:
-        self._entries: dict[FunctionType, FnEntry] = {}
-        self._hir_cache: dict[FunctionType, astgen.FunctionIR] = {}
-        self._symbols: dict[str, NativeFn] = {}
-        self._compiling: set[tuple[object, tuple[Type, ...]]] = set()
-        # allocated base names (``spy.<name>.<types>``) -> their owner;
-        # keeps the native symbols of different functions apart even when
-        # they happen to share a ``__name__``
-        self._name_owners: dict[str, FnEntry] = {}
-
-    # -- decorators ----------------------------------------------------------
-
-    def jit(self, fn: FunctionType | None = None):
-        """``@cache.jit()``: compile lazily at the first call, using the
-        marshaled types of the arguments (annotations have no effect in
-        jit mode, except for unifying type parameters like ``T``)."""
-        if fn is not None:
-            return self._register(fn, 'jit')
-        return lambda f: self._register(f, 'jit')
-
-    def aot(self, fn: FunctionType | None = None):
-        """``@cache.aot()``: compile immediately from the (concrete)
-        type annotations, which are required for every parameter and for
-        the return type."""
-        if fn is not None:
-            return self._register(fn, 'aot')
-        return lambda f: self._register(f, 'aot')
 
     # -- registry ------------------------------------------------------------
 
@@ -238,7 +242,7 @@ class JitContext(FunctionResolver):
             self._hir_cache[fn] = ir
         return ir
 
-    def ensure_spec(self, entry: FnEntry, arg_types: tuple[Type, ...]) -> NativeFn:
+    def ensure_spec(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> NativeFn:
         """Compile (or look up) the specialization of ``entry`` for
         ``arg_types`` and return its native function."""
         spec = entry.specs.get(arg_types)
@@ -265,6 +269,8 @@ class JitContext(FunctionResolver):
                 fn_ir, symbol_of(entry.name_base, arg_types), arg_types, ret_hint
             )
             native = compile_native(mir_fn.name, mir_fn, self._extern_symbols())
+            if isinstance(entry, FunctionValue):
+                entry.mir_fn = mir_fn
             entry.specs[arg_types] = native
             self._symbols[native.name] = native
             return native
@@ -276,7 +282,7 @@ class JitContext(FunctionResolver):
         finally:
             self._compiling.discard(key)
 
-    def resolve_call(self, entry: FnEntry, arg_types: tuple[Type, ...]) -> CallTarget:
+    def resolve_call(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> CallTarget:
         """Resolve a native call of one specialization from inside a
         compiled function (may trigger a nested compilation)."""
         native = self.ensure_spec(entry, arg_types)
@@ -284,25 +290,37 @@ class JitContext(FunctionResolver):
 
     # -- internals -----------------------------------------------------------
 
-    def _register(self, fn: FunctionType, kind: str) -> _SpyFn:
+    def _register(self, fn: FunctionType, kind: str) -> _FunctionView:
         if not isinstance(fn, FunctionType):
             raise TypeError('spy decorators can only be applied to plain Python functions')
         if fn in self._entries:
             raise ValueError(f'function {fn.__name__} is already registered in this JitContext')
-        entry = FnEntry(self, fn, kind)
+        entry: SpyFunction
+        formal: tuple[Type, ...] | None = None
+        if kind == 'aot':
+            # resolve the fixed signature from the annotations first; the
+            # body is compiled right below (registration time)
+            fn_ir = self.hir_of(fn)
+            params = fn_ir.params
+            formal = astgen.solve_call_types(fn_ir, 'aot', (None,) * len(params))
+            ret = astgen.return_annotation_type(fn_ir)
+            args = tuple(FormalArg(params[i].name, formal[i]) for i in range(len(params)))
+            entry = FunctionValue(fn, args, ret)
+        else:
+            entry = LazyJitFunction(fn)
+        entry.context = self
         entry.name_base = self._allocate_name(fn, entry)
         self._entries[fn] = entry
-        wrapper = _SpyFn(entry)
+        # mount the value on the function object, so that name resolution
+        # inside spy bodies finds it (see ``astgen``)
+        fn._spy_entry = entry  # type: ignore[attr-defined]
+        view = _FunctionView(self, entry)
         if kind == 'aot':
-            # compile immediately from the annotations
-            fn_ir = self.hir_of(fn)
-            formal = astgen.solve_call_types(
-                fn_ir, 'aot', (None,) * len(fn_ir.params)
-            )
+            assert formal is not None
             self.ensure_spec(entry, formal)
-        return wrapper
+        return view
 
-    def _allocate_name(self, fn: FunctionType, entry: FnEntry) -> str:
+    def _allocate_name(self, fn: FunctionType, entry: SpyFunction) -> str:
         """The context-unique base name of the native symbols of ``fn``.
 
         Two different functions registered in the same context may share
