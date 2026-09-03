@@ -45,6 +45,7 @@ type information of its own.
 
 import operator
 import types as pytypes
+from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
@@ -196,12 +197,48 @@ def to_spy_type(type: Type) -> SpyType:
             raise CompileError(f"MIR type {type_str(type)} has no spy counterpart")
 
 
+# ---------------------------------------------------------------------------
+# the compile-time host interface
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CallTarget:
+    """A compiled specialization another function can call."""
+
+    name: str
+    ret_type: Type
+
+
+class FunctionResolver:
+    """The compile-time host of one :class:`HirRunner`.
+
+    ``dsl.JitContext`` implements this interface; the interpreter cannot
+    import the host directly (the host imports the interpreter), so the
+    host inherits this class instead.  The interface exposes only what
+    running a function body needs: the parsed HIR of callees and the
+    resolution of native call targets (which may compile a callee on
+    the fly).
+    """
+    @abstractmethod
+    def hir_of(self, fn: pytypes.FunctionType) -> astgen.FunctionIR:
+        """Parse (and cache) the HIR of a Python function."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_call(self, entry: Any, arg_types: tuple[SpyType, ...]) -> CallTarget:
+        """Resolve the native call target of one callee specialization
+        (compiling it when it does not exist yet)."""
+        raise NotImplementedError
+
+
 class HirRunner:
     """Runs one function body (and everything it inlines) at compile
     time, emitting one straight-line typed :class:`mir.Function`.
 
-    ``resolver`` is the hosting JitContext (duck-typed, see ``dsl``) and
-    provides:
+    ``resolver`` is the compile-time host, typed as the
+    :class:`FunctionResolver` interface it implements (``dsl.JitContext``
+    in practice) and provides:
 
     * ``hir_of(fn)``: the parsed (and cached) HIR of a Python function,
     * ``resolve_call(entry, arg_types)``: make sure the specialization
@@ -209,7 +246,7 @@ class HirRunner:
       native symbol name and return type.
     """
 
-    def __init__(self, resolver: Any) -> None:
+    def __init__(self, resolver: FunctionResolver) -> None:
         self._resolver = resolver
         self._insts: list[mir.Inst] = []
         self._frames: list[Frame] = []

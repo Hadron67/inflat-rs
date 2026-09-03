@@ -19,16 +19,14 @@ through the same resolution but is compiled to a native ``call``; see
 ``interp``.
 """
 
-from dataclasses import dataclass
 from types import FunctionType
 from typing import Any
 
 from . import astgen
 from .builtins import AsValue
 from .errors import CompileError, SpyError, TypeMismatchError
-from .interp import HirRunner
+from .interp import CallTarget, FunctionResolver, HirRunner
 from .lower import NativeFn, compile_native
-from .mir import Type as MirType
 from .type import (
     BoolType,
     FloatType,
@@ -126,14 +124,6 @@ def _marshal(fn_name: str, param_name: str, value: object, target: Type) -> obje
             )
 
 
-@dataclass
-class CallTarget:
-    """A compiled specialization another function can call."""
-
-    name: str
-    ret_type: MirType
-
-
 class FnEntry:
     """One decorated function of one :class:`JitContext`."""
 
@@ -207,7 +197,7 @@ class _SpyFn:
         return f'<spy {kind} function {self._spy_entry.fn.__name__}>'
 
 
-class JitContext:
+class JitContext(FunctionResolver):
     """A cache of compiled spy functions; functions decorated by the
     same context may call each other (as native calls)."""
 
