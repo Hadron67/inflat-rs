@@ -92,11 +92,12 @@ def to_ctype(type: Type) -> type[ctypes._CDataType]:
 
 
 class _Lowerer:
-    """Lowers the MIR functions of one module against their shared
-    ``sllvm.Function`` definitions: a call whose callee is a
-    :class:`mir.Function` of the same module references that definition,
-    a call to a :class:`mir.Symbol` references a (cached) extern
-    declaration instead."""
+    """Lowers the region trees of the MIR functions of one module onto
+    their shared ``sllvm.Function`` definitions (every region becomes a
+    chain of LLVM basic blocks).  A call whose callee is a
+    :class:`mir.Function` or a symbol defined by this very module
+    references the in-module ``define``; a call to a :class:`mir.Symbol`
+    of an earlier module references a (cached) extern declaration."""
 
     def __init__(self, llvm_fns: dict[str, sllvm.Function]) -> None:
         self._llvm_fns = llvm_fns
@@ -104,12 +105,54 @@ class _Lowerer:
         self._declarations: dict[str, sllvm.DeclareFunction] = {}
 
     def lower(self, fn: mir.Function) -> None:
-        """Lower the body of ``fn`` into its pre-created
+        """Lower the region tree of ``fn`` into its pre-created
         ``sllvm.Function``."""
         llvm_fn = self._llvm_fns[fn.name]
         arg_values = llvm_fn.get_args()
-        for inst in fn.insts:
-            self._lower_inst(llvm_fn.entry, inst, arg_values)
+        self._lower_region(llvm_fn, llvm_fn.entry, fn.insts, arg_values, None)
+
+    def _lower_region(
+        self,
+        llvm_fn: sllvm.Function,
+        block: sllvm.BasicBlock,
+        insts: tuple[mir.Inst, ...] | list[mir.Inst],
+        arg_values: tuple[sllvm.Value, ...],
+        cont: sllvm.BasicBlock | None,
+    ) -> None:
+        """Lower one region into LLVM blocks.  ``cont`` is the block
+        that a region falling off its end jumps to (None only at the end
+        of the function, where falling off is a compile error)."""
+        if len(insts) == 0:
+            if not block._finished:
+                assert cont is not None, 'function must not fall off its end'
+                block.jmp(cont)
+            return
+        inst = insts[0]
+        if isinstance(inst, mir.Ret):
+            value = self._value(inst.value, arg_values)
+            block.ret(value)
+            return
+        if isinstance(inst, mir.If):
+            cond = self._value(inst.cond, arg_values)
+            rest = insts[1:]
+            cont_block = sllvm.BasicBlock() if rest else cont
+            then_block = sllvm.BasicBlock()
+            if len(inst.else_body) == 0:
+                assert cont_block is not None
+                block.br(cond, then_block, cont_block)
+                self._lower_region(llvm_fn, then_block, inst.then_body, arg_values, cont_block)
+            else:
+                else_block = sllvm.BasicBlock()
+                block.br(cond, then_block, else_block)
+                self._lower_region(llvm_fn, then_block, inst.then_body, arg_values, cont_block)
+                self._lower_region(llvm_fn, else_block, inst.else_body, arg_values, cont_block)
+            if rest:
+                assert cont_block is not None
+                self._lower_region(llvm_fn, cont_block, rest, arg_values, cont)
+            return
+        # a plain instruction
+        self._lower_inst(block, inst, arg_values)
+        self._lower_region(llvm_fn, block, insts[1:], arg_values, cont)
 
     def _value(self, value: mir.Value, arg_values: tuple[sllvm.Value, ...]) -> sllvm.Value:
         if isinstance(value, mir.Param):
@@ -134,6 +177,13 @@ class _Lowerer:
                 )
             return llvm_fn
         if isinstance(value, mir.Symbol):
+            # a symbol names a function value: resolve it to the module's
+            # own definition when there is one (recursion, or a call to a
+            # function compiled into this very module), otherwise declare
+            # it as an external
+            llvm_fn = self._llvm_fns.get(value.name)
+            if llvm_fn is not None:
+                return llvm_fn
             return self._declare(value)
         raise CompileError(f'cannot lower value {value!r}')
 
@@ -215,14 +265,10 @@ class _Lowerer:
                 else:
                     result = block.fcmp(op, lhs, rhs)
             case mir.Call():
-                # the callee is a function value: lowering a Function of
-                # this module yields its definition, lowering a Symbol
-                # yields its (cached) extern declaration
+                # the callee is a function value: lowering it yields the
+                # in-module definition or a (cached) extern declaration
                 callee = self._value(inst.callee, arg_values)
                 result = block.call(callee, *(self._value(a, arg_values) for a in inst.args))
-            case mir.Ret():
-                value = self._value(inst.value, arg_values)
-                block.ret(value)
             case _:
                 raise CompileError(f'unsupported MIR instruction {type(inst).__name__}')
         if result is not None:

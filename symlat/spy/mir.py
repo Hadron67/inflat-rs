@@ -1,10 +1,12 @@
 """The typed MIR.
 
-The interpreter ("runs" the untyped HIR) emits a :class:`Function`: a
-linear list of typed instructions plus the concrete types of the formal
-arguments and of the return value.  Executing the function body emits
-straight-line code only; runtime control flow (runtime ``if``/``while``)
-will be added later as explicit basic blocks with branches and phis.
+The interpreter ("runs" the untyped HIR) emits a :class:`Function` per
+specialization: a *tree* of straight-line regions.  A region is a list
+of typed instructions; a :class:`Ret` returns on that path, and a
+runtime :class:`If` carries two sub-regions.  Control flow is
+structured (no basic blocks, no phi): a branch that does not return
+falls through to the code after the ``If`` in its enclosing region,
+which is exactly the shape of control flow that recursion needs.
 
 The MIR owns its static type system (:class:`Type`): a closed,
 LLVM-shaped universe of the types a runtime register can have.  The
@@ -12,14 +14,16 @@ interpreter computes its types in the ``spy`` type system of
 ``type.py`` (which also has to represent compile-time values - type
 descriptors, functions, ... - that never cross into runtime code) and
 mirrors them into these types when it emits an instruction.  ``lower``
-then maps MIR types mechanically onto LLVM types.
+then maps the region tree onto LLVM basic blocks.
 
 The representation is deliberately close to LLVM so that ``lower`` is a
 mechanical mapping; every MIR value exposes a ``.type`` (a MIR type).
 A compiled function is a :class:`Function` value; calls within one
 LLVM module reference the callee's :class:`Function` (lowered to a
-``define``), while a callee compiled in an *earlier* module is
-referenced by a :class:`Symbol` (a ``declare``d external).
+``define``), while a callee compiled in an *earlier* module - or a
+function still being compiled (recursion) - is referenced by a
+:class:`Symbol`.  Symbols resolve to the module-local ``define`` when
+there is one and to an external declaration otherwise.
 """
 
 from dataclasses import dataclass
@@ -237,7 +241,23 @@ class Call(Inst):
 
 @dataclass(eq=False)
 class Ret(Inst):
+    """Return from the enclosing function; ends its region (no code of
+    the region is executed after a return)."""
+
     value: Value
+
+
+@dataclass(eq=False)
+class If(Inst):
+    """A runtime branch typed by the interpreter.  ``then_body`` and
+    ``else_body`` are regions (lists of instructions) that may contain
+    further control flow.  A region that ends in a :class:`Ret` returns
+    on that path; a region that does not return falls through to the
+    code after this ``If`` in the enclosing region."""
+
+    cond: Value
+    then_body: tuple[Inst, ...]
+    else_body: tuple[Inst, ...]
 
 
 @dataclass(eq=False)

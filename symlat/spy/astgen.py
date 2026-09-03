@@ -14,13 +14,18 @@ Like ``symlat.jit.llvm`` the body is one *linear* list of instructions;
 expression evaluation appends temporary instructions to the list and
 returns the instruction object whose register holds the value.
 
-``astgen`` performs *all* name resolution.  Since every parameter is
-addressable, the translated body starts with an ``Alloca``/``Store``
-prologue per parameter (storing the by-value ``Arg(i)``), and a read of
-a parameter becomes a ``Load`` of its Alloca.  Global names - everything
-that is not a parameter - are resolved here to their Python objects and
-embedded as ``hir.Const`` leaves; attributes on such compile-time
-objects (``spy.type``, ``spy.u64``, ...) are evaluated here as well.
+``astgen`` performs *almost* all name resolution.  Since every parameter
+is addressable, the translated body starts with an
+``Alloca``/``Store`` prologue per parameter (storing the by-value
+``Arg(i)``), and a read of a parameter becomes a ``Load`` of its Alloca.
+Global names - everything that is not a parameter - are resolved here to
+their Python objects and embedded as ``hir.Const`` leaves; attributes on
+such compile-time objects (``spy.type``, ``spy.u64``, ...) are evaluated
+here as well.  Whether a function object denotes a registered spy
+function - and which function value it stands for - is decided by the
+interpreter when a call runs: a function body may be parsed before its
+callees, or even itself (an aot function parses its own body while it is
+being registered), are registered.
 
 ``solve_call_types`` computes the concrete spy types of all formal
 parameters of one call:
@@ -150,18 +155,10 @@ class _Builder:
     def _resolve_global(self, name: str) -> hir.Const:
         globals = self._fn_ir.fn.__globals__
         if name in globals:
-            return hir.Const(self._function_value(globals[name]))
+            return hir.Const(globals[name])
         raise CompileError(
             f"name '{name}' is not defined in the scope of function {self._fn_ir.name}"
         )
-
-    @staticmethod
-    def _function_value(obj: Any) -> Any:
-        """Resolve a spy function to its function value: a registered
-        function carries ``_spy_entry`` (either on the raw function or on
-        its callable view), and calls of it are compiled against that
-        value (``interp`` only knows the function value kinds)."""
-        return getattr(obj, '_spy_entry', obj)
 
     def _gen_expr(self, node: ast.expr) -> hir.Value:
         fn_name = self._fn_ir.name
@@ -183,7 +180,7 @@ class _Builder:
                 ):
                     # attribute of a compile-time object (e.g. spy.type)
                     try:
-                        obj = self._function_value(getattr(base.value, node.attr))
+                        obj = getattr(base.value, node.attr)
                     except AttributeError as e:
                         raise CompileError(
                             f"compile-time value {base.value!r} has no attribute {node.attr} "

@@ -29,7 +29,7 @@ from symlat.spy import mir
 from . import astgen
 from .builtins import AsValue
 from .errors import CompileError, SpyError, TypeMismatchError
-from .interp import FunctionResolver, HirRunner
+from .interp import FunctionResolver, HirRunner, to_mir_type
 from .lower import NativeFn, compile_module
 from .mir import Function as MirFunction
 from .mir import FunctionType as MirFunctionType
@@ -184,8 +184,10 @@ class JitContext(FunctionResolver):
 
     def jit(self, fn: FunctionType | None = None):
         """``@cache.jit()``: compile lazily at the first call, using the
-        marshaled types of the arguments (annotations have no effect in
-        jit mode, except for unifying type parameters like ``T``)."""
+        marshaled types of the arguments (annotations have no effect on
+        the chosen argument types; type parameters like ``T`` unify the
+        parameters, and a declared return annotation fixes the return
+        type of the specialization)."""
         if fn is not None:
             return self._register(fn, 'jit')
         return lambda f: self._register(f, 'jit')
@@ -297,18 +299,40 @@ class JitContext(FunctionResolver):
         key = (entry, arg_types)
         cached = self._mir_cache.get(key)
         if cached is not None:
+            # The MIR is cached but its spec is not registered, so the
+            # module build that produced it never finished (specs are
+            # only registered when a module is lowered); the current
+            # build references the function, so it is defined here too.
+            module = self._module
+            if module is None:
+                raise CompileError(
+                    f'internal error: cached MIR of '
+                    f'{entry.fn.__name__}({_types_str(arg_types)}) is reused '
+                    'outside of a module build'
+                )
+            module[key] = cached
             return cached
         if key in self._compiling:
+            # recursion is resolved by ``resolve_call`` before reaching
+            # this point; reaching it means a caller bypassed resolution
             raise CompileError(
-                f"recursive calls are not supported yet: "
-                f"{entry.fn.__name__}({_types_str(arg_types)})"
+                f'internal error: re-entrant compile of '
+                f'{entry.fn.__name__}({_types_str(arg_types)})'
             )
         self._compiling.add(key)
         try:
             fn_ir = self.hir_of(entry.fn)
-            ret_hint: Type | None = None
+            ret_hint: Type | None
             if entry.kind == 'aot':
                 ret_hint = astgen.return_annotation_type(fn_ir)
+            else:
+                # a declared return annotation - concrete, or naming a
+                # type parameter bound by the parameters - fixes the
+                # return type of the specialization (a recursive function
+                # needs it: its calls are typed while its body is still
+                # being compiled); without one the return type is
+                # inferred from the return sites
+                ret_hint = self._declared_ret_type(entry, arg_types)
             runner = HirRunner(self)
             mir_fn, _ = runner.run_function(
                 fn_ir, symbol_of(entry.name_base, arg_types), arg_types, ret_hint
@@ -344,14 +368,91 @@ class JitContext(FunctionResolver):
         """The callable value of one callee specialization as seen from
         inside a compiled function: a :class:`mir.Function` when the
         callee is still fresh (it will be ``define``d in the module of
-        the caller) or a :class:`mir.Symbol` of a specialization
-        compiled in an earlier module."""
+        the caller), a :class:`mir.Symbol` of a specialization compiled
+        in an earlier module, or - for recursion - a symbol of the
+        specialization whose body is being typed right now (it will be
+        ``define``d by the module under construction as well)."""
         spec = entry.specs.get(arg_types)
         if spec is not None:
             fn_type = MirFunctionType(spec.arg_types, spec.ret_type)
             return MirSymbol(spec.name, fn_type), spec.ret_type
+        key = (entry, arg_types)
+        if key in self._compiling:
+            # a call of the specialization that is currently being
+            # compiled: recursion (direct or mutual).  The callee's MIR
+            # function only exists once its body has been typed, so the
+            # call references it by the symbol it will be defined under;
+            # ``lower`` resolves the symbol to that very definition.
+            return self._recursive_call(entry, arg_types)
         mir_fn = self._compile_mir(entry, arg_types)
         return mir_fn, mir_fn.ret_type
+
+    def _recursive_call(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> tuple[mir.Value, mir.Type]:
+        """The callable value of a recursive call.
+
+        The call must be typed while the callee body is still being
+        compiled, so its signature - including the return type - has to
+        be known up front (see :meth:`_declared_ret_type`); the callee
+        is referenced by the symbol its finished MIR function will be
+        defined under."""
+        ret = self._declared_ret_type(entry, arg_types)
+        if ret is None:
+            raise CompileError(self._recursion_ret_type_error(entry, arg_types))
+        mir_ret = to_mir_type(ret)
+        fn_type = MirFunctionType(tuple(to_mir_type(t) for t in arg_types), mir_ret)
+        return MirSymbol(symbol_of(entry.name_base, arg_types), fn_type), mir_ret
+
+    def _declared_ret_type(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> Type | None:
+        """The concrete spy return type of one specialization declared by
+        its annotations, or ``None`` when none is declared.
+
+        An ``aot`` function fixes its signature at registration.  A
+        ``jit`` function with a return annotation uses it as the return
+        type of the specialization: the annotation is either a concrete
+        spy type or a type parameter bound by the parameters (which
+        binds it to the argument types of the specialization).
+        """
+        if isinstance(entry, FunctionValue):
+            return entry.ret
+        fn_ir = self.hir_of(entry.fn)
+        ret_ann = fn_ir.ret_annotation
+        if ret_ann is None:
+            return None
+        for type_param in fn_ir.type_params:
+            if ret_ann is type_param:
+                # the return type parameter is bound by the (concrete)
+                # arguments of the parameters annotated with it
+                for i, param in enumerate(fn_ir.params):
+                    if param.annotation is ret_ann:
+                        return arg_types[i]
+                return None
+        if not isinstance(ret_ann, Type):
+            return None
+        return ret_ann
+
+    def _recursion_ret_type_error(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> str:
+        """Explain why the return type of a recursive specialization
+        cannot be determined from its annotations."""
+        fn_ir = self.hir_of(entry.fn)
+        ret_ann = fn_ir.ret_annotation
+        name = entry.fn.__name__
+        if ret_ann is None:
+            return (
+                f"recursive function {name} requires a return type annotation: "
+                'the return type of a recursive call must be known while '
+                'the body is being compiled'
+            )
+        for type_param in fn_ir.type_params:
+            if ret_ann is type_param:
+                return (
+                    f"cannot determine the return type of the recursive function {name}: "
+                    f"type parameter {type_param.__name__} appears only in the return "
+                    'annotation, not on any parameter'
+                )
+        return (
+            f"cannot determine the return type of the recursive function {name}: "
+            f'the return annotation {ret_ann!r} is not a spy type'
+        )
 
     # -- internals -----------------------------------------------------------
 

@@ -72,6 +72,124 @@ def use_default[T](a: T) -> T:
     return add_default(a)
 
 
+# -- runtime ``if`` ----------------------------------------------------------
+
+
+def sign(n):
+    # a runtime if whose branches both return
+    if n > 0:
+        return 1
+    else:
+        return -1
+
+
+def clamped(n):
+    # the then-branch returns; the else falls through to the code after
+    # the if (the trailing return)
+    if n > 100:
+        return 100
+    return n
+
+
+def classify(n):
+    # two consecutive partially-returning runtime ifs
+    if n > 100:
+        return 1
+    if n > 10:
+        return 2
+    return 3
+
+
+def nested_if(n):
+    # a runtime if whose branches contain further runtime ifs
+    if n > 0:
+        if n > 100:
+            return 2
+        else:
+            return 1
+    else:
+        return 0
+
+
+def bad_join(n):
+    # both branches fall through (a join): not supported yet
+    if n > 0:
+        pass
+    else:
+        pass
+    return n
+
+
+# -- recursion ---------------------------------------------------------------
+
+
+def fact(n) -> spy.i32:
+    # direct recursion; the return annotation fixes the return type
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+
+def fact_aot(n: spy.i32) -> spy.i32:
+    if n <= 1:
+        return 1
+    return n * fact_aot(n - 1)
+
+
+def gcd[T](a: T, b: T) -> T:
+    # recursion whose return annotation is the type parameter ``T``
+    if b == 0:
+        return a
+    return gcd(b, a % b)
+
+
+def pow2[T](n: T) -> T:
+    # a generic recursion that is specialized to several types
+    if n <= 0:
+        return 1
+    return 2 * pow2(n - 1)
+
+
+def fib(n) -> spy.i32:
+    # recursion inside the branches of a runtime if (and a recursive
+    # call used twice on one path)
+    if n <= 1:
+        return n
+    else:
+        return fib(n - 1) + fib(n - 2)
+
+
+def is_even(n) -> spy.bool:
+    # mutual recursion with is_odd
+    if n == 0:
+        return True
+    return is_odd(n - 1)
+
+
+def is_odd(n) -> spy.bool:
+    if n == 0:
+        return False
+    return is_even(n - 1)
+
+
+def fact_untyped(n):
+    # recursion needs the return type while the body is being typed
+    if n <= 1:
+        return 1
+    return n * fact_untyped(n - 1)
+
+
+def v_fn(a) -> spy.i32:
+    return a + 1
+
+
+def abort_after_call(n):
+    # compiles v_fn first (nested, MIR-cached by the module build), then
+    # fails on its own unannotated recursion - the whole build aborts
+    v_fn(n)
+    return abort_after_call(n - 1)
+
+
 def _make_twin():
     """A factory whose results all share one ``__name__``; registered
     into the same JitContext they must still get distinct native
@@ -87,6 +205,9 @@ _ORIGINALS = {
     name: globals()[name] for name in (
         'add', 'add_aot', 'add_default', 'add_inline', 'foo',
         'is_i32', 'call_add', 'use_default',
+        'sign', 'clamped', 'classify', 'nested_if', 'bad_join',
+        'fact', 'fact_aot', 'gcd', 'pow2', 'fib', 'is_even', 'is_odd',
+        'fact_untyped', 'v_fn', 'abort_after_call',
     )
 }
 
@@ -102,6 +223,21 @@ class SpyExampleTest(TestCase):
         self.is_i32 = self.cache.jit()(is_i32)
         self.call_add = self.cache.jit()(call_add)
         self.use_default = self.cache.jit()(use_default)
+        self.sign = self.cache.jit()(sign)
+        self.clamped = self.cache.jit()(clamped)
+        self.classify = self.cache.jit()(classify)
+        self.nested_if = self.cache.jit()(nested_if)
+        self.bad_join = self.cache.jit()(bad_join)
+        self.fact = self.cache.jit()(fact)
+        self.fact_aot = self.cache.aot()(fact_aot)
+        self.gcd = self.cache.jit()(gcd)
+        self.pow2 = self.cache.jit()(pow2)
+        self.fib = self.cache.jit()(fib)
+        self.is_even = self.cache.jit()(is_even)
+        self.is_odd = self.cache.jit()(is_odd)
+        self.fact_untyped = self.cache.jit()(fact_untyped)
+        self.v_fn = self.cache.jit()(v_fn)
+        self.abort_after_call = self.cache.jit()(abort_after_call)
         g['add'] = self.add
         g['add_aot'] = self.add_aot
         g['add_default'] = self.add_default
@@ -109,6 +245,21 @@ class SpyExampleTest(TestCase):
         g['is_i32'] = self.is_i32
         g['call_add'] = self.call_add
         g['use_default'] = self.use_default
+        g['sign'] = self.sign
+        g['clamped'] = self.clamped
+        g['classify'] = self.classify
+        g['nested_if'] = self.nested_if
+        g['bad_join'] = self.bad_join
+        g['fact'] = self.fact
+        g['fact_aot'] = self.fact_aot
+        g['gcd'] = self.gcd
+        g['pow2'] = self.pow2
+        g['fib'] = self.fib
+        g['is_even'] = self.is_even
+        g['is_odd'] = self.is_odd
+        g['fact_untyped'] = self.fact_untyped
+        g['v_fn'] = self.v_fn
+        g['abort_after_call'] = self.abort_after_call
         # add_inline stays the raw function: it is *inlined*, not compiled
         self.addCleanup(self._restore_globals)
 
@@ -243,6 +394,98 @@ class SpyExampleTest(TestCase):
         # gets a distinct one instead of overwriting it
         self.assertIn('spy.twin.i32.i32', names)
         self.assertEqual(len(set(names)), 2, names)
+
+    # -- runtime ``if`` ------------------------------------------------------
+
+    def test_runtime_if_both_branches_return(self) -> None:
+        self.assertEqual(self.sign(5), 1)
+        self.assertEqual(self.sign(-3), -1)
+
+    def test_runtime_if_partial_return_falls_through(self) -> None:
+        self.assertEqual(self.clamped(50), 50)
+        self.assertEqual(self.clamped(500), 100)
+        self.assertEqual(self.clamped(-1), -1)
+
+    def test_runtime_if_sequence(self) -> None:
+        self.assertEqual(self.classify(1), 3)
+        self.assertEqual(self.classify(50), 2)
+        self.assertEqual(self.classify(500), 1)
+
+    def test_runtime_if_nested(self) -> None:
+        self.assertEqual(self.nested_if(-1), 0)
+        self.assertEqual(self.nested_if(5), 1)
+        self.assertEqual(self.nested_if(500), 2)
+
+    def test_runtime_if_join_error(self) -> None:
+        # a runtime if whose branches both fall through needs a join,
+        # which the structured MIR does not support yet
+        with self.assertRaises(spy.CompileError) as ctx:
+            self.bad_join(1)
+        self.assertIn('both fall through', str(ctx.exception))
+
+    # -- recursion -----------------------------------------------------------
+
+    def test_recursion_factorial(self) -> None:
+        self.assertEqual(self.fact(1), 1)
+        self.assertEqual(self.fact(5), 120)
+        self.assertEqual(self.fact(10), 3628800)
+        # the second call reuses the compiled specialization
+        self.assertEqual(self.fact(10), 3628800)
+
+    def test_recursion_is_a_native_recursive_call(self) -> None:
+        self.assertEqual(self.fact(3), 6)
+        lines = self._spec_lines(self.fact, (spy.i32,))
+        self.assertTrue(
+            any('call' in line and 'spy.fact.i32' in line for line in lines), lines
+        )
+
+    def test_recursion_aot(self) -> None:
+        self.assertEqual(self.fact_aot(5), 120)
+        self.assertEqual(self.fact_aot(10), 3628800)
+
+    def test_recursion_generic_over_types(self) -> None:
+        # one generic recursion specialized to two types; each
+        # specialization recurses to itself
+        self.assertEqual(self.pow2(5), 32)
+        self.assertEqual(self.pow2(3.0), 8.0)
+        names = sorted(spec.name for spec in self.pow2._spy_entry.specs.values())
+        self.assertEqual(names, ['spy.pow2.f64', 'spy.pow2.i32'], names)
+
+    def test_recursion_with_type_parameter_return(self) -> None:
+        # the return annotation names the type parameter ``T``
+        self.assertEqual(self.gcd(48, 36), 12)
+        self.assertEqual(self.gcd(17, 5), 1)
+        self.assertEqual(self.gcd(2**31 - 1, 3), 1)
+
+    def test_recursion_inside_if_branches(self) -> None:
+        # the recursive calls sit in the branch of a runtime if, and one
+        # path calls the function twice
+        self.assertEqual(self.fib(0), 0)
+        self.assertEqual(self.fib(1), 1)
+        self.assertEqual(self.fib(10), 55)
+
+    def test_mutual_recursion(self) -> None:
+        self.assertTrue(self.is_even(10))
+        self.assertFalse(self.is_even(7))
+        self.assertTrue(self.is_odd(7))
+        self.assertFalse(self.is_odd(10))
+
+    def test_recursion_requires_return_annotation(self) -> None:
+        with self.assertRaises(spy.CompileError) as ctx:
+            self.fact_untyped(5)
+        self.assertIn('requires a return type annotation', str(ctx.exception))
+        # compilation failures are deterministic (and cached)
+        with self.assertRaises(spy.CompileError):
+            self.fact_untyped(5)
+
+    def test_aborted_build_reuses_cached_callees(self) -> None:
+        # the failing build of abort_after_call compiled v_fn into its
+        # module first (the MIR survives, the spec is never registered);
+        # a later direct call of v_fn must still compile and run
+        with self.assertRaises(spy.CompileError):
+            self.abort_after_call(3)
+        self.assertEqual(self.v_fn(41), 42)
+        self.assertEqual(self.v_fn(1), 2)
 
 
 all_tests = [SpyExampleTest]

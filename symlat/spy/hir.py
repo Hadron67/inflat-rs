@@ -142,8 +142,10 @@ class Ret(Inst):
 
 @dataclass(eq=False)
 class If(Inst):
-    """Conditional statement; the condition must be a compile-time value
-    for now.  Only one of the two branch bodies is ever run."""
+    """Conditional statement.  A compile-time condition is evaluated
+    while the HIR runs and only the chosen branch survives; a runtime
+    condition becomes a runtime branch in the MIR (both branch bodies
+    are typed and compiled then)."""
 
     cond: Value
     then_body: tuple[Inst, ...]

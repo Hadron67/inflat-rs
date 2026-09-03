@@ -248,6 +248,14 @@ class HirRunner:
         self._inline_stack: list[astgen.FunctionIR] = []
         self._inline_depth = 0
         self._ret_type: Type | None = None
+        self._ret_target: Type | None = None
+        # True while typing the body of the function proper (a ``Ret``
+        # emits a typed return); False inside an inlined plain function,
+        # whose return just yields a value to the caller
+        self._ret_emit = True
+        # the emission regions (see ``_emit``): a stack of lists whose
+        # top is the region currently being typed
+        self._regions: list[list[mir.Inst]] = []
 
     # -- entry point ---------------------------------------------------------
 
@@ -266,21 +274,16 @@ class HirRunner:
             mir.Param(i, t, fn_ir.params[i].name) for i, t in enumerate(param_types)
         )
         self._push_frame(param_values)
+        self._ret_type = None
+        self._ret_target = to_mir_type(ret_hint) if ret_hint is not None else None
+        self._ret_emit = True
+        self._regions = [self._insts]
 
-        flow, value = self._run_list(fn_ir.body)
-        if flow is not FLOW_RET or not isinstance(value, InterpVal):
+        flow, _ = self._run_list(fn_ir.body)
+        if flow is not FLOW_RET:
             raise CompileError(f"function {fn_ir.name} must end with a 'return' statement")
-
-        target = to_mir_type(ret_hint) if ret_hint is not None else None
-        ret_value = self._to_runtime(value, target)
-        ret_type = typeof(ret_value)
-        if self._ret_type is not None and self._ret_type != ret_type:
-            raise CompileError(
-                f"function {fn_ir.name} returns values of conflicting types "
-                f"{type_str(self._ret_type)} and {type_str(ret_type)}"
-            )
-        self._ret_type = ret_type
-        self._insts.append(mir.Ret(ret_value))
+        assert self._ret_type is not None
+        ret_type = self._ret_type
 
         fn = mir.Function(
             native_name,
@@ -305,16 +308,18 @@ class HirRunner:
     def _exec_inst(self, inst: hir.Inst) -> tuple[object, InterpVal | None]:
         match inst:
             case hir.Ret():
-                return FLOW_RET, self._operand(inst.value)
+                ev = self._operand(inst.value)
+                if self._ret_emit:
+                    self._finish_return(ev)
+                    return FLOW_RET, None
+                # an inlined callee: the return just yields the value
+                return FLOW_RET, ev
             case hir.If():
                 cond = self._operand(inst.cond)
-                if not isinstance(cond, ComptimeVal):
-                    raise CompileError(
-                        "runtime 'if' conditions are not supported yet "
-                        "(only compile-time conditions)"
-                    )
-                chosen = inst.then_body if cond.obj else inst.else_body
-                return self._run_list(chosen)
+                if isinstance(cond, ComptimeVal):
+                    chosen = inst.then_body if cond.obj else inst.else_body
+                    return self._run_list(chosen)
+                return self._exec_runtime_if(inst, cond)
             case hir.Load():
                 self._regs[inst] = RuntimeVal(self._exec_load(inst))
                 return FLOW_FALL, None
@@ -409,8 +414,62 @@ class HirRunner:
         raise CompileError('cannot store through a compile-time pointer')
 
     def _emit(self, inst: mir.Inst) -> mir.Value:
-        self._insts.append(inst)
+        self._regions[-1].append(inst)
         return inst
+
+    # -- regions and runtime branches -----------------------------------------
+
+    def _run_region(self, stmts: tuple[hir.Inst, ...]) -> tuple[list[mir.Inst], bool]:
+        """Type and emit one region (a branch body of a runtime ``if``):
+        a straight-line list that may itself contain runtime ``if``s.
+        Returns the emitted instructions and whether the region returns
+        on every path (i.e. never falls off its end)."""
+        region: list[mir.Inst] = []
+        self._regions.append(region)
+        try:
+            flow, _ = self._run_list(stmts)
+        finally:
+            self._regions.pop()
+        return region, flow is FLOW_RET
+
+    def _exec_runtime_if(self, inst: hir.If, cond: InterpVal) -> tuple[object, InterpVal | None]:
+        """A runtime ``if``: both branch bodies are typed and emitted as
+        regions of a :class:`mir.If`.  A branch that returns ends its
+        path; a branch that falls off continues with the code after the
+        ``if``.  Both branches falling through (a join) is not supported
+        yet, and neither are runtime branches inside inlined functions."""
+        if not self._ret_emit:
+            raise CompileError(
+                "runtime 'if' inside inlined functions is not supported yet"
+            )
+        if not isinstance(cond, RuntimeVal) or typeof(cond.value) != BoolType():
+            raise CompileError('runtime if conditions must be boolean values')
+        then_body, then_returns = self._run_region(inst.then_body)
+        else_body, else_returns = self._run_region(inst.else_body)
+        if not then_returns and not else_returns:
+            raise CompileError(
+                "runtime 'if' branches that both fall through are not supported yet"
+            )
+        self._emit(mir.If(cond.value, tuple(then_body), tuple(else_body)))
+        if then_returns and else_returns:
+            # every path returns: whatever follows in this region is dead
+            return FLOW_RET, None
+        return FLOW_FALL, None
+
+    def _finish_return(self, ev: InterpVal) -> None:
+        """Materialize the value of one return site: runtime values must
+        match the (annotation) target, compile-time values adopt it (or
+        their Python type mapping), and all return sites of one function
+        must agree on the return type."""
+        value = self._to_runtime(ev, self._ret_target)
+        ret_type = typeof(value)
+        if self._ret_type is not None and self._ret_type != ret_type:
+            raise CompileError(
+                f"function returns values of conflicting types "
+                f"{type_str(self._ret_type)} and {type_str(ret_type)}"
+            )
+        self._ret_type = ret_type
+        self._emit(mir.Ret(value))
 
     # -- helpers -------------------------------------------------------------
 
@@ -668,6 +727,17 @@ class HirRunner:
                 "calls through runtime function values are not supported yet"
             )
         obj = callee.obj
+        # ``astgen`` embeds the object a callee name refers to at parse
+        # time; a function body may be parsed before its callees - or
+        # even itself (an aot function parses its own body while it is
+        # being registered) - are registered, so whether a function
+        # object is a spy function is decided here, when the call runs:
+        # a registered spy function (or its callable view) mounts its
+        # function value as ``_spy_entry``.
+        if not isinstance(obj, SpyFunction):
+            entry = getattr(obj, '_spy_entry', None)
+            if isinstance(entry, SpyFunction):
+                obj = entry
         if obj is spy_builtins.spy_type:
             return self._call_builtin_type(inst)
         if obj is spy_builtins.spy_compile_log:
@@ -787,7 +857,10 @@ class HirRunner:
         fn_ir = self._resolver.hir_of(fn)
         if any(f.fn is fn for f in self._inline_stack):
             raise CompileError(
-                f"recursive calls are not supported yet (function {fn_ir.name})"
+                f"a plain Python function cannot call itself recursively "
+                f"(function {fn_ir.name}); plain functions are inlined, and a "
+                'recursive inline would never finish compiling - declare it '
+                'as a spy function instead'
             )
         if self._inline_depth >= _MAX_INLINE_DEPTH:
             raise CompileError('too deeply nested inlined functions')
@@ -796,10 +869,15 @@ class HirRunner:
         self._inline_stack.append(fn_ir)
         self._inline_depth += 1
         self._push_frame(values)
-        flow, value = self._run_list(fn_ir.body)
-        self._frames.pop()
-        self._inline_depth -= 1
-        self._inline_stack.pop()
+        saved_ret_emit = self._ret_emit
+        self._ret_emit = False
+        try:
+            flow, value = self._run_list(fn_ir.body)
+        finally:
+            self._ret_emit = saved_ret_emit
+            self._frames.pop()
+            self._inline_depth -= 1
+            self._inline_stack.pop()
         if flow is not FLOW_RET or not isinstance(value, InterpVal):
             raise CompileError(
                 f"inlined function {fn_ir.name} must end with a 'return' statement"
