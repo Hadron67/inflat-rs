@@ -29,7 +29,7 @@ from symlat.spy import mir
 from . import astgen
 from .builtins import AsValue
 from .errors import CompileError, SpyError, TypeMismatchError
-from .fn import FunctionValue, LazyJitFunction, SpyFunction
+from .fn import FunctionEntry, FunctionValue, LazyJitFunction
 from .interp import FunctionResolver, HirRunner, to_mir_type
 from .lower import NativeFn, compile_module
 from .mir import FormalArg as MirFormalArg
@@ -143,7 +143,7 @@ class _FunctionView:
 
     __slots__ = ('_context', '_spy_entry')
 
-    def __init__(self, context: 'JitContext', entry: SpyFunction) -> None:
+    def __init__(self, context: 'JitContext', entry: FunctionEntry) -> None:
         self._context = context
         self._spy_entry = entry
 
@@ -164,7 +164,7 @@ class JitContext(FunctionResolver):
     same context may call each other (as native calls)."""
 
     def __init__(self) -> None:
-        self._entries: dict[FunctionType, SpyFunction] = {}
+        self._entries: dict[FunctionType, FunctionEntry] = {}
         # parsed HIR of plain Python functions that are only ever
         # inlined; a registered function caches its HIR on the function
         # value instead
@@ -173,11 +173,11 @@ class JitContext(FunctionResolver):
         # allocated base names (``spy.<name>.<types>``) -> their owner;
         # keeps the native symbols of different functions apart even when
         # they happen to share a ``__name__``
-        self._name_owners: dict[str, SpyFunction] = {}
+        self._name_owners: dict[str, FunctionEntry] = {}
         # the MIR functions defined by the module under construction
         # (see ``ensure_spec``), keyed like the per-function
         # ``mir_cache``; None outside a build
-        self._module: dict[tuple[SpyFunction, tuple[Type, ...]], MirFunction] | None = None
+        self._module: dict[tuple[FunctionEntry, tuple[Type, ...]], MirFunction] | None = None
 
     # -- decorators ----------------------------------------------------------
 
@@ -201,7 +201,7 @@ class JitContext(FunctionResolver):
 
     # -- Python-side calls ---------------------------------------------------
 
-    def _dispatch(self, entry: SpyFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    def _dispatch(self, entry: FunctionEntry, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Bind Python arguments to the formal parameters of ``entry``
         and call the (possibly just compiled) specialization; this is
         what the callable view of a function value forwards to."""
@@ -264,7 +264,20 @@ class JitContext(FunctionResolver):
             self._hir_cache[fn] = ir
         return ir
 
-    def ensure_spec(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> NativeFn:
+    def _native_spec(self, entry: FunctionEntry, arg_types: tuple[Type, ...]) -> NativeFn | None:
+        """The compiled native function of one specialization, or None
+        when it is not (yet) compiled.
+
+        An aot function has exactly one specialization, fixed by its
+        annotations and lowered when it is registered: its native
+        function is looked up in the context symbol table under its
+        fixed symbol name (the function value itself only keeps the MIR,
+        in ``mir_fn``)."""
+        if isinstance(entry, FunctionValue):
+            return entry.native_fn
+        return entry.specs.get(arg_types)
+
+    def ensure_spec(self, entry: FunctionEntry, arg_types: tuple[Type, ...]) -> NativeFn:
         """Compile (or look up) the specialization of ``entry`` for
         ``arg_types`` and return its native function.
 
@@ -273,10 +286,14 @@ class JitContext(FunctionResolver):
         together into one LLVM module (``define``s); specializations
         compiled in earlier modules are referenced as external symbols.
         """
-        spec = entry.specs.get(arg_types)
-        if spec is not None:
-            return spec
-        message = entry.failed.get(arg_types)
+        native = self._native_spec(entry, arg_types)
+        if native is not None:
+            return native
+        message: str | None = None
+        if not isinstance(entry, FunctionValue):
+            # a failed aot registration leaves no wrapper to call the
+            # function again, so only jit failures need to be cached
+            message = entry.failed.get(arg_types)
         if message is not None:
             raise CompileError(message)
         if self._module is not None:
@@ -284,20 +301,18 @@ class JitContext(FunctionResolver):
 
         self._module = {}
         try:
-            fn = self._compile_mir(entry, arg_types)
-            natives = self._compile_module()
-            if isinstance(entry, FunctionValue):
-                entry.mir_fn = fn
-            return natives[(entry, arg_types)]
+            self._compile_mir(entry, arg_types)
+            return self._compile_module()[(entry, arg_types)]
         except SpyError as e:
-            entry.failed[arg_types] = str(e)
+            if not isinstance(entry, FunctionValue):
+                entry.failed[arg_types] = str(e)
             raise CompileError(
                 f"error while compiling {entry.fn.__name__}({_types_str(arg_types)}): {e}"
             ) from e
         finally:
             self._module = None
 
-    def _compile_mir(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> MirFunction:
+    def _compile_mir(self, entry: FunctionEntry, arg_types: tuple[Type, ...]) -> MirFunction:
         """Produce (and cache) the typed MIR of one specialization.
 
         The function is created - with an empty body - and registered
@@ -311,12 +326,18 @@ class JitContext(FunctionResolver):
         the whole module is lowered at once.
         """
         key = (entry, arg_types)
-        fn = entry.mir_cache.get(arg_types)
+        if isinstance(entry, FunctionValue):
+            # an aot function has exactly one specialization: ``mir_fn``
+            # is its cache slot
+            fn = entry.mir_fn
+        else:
+            fn = entry.mir_cache.get(arg_types)
         if fn is not None:
-            # the MIR exists but its spec is not registered, so the
-            # module build that produced it never finished (specs are
-            # only registered when a module is lowered); the current
-            # build references the function, so it is defined here too
+            # the MIR is already being (or has been) typed, but no native
+            # function is registered yet - the module build that produces
+            # it is the one under construction (a recursive call, or a
+            # build that never finished); the current build references
+            # the function, so it is defined here too
             module = self._module
             if module is None:
                 raise CompileError(
@@ -351,7 +372,10 @@ class JitContext(FunctionResolver):
                 f"internal error: {entry.fn.__name__}({_types_str(arg_types)}) "
                 'is compiled outside of a module build'
             )
-        entry.mir_cache[arg_types] = fn
+        if isinstance(entry, FunctionValue):
+            entry.mir_fn = fn
+        else:
+            entry.mir_cache[arg_types] = fn
         module[key] = fn
         try:
             runner = HirRunner(self)
@@ -361,32 +385,41 @@ class JitContext(FunctionResolver):
             # the body typing failed: drop the partially-filled function
             # so that a retry starts from scratch (functions completed
             # earlier in this build stay cached)
-            entry.mir_cache.pop(arg_types, None)
+            if isinstance(entry, FunctionValue):
+                entry.mir_fn = None
+            else:
+                entry.mir_cache.pop(arg_types, None)
             raise
 
-    def _compile_module(self) -> dict[tuple[SpyFunction, tuple[Type, ...]], NativeFn]:
+    def _compile_module(self) -> dict[tuple[FunctionEntry, tuple[Type, ...]], NativeFn]:
         """Lower the module under construction (see :meth:`ensure_spec`)
         into one native module and register its specializations."""
         assert self._module is not None
         natives = compile_module(list(self._module.values()), self._extern_symbols())
         by_name = {native.name: native for native in natives}
-        result: dict[tuple[SpyFunction, tuple[Type, ...]], NativeFn] = {}
+        result: dict[tuple[FunctionEntry, tuple[Type, ...]], NativeFn] = {}
         for key, mir_fn in self._module.items():
             native = by_name[mir_fn.name]
             entry, arg_types = key
-            entry.specs[arg_types] = native
+            if not isinstance(entry, FunctionValue):
+                # an aot function keeps no per-argument-type registry:
+                # its single native function lives in the symbol table
+                # (see ``_native_spec``)
+                entry.specs[arg_types] = native
+            else:
+                entry.native_fn = native
             self._symbols[native.name] = native
             result[key] = native
         return result
 
-    def resolve_call(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> tuple[mir.Value, mir.Type]:
+    def resolve_call(self, entry: FunctionEntry, arg_types: tuple[Type, ...]) -> tuple[mir.Value, mir.Type]:
         """The callable value of one callee specialization as seen from
         inside a compiled function: a :class:`mir.Function` of the
         module under construction - already compiled, or still being
         compiled when the call is a recursive one - or a
         :class:`mir.Symbol` of a specialization compiled in an earlier
         module."""
-        native = entry.specs.get(arg_types)
+        native = self._native_spec(entry, arg_types)
         if native is not None:
             fn_type = MirFunctionType(native.arg_types, native.ret_type)
             return MirSymbol(native.name, fn_type), native.ret_type
@@ -398,7 +431,7 @@ class JitContext(FunctionResolver):
             raise CompileError(self._recursion_ret_type_error(entry, arg_types))
         return fn, ret
 
-    def _declared_ret_type(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> Type | None:
+    def _declared_ret_type(self, entry: FunctionEntry, arg_types: tuple[Type, ...]) -> Type | None:
         """The concrete spy return type of one specialization declared by
         its annotations, or ``None`` when none is declared.
 
@@ -426,7 +459,7 @@ class JitContext(FunctionResolver):
             return None
         return ret_ann
 
-    def _recursion_ret_type_error(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> str:
+    def _recursion_ret_type_error(self, entry: FunctionEntry, arg_types: tuple[Type, ...]) -> str:
         """Explain why the return type of a recursive specialization
         cannot be determined from its annotations."""
         fn_ir = self.hir_of(entry.fn)
@@ -457,7 +490,7 @@ class JitContext(FunctionResolver):
             raise TypeError('spy decorators can only be applied to plain Python functions')
         if fn in self._entries:
             raise ValueError(f'function {fn.__name__} is already registered in this JitContext')
-        entry: SpyFunction
+        entry: FunctionEntry
         formal: tuple[Type, ...] | None = None
         fn_ir: astgen.FunctionIR | None = None
         if kind == 'aot':
@@ -487,7 +520,7 @@ class JitContext(FunctionResolver):
             self.ensure_spec(entry, formal)
         return view
 
-    def _allocate_name(self, fn: FunctionType, entry: SpyFunction) -> str:
+    def _allocate_name(self, fn: FunctionType, entry: FunctionEntry) -> str:
         """The context-unique base name of the native symbols of ``fn``.
 
         Two different functions registered in the same context may share

@@ -2,7 +2,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import FunctionType as PyFunctionType
-from typing import Any, TypeVar, override
+from typing import Any, TypeAlias, TypeVar, override
 
 from . import hir, mir
 from .type import AnyFunction, FormalArg, FunctionType, PointerType, Type, Value
@@ -52,24 +52,25 @@ class NativeFn:
     def print_all(self) -> list[str]:
         return self.lines
 
-class SpyFunction(Value):
-    """A function value: the compile-time value standing for a spy
-    function registered in a :class:`JitContext`.  Function values are
-    identity objects: two are equal only if they are the same object.
 
-    A value doubles as the per-function entry of its host context: it
-    holds the Python function, the function kind, the context-unique
-    base of its native symbol names, the parsed HIR, the typed MIR of
-    every compiled specialization and the compiled native functions.
-    The call logic itself lives in the interpreter and the host, not
-    here.
+class LazyJitFunction(Value):
+    """The function value of a ``@jit`` function: only compiled - and
+    thereby typed - when a call specializes it, so as a value its type
+    is the untyped :class:`AnyFunction`.
+
+    Like :class:`FunctionValue` the value doubles as the per-function
+    entry of its host context (function values are identity objects: two
+    are equal only if they are the same object).  The call logic itself
+    lives in the interpreter and the host, not here.
     """
 
-    def __init__(self, fn: PyFunctionType, kind: str) -> None:
+    kind = 'jit'
+
+    def __init__(self, fn: PyFunctionType) -> None:
         self.fn = fn
-        self.kind = kind  # 'jit' or 'aot'
         # the hosting JitContext (set when the value is registered),
-        # only used when checking whether function is called within the same context
+        # only used when checking whether the function is called within
+        # the same context
         self.context: Any = None
         # the context-unique base name of the native symbols
         self.name_base = ''
@@ -94,25 +95,29 @@ class SpyFunction(Value):
     def __hash__(self) -> int:
         return object.__hash__(self)
 
-
-class LazyJitFunction(SpyFunction):
-    """The function value of a ``@jit`` function: it is only compiled
-    (and thereby typed) when a call specializes it, so as a value its
-    type is the untyped :class:`AnyFunction`."""
-
-    def __init__(self, fn: PyFunctionType) -> None:
-        super().__init__(fn, 'jit')
-
     @override
     def type(self) -> Type:
         return AnyFunction()
 
 
-class FunctionValue(SpyFunction):
-    """The function value of a ``@aot`` function: compiled from its
-    type annotations when it is registered, so the value carries the
-    concrete signature and the compiled :class:`mir.Function` (calling
-    it emits a ``mir.Call`` of that function)."""
+class FunctionValue(Value):
+    """The function value of a ``@aot`` function: compiled from its type
+    annotations when it is registered, so the value carries the concrete
+    signature (``args`` and ``ret``) and the compiled
+    :class:`mir.Function` (calling it emits a ``mir.Call`` of that
+    function).
+
+    An aot function has exactly one specialization (its signature is
+    fixed by the annotations), so unlike :class:`LazyJitFunction` it
+    needs no per-argument-type registries: ``mir_fn`` is the single
+    typed MIR function - it is set before the body is typed (so a
+    recursive call the body makes resolves to it) and filled in by the
+    typing.  Function values are identity objects: two are equal only
+    if they are the same object.  The call logic itself lives in the
+    interpreter and the host, not here.
+    """
+
+    kind = 'aot'
 
     def __init__(
         self,
@@ -121,11 +126,34 @@ class FunctionValue(SpyFunction):
         ret: Type,
         mir_fn: mir.Function | None = None,
     ) -> None:
-        super().__init__(fn, 'aot')
+        self.fn = fn
+        # the hosting JitContext (set when the value is registered),
+        # only used when checking whether the function is called within
+        # the same context
+        self.context: Any = None
+        # the context-unique base name of the native symbols
+        self.name_base = ''
+        # the parsed HIR of the function (see ``JitContext.hir_of``)
+        self.hir: FunctionIR | None = None
         self.args = args
         self.ret = ret
         self.mir_fn = mir_fn
 
+        self.native_fn: NativeFn | None = None
+
+    def __eq__(self, value: object, /) -> bool:
+        return self is value
+
+    def __hash__(self) -> int:
+        return object.__hash__(self)
+
     @override
     def type(self) -> Type:
         return PointerType(FunctionType(self.args, self.ret), True)
+
+
+# A registered spy function of either kind: the per-function entry of
+# its host context.  jit and aot functions share no base class; the
+# union only types the code that works with entries of both kinds
+# (``dsl``/``interp``).
+FunctionEntry: TypeAlias = LazyJitFunction | FunctionValue

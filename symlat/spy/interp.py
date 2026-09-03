@@ -52,7 +52,7 @@ from typing import Any
 from . import astgen, hir, mir
 from . import builtins as spy_builtins
 from .errors import CompileError, TypeMismatchError
-from .fn import SpyFunction
+from .fn import FunctionEntry
 from .mir import (
     BoolType,
     BoolValue,
@@ -217,7 +217,7 @@ class FunctionResolver:
         raise NotImplementedError
 
     @abstractmethod
-    def resolve_call(self, entry: SpyFunction, arg_types: tuple[SpyType, ...]) -> tuple[mir.Value, Type]:
+    def resolve_call(self, entry: FunctionEntry, arg_types: tuple[SpyType, ...]) -> tuple[mir.Value, Type]:
         """Resolve the callable value of one callee specialization from
         inside a compiled function: functions that are not compiled yet
         are compiled (MIR-wise) and defined in the module of the caller;
@@ -730,9 +730,9 @@ class HirRunner:
         # object is a spy function is decided here, when the call runs:
         # a registered spy function (or its callable view) mounts its
         # function value as ``_spy_entry``.
-        if not isinstance(obj, SpyFunction):
+        if not isinstance(obj, FunctionEntry):
             entry = getattr(obj, '_spy_entry', None)
-            if isinstance(entry, SpyFunction):
+            if isinstance(entry, FunctionEntry):
                 obj = entry
         if obj is spy_builtins.spy_type:
             return self._call_builtin_type(inst)
@@ -742,7 +742,7 @@ class HirRunner:
             raise CompileError(
                 "spy.as can only be used at the Python call boundary, not inside spy functions"
             )
-        if isinstance(obj, SpyFunction):
+        if isinstance(obj, FunctionEntry):
             return self._call_spy_function(obj, inst)
         if isinstance(obj, pytypes.FunctionType):
             return self._call_plain_function(obj, inst)
@@ -838,7 +838,7 @@ class HirRunner:
                 values.append(self._const_of_py(param.default_value, formal_types[i]))
         return tuple(values), formal
 
-    def _call_spy_function(self, entry: SpyFunction, inst: hir.Call) -> InterpVal:
+    def _call_spy_function(self, entry: FunctionEntry, inst: hir.Call) -> InterpVal:
         if entry.context is not self._resolver:
             raise CompileError(
                 f"cannot call function {entry.fn.__name__} from another JitContext"
