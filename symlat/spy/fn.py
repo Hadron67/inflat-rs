@@ -112,9 +112,11 @@ class FunctionValue(Value):
     needs no per-argument-type registries: ``mir_fn`` is the single
     typed MIR function - it is set before the body is typed (so a
     recursive call the body makes resolves to it) and filled in by the
-    typing.  Function values are identity objects: two are equal only
-    if they are the same object.  The call logic itself lives in the
-    interpreter and the host, not here.
+    typing - and ``native_fn`` its compiled native function (set when
+    the module it was lowered into finishes).  Function values are
+    identity objects: two are equal only if they are the same object.
+    The call logic itself lives in the interpreter and the host, not
+    here.
     """
 
     kind = 'aot'
@@ -138,7 +140,8 @@ class FunctionValue(Value):
         self.args = args
         self.ret = ret
         self.mir_fn = mir_fn
-
+        # the compiled native function of the single specialization (set
+        # when its module is lowered; see ``dsl``)
         self.native_fn: NativeFn | None = None
 
     def __eq__(self, value: object, /) -> bool:

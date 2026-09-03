@@ -169,7 +169,6 @@ class JitContext(FunctionResolver):
         # inlined; a registered function caches its HIR on the function
         # value instead
         self._hir_cache: dict[FunctionType, astgen.FunctionIR] = {}
-        self._symbols: dict[str, NativeFn] = {}
         # allocated base names (``spy.<name>.<types>``) -> their owner;
         # keeps the native symbols of different functions apart even when
         # they happen to share a ``__name__``
@@ -270,8 +269,7 @@ class JitContext(FunctionResolver):
 
         An aot function has exactly one specialization, fixed by its
         annotations and lowered when it is registered: its native
-        function is looked up in the context symbol table under its
-        fixed symbol name (the function value itself only keeps the MIR,
+        function is stored on the value (the value also keeps the MIR,
         in ``mir_fn``)."""
         if isinstance(entry, FunctionValue):
             return entry.native_fn
@@ -401,14 +399,13 @@ class JitContext(FunctionResolver):
         for key, mir_fn in self._module.items():
             native = by_name[mir_fn.name]
             entry, arg_types = key
-            if not isinstance(entry, FunctionValue):
-                # an aot function keeps no per-argument-type registry:
-                # its single native function lives in the symbol table
-                # (see ``_native_spec``)
-                entry.specs[arg_types] = native
-            else:
+            if isinstance(entry, FunctionValue):
+                # an aot function has exactly one specialization: its
+                # single native function is stored on the value (see
+                # ``_native_spec``)
                 entry.native_fn = native
-            self._symbols[native.name] = native
+            else:
+                entry.specs[arg_types] = native
             result[key] = native
         return result
 
@@ -551,4 +548,18 @@ class JitContext(FunctionResolver):
         return name
 
     def _extern_symbols(self) -> dict[str, int]:
-        return {name: native.addr for name, native in self._symbols.items()}
+        """The addresses of the native functions compiled in *earlier*
+        modules, keyed by their symbol names: everything a module under
+        construction may reference from outside (see
+        :meth:`_compile_module`).  Every registered function of the
+        context contributes its compiled specializations."""
+        externs: dict[str, int] = {}
+        for entry in self._entries.values():
+            if isinstance(entry, FunctionValue):
+                native = entry.native_fn
+                if native is not None:
+                    externs[native.name] = native.addr
+            else:
+                for native in entry.specs.values():
+                    externs[native.name] = native.addr
+        return externs
