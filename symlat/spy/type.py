@@ -38,13 +38,14 @@ class Type(Value):
     def type(self) -> 'Type':
         return TYPE_TYPE
 
+@dataclass(frozen=True)
 class TypeType(Type):
+    level: int
     @override
     def type(self) -> Type:
-        # ummm, Girard paradox... but it doesn't matter?
-        return self
+        return TypeType(self.level + 1)
 
-TYPE_TYPE = TypeType()
+TYPE_TYPE = TypeType(0)
 
 class BoolType(Type):
     """The boolean type; values are ``i1`` at the LLVM level."""

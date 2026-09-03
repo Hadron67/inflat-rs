@@ -243,7 +243,3 @@ class Function:
     args: tuple[FormalArg, ...]
     ret_type: Type
     insts: list[Inst]
-
-
-def type_of(value: Value) -> Type:
-    return value.type  # type: ignore[attr-defined]
