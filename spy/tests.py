@@ -23,16 +23,26 @@ from contextlib import redirect_stdout
 from typing import Any
 from unittest import TestCase
 
-from symlat.spy.fn import LazyJitFunction
-
-from .. import spy
+from . import (
+    CompileError,
+    JitContext,
+    TypeMismatchError,
+    compile_log,
+    f64,
+    i32,
+    u64,
+)
+from . import as_ as spy_as
+from . import bool as spy_bool
+from . import type as spy_type
+from .fn import LazyJitFunction
 
 # ---------------------------------------------------------------------------
 # functions under test (the example of spy/instructions.md)
 # ---------------------------------------------------------------------------
 
 
-def make_samples(cache: spy.JitContext) -> dict[str, object]:
+def make_samples(cache: JitContext) -> dict[str, object]:
     """Define and register the sample spy functions of the test suite
     into ``cache``, returning the wrappers by name.  ``add_inline`` is
     deliberately *not* registered: it stays the plain function that
@@ -43,7 +53,7 @@ def make_samples(cache: spy.JitContext) -> dict[str, object]:
         return a + b
 
     @cache.aot()
-    def add_aot(a: spy.u64, b: spy.u64) -> spy.u64:
+    def add_aot(a: u64, b: u64) -> u64:
         return a + b
 
     @cache.jit()
@@ -51,19 +61,19 @@ def make_samples(cache: spy.JitContext) -> dict[str, object]:
         return a + b
 
     def add_inline[T](a: T, b: T) -> T:
-        spy.compile_log("add_inline was compiled")
+        compile_log("add_inline was compiled")
         return a + b
 
     @cache.jit()
     def foo(a, b):
-        if spy.type(a) == spy.u64 and spy.type(b) == spy.u64:
+        if spy_type(a) == u64 and spy_type(b) == u64:
             return add_aot(a, b)
         else:
             return add_inline(a, b)
 
     @cache.jit()
     def is_i32(a):
-        return spy.type(a) == spy.i32
+        return spy_type(a) == i32
 
     @cache.jit()
     def call_add[T](a: T, b: T) -> T:
@@ -126,14 +136,14 @@ def make_samples(cache: spy.JitContext) -> dict[str, object]:
     # -- recursion ---------------------------------------------------------
 
     @cache.jit()
-    def fact(n) -> spy.i32:
+    def fact(n) -> i32:
         # direct recursion; the return annotation fixes the return type
         if n <= 1:
             return 1
         return n * fact(n - 1)
 
     @cache.aot()
-    def fact_aot(n: spy.i32) -> spy.i32:
+    def fact_aot(n: i32) -> i32:
         if n <= 1:
             return 1
         return n * fact_aot(n - 1)
@@ -153,7 +163,7 @@ def make_samples(cache: spy.JitContext) -> dict[str, object]:
         return 2 * pow2(n - 1)
 
     @cache.jit()
-    def fib(n) -> spy.i32:
+    def fib(n) -> i32:
         # recursion inside the branches of a runtime if (and a recursive
         # call used twice on one path)
         if n <= 1:
@@ -162,14 +172,14 @@ def make_samples(cache: spy.JitContext) -> dict[str, object]:
             return fib(n - 1) + fib(n - 2)
 
     @cache.jit()
-    def is_even(n) -> spy.bool:
+    def is_even(n) -> spy_bool:
         # mutual recursion with is_odd
         if n == 0:
             return True
         return is_odd(n - 1)
 
     @cache.jit()
-    def is_odd(n) -> spy.bool:
+    def is_odd(n) -> spy_bool:
         if n == 0:
             return False
         return is_even(n - 1)
@@ -182,7 +192,7 @@ def make_samples(cache: spy.JitContext) -> dict[str, object]:
         return n * fact_untyped(n - 1)
 
     @cache.jit()
-    def v_fn(a) -> spy.i32:
+    def v_fn(a) -> i32:
         return a + 1
 
     @cache.jit()
@@ -219,7 +229,7 @@ def make_samples(cache: spy.JitContext) -> dict[str, object]:
     }
 
 
-def bad_aot(a: spy.u64, b: spy.u64) -> spy.u64:
+def bad_aot(a: u64, b: u64) -> u64:
     # body computes a float; the return type annotation does not match;
     # only ever registered in the test that expects the failure
     return a + b + 1.5
@@ -250,11 +260,11 @@ def _make_scale(k):
 
 
 def _make_is_type(ty):
-    """Factory: the returned function compares ``spy.type(x)`` with the
+    """Factory: the returned function compares ``spy_type(x)`` with the
     captured type descriptor ``ty`` (a compile-time comparison)."""
 
     def is_ty(x):
-        return spy.type(x) == ty
+        return spy_type(x) == ty
 
     return is_ty
 
@@ -278,7 +288,7 @@ def _make_offset_aot(cache, k):
     """Factory: an ``aot`` function capturing a factory argument."""
 
     @cache.aot()
-    def offset_aot(x: spy.i32) -> spy.i32:
+    def offset_aot(x: i32) -> i32:
         return x + k
 
     return offset_aot
@@ -306,7 +316,7 @@ def _make_unbound(cache):
     empty when the body is parsed."""
 
     @cache.aot()
-    def unbound(x: spy.i32) -> spy.i32:
+    def unbound(x: i32) -> i32:
         return x + late
 
     late = 1
@@ -340,7 +350,7 @@ class SpyExampleTest(TestCase):
     abort_after_call: Any
 
     def setUp(self) -> None:
-        self.cache = spy.JitContext()
+        self.cache = JitContext()
         for name, value in make_samples(self.cache).items():
             setattr(self, name, value)
 
@@ -360,17 +370,17 @@ class SpyExampleTest(TestCase):
         self.assertEqual(self.add(0.5, 0.25), 0.75)
 
     def test_jit_strings_fail_to_compile(self) -> None:
-        with self.assertRaises(spy.CompileError) as ctx:
+        with self.assertRaises(CompileError) as ctx:
             self.add('', '')
         message = str(ctx.exception)
         self.assertIn("'+'", message)
         self.assertIn('strings are compiled as arrays of u8', message)
         # compilation failure is deterministic (and cached)
-        with self.assertRaises(spy.CompileError):
+        with self.assertRaises(CompileError):
             self.add('x', 'y')
 
     def test_jit_conflicting_types(self) -> None:
-        with self.assertRaises(spy.TypeMismatchError) as ctx:
+        with self.assertRaises(TypeMismatchError) as ctx:
             self.add(1, 2.0)
         self.assertIn('conflicting types', str(ctx.exception))
 
@@ -385,17 +395,17 @@ class SpyExampleTest(TestCase):
         self.assertIn('type mismatch', str(ctx.exception))
 
     def test_aot_out_of_range(self) -> None:
-        with self.assertRaises(spy.TypeMismatchError) as ctx:
+        with self.assertRaises(TypeMismatchError) as ctx:
             self.add_aot(-1, 2)
         self.assertIn('out of range', str(ctx.exception))
 
     def test_aot_as_mismatch(self) -> None:
-        with self.assertRaises(spy.TypeMismatchError):
-            self.add_aot(spy.as_(1, spy.i32), spy.as_(2, spy.u64))
+        with self.assertRaises(TypeMismatchError):
+            self.add_aot(spy_as(1, i32), spy_as(2, u64))
 
     def test_aot_return_type_mismatch_at_decoration(self) -> None:
-        cache = spy.JitContext()
-        with self.assertRaises(spy.CompileError):
+        cache = JitContext()
+        with self.assertRaises(CompileError):
             cache.aot()(bad_aot)
 
     def test_defaults(self) -> None:
@@ -405,7 +415,7 @@ class SpyExampleTest(TestCase):
         self.assertEqual(self.add_default(b=45, a=12), 57)
         self.assertEqual(self.add_default(a=3, b=4), 7)
         # default arguments are marshaled to the resolved type parameter
-        self.assertEqual(self.add_default(spy.as_(1, spy.u64)), 1)
+        self.assertEqual(self.add_default(spy_as(1, u64)), 1)
 
     def test_missing_argument(self) -> None:
         with self.assertRaises(TypeError):
@@ -420,10 +430,10 @@ class SpyExampleTest(TestCase):
         # function contains a native call to the aot specialization
         buf = io.StringIO()
         with redirect_stdout(buf):
-            result = self.foo(spy.as_(1, spy.u64), spy.as_(2, spy.u64))
+            result = self.foo(spy_as(1, u64), spy_as(2, u64))
         self.assertEqual(result, 3)
         self.assertEqual(buf.getvalue(), '')
-        lines = self._spec_lines(self.foo, (spy.u64, spy.u64))
+        lines = self._spec_lines(self.foo, (u64, u64))
         self.assertTrue(any('call' in line and 'spy.add_aot.u64.u64' in line for line in lines))
 
     def test_foo_else_branch_inlines(self) -> None:
@@ -433,13 +443,13 @@ class SpyExampleTest(TestCase):
             # the specialization is cached: no second compile log
             self.assertEqual(self.foo(3, 4), 7)
         self.assertEqual(buf.getvalue(), 'add_inline was compiled\n')
-        lines = self._spec_lines(self.foo, (spy.i32, spy.i32))
+        lines = self._spec_lines(self.foo, (i32, i32))
         self.assertFalse(any('spy.add_aot' in line for line in lines))
 
     def test_comptime_type_query(self) -> None:
         self.assertTrue(self.is_i32(1))
         self.assertFalse(self.is_i32(1.0))
-        self.assertTrue(self.is_i32(spy.as_(3, spy.i32)))
+        self.assertTrue(self.is_i32(spy_as(3, i32)))
 
     def test_nested_jit_compilation(self) -> None:
         # call_add compiles a fresh specialization of add on the fly
@@ -455,7 +465,7 @@ class SpyExampleTest(TestCase):
         # two different functions that share a ``__name__`` must not
         # collide in the context-wide native symbol table (calls between
         # spy functions are linked by symbol name)
-        cache = spy.JitContext()
+        cache = JitContext()
         first = cache.jit()(_make_twin())
         second = cache.jit()(_make_twin())
         self.assertEqual(first(1, 2), 3)
@@ -498,7 +508,7 @@ class SpyExampleTest(TestCase):
     def test_runtime_if_join_error(self) -> None:
         # a runtime if whose branches both fall through needs a join,
         # which the structured MIR does not support yet
-        with self.assertRaises(spy.CompileError) as ctx:
+        with self.assertRaises(CompileError) as ctx:
             self.bad_join(1)
         self.assertIn('both fall through', str(ctx.exception))
 
@@ -513,7 +523,7 @@ class SpyExampleTest(TestCase):
 
     def test_recursion_is_a_native_recursive_call(self) -> None:
         self.assertEqual(self.fact(3), 6)
-        lines = self._spec_lines(self.fact, (spy.i32,))
+        lines = self._spec_lines(self.fact, (i32,))
         self.assertTrue(
             any('call' in line and 'spy.fact.i32' in line for line in lines), lines
         )
@@ -550,18 +560,18 @@ class SpyExampleTest(TestCase):
         self.assertFalse(self.is_odd(10))
 
     def test_recursion_requires_return_annotation(self) -> None:
-        with self.assertRaises(spy.CompileError) as ctx:
+        with self.assertRaises(CompileError) as ctx:
             self.fact_untyped(5)
         self.assertIn('requires a return type annotation', str(ctx.exception))
         # compilation failures are deterministic (and cached)
-        with self.assertRaises(spy.CompileError):
+        with self.assertRaises(CompileError):
             self.fact_untyped(5)
 
     def test_aborted_build_reuses_cached_callees(self) -> None:
         # the failing build of abort_after_call compiled v_fn into its
         # module first (the MIR survives, the spec is never registered);
         # a later direct call of v_fn must still compile and run
-        with self.assertRaises(spy.CompileError):
+        with self.assertRaises(CompileError):
             self.abort_after_call(3)
         self.assertEqual(self.v_fn(41), 42)
         self.assertEqual(self.v_fn(1), 2)
@@ -581,10 +591,10 @@ class SpyExampleTest(TestCase):
 
     def test_closure_captures_spy_type(self) -> None:
         # a captured type descriptor usable in a compile-time comparison
-        is_u64 = self.cache.jit()(_make_is_type(spy.u64))
+        is_u64 = self.cache.jit()(_make_is_type(u64))
         self.assertFalse(is_u64(1))
-        self.assertTrue(is_u64(spy.as_(1, spy.u64)))
-        is_f64 = self.cache.jit()(_make_is_type(spy.f64))
+        self.assertTrue(is_u64(spy_as(1, u64)))
+        is_f64 = self.cache.jit()(_make_is_type(f64))
         self.assertTrue(is_f64(1.0))
         self.assertFalse(is_f64(1))
 
@@ -611,8 +621,8 @@ class SpyExampleTest(TestCase):
     def test_closure_unbound_at_parse_time(self) -> None:
         # the aot body is compiled while the captured variable is not
         # assigned yet: its closure cell is empty
-        cache = spy.JitContext()
-        with self.assertRaises(spy.CompileError) as ctx:
+        cache = JitContext()
+        with self.assertRaises(CompileError) as ctx:
             _make_unbound(cache)
         self.assertIn('not bound yet', str(ctx.exception))
 

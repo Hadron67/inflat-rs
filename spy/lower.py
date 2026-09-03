@@ -19,7 +19,7 @@ from collections.abc import Sequence
 
 from llvmlite import binding as llvm
 
-from ..jit import llvm as sllvm
+from . import llvm as sllvm
 from . import mir
 from .errors import CompileError
 from .fn import NativeFn

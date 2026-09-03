@@ -24,9 +24,7 @@ through the same resolution but is compiled to a native ``call``; see
 from types import FunctionType
 from typing import Any
 
-from symlat.spy import mir
-
-from . import astgen
+from . import astgen, mir
 from .builtins import AsValue
 from .errors import CompileError, SpyError, TypeMismatchError
 from .fn import FunctionEntry, FunctionValue, LazyJitFunction
