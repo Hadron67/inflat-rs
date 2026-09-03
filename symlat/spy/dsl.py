@@ -46,6 +46,10 @@ def _sanitize(name: str) -> str:
 
 
 def symbol_of(fn_name: str, arg_types: tuple[Type, ...]) -> str:
+    """The native symbol name of one specialization.  ``fn_name`` must
+    be the context-unique name allocated at registration (see
+    ``JitContext._allocate_name``); the suffix of ``type_str`` strings
+    distinguishes the specializations of one function."""
     parts = ['spy', _sanitize(fn_name)]
     parts.extend(_sanitize(type_str(t)) for t in arg_types)
     return '.'.join(parts)
@@ -137,6 +141,9 @@ class FnEntry:
         self.context = context
         self.fn = fn
         self.kind = kind  # 'jit' or 'aot'
+        # the context-unique base of the native symbol names of this
+        # function's specializations (allocated by ``JitContext``)
+        self.name_base = ''
         self.specs: dict[tuple[Type, ...], NativeFn] = {}
         self.failed: dict[tuple[Type, ...], str] = {}
 
@@ -209,6 +216,10 @@ class JitContext:
         self._hir_cache: dict[FunctionType, astgen.FunctionIR] = {}
         self._symbols: dict[str, NativeFn] = {}
         self._compiling: set[tuple[object, tuple[Type, ...]]] = set()
+        # allocated base names (``spy.<name>.<types>``) -> their owner;
+        # keeps the native symbols of different functions apart even when
+        # they happen to share a ``__name__``
+        self._name_owners: dict[str, FnEntry] = {}
 
     # -- decorators ----------------------------------------------------------
 
@@ -260,7 +271,9 @@ class JitContext:
             if entry.kind == 'aot':
                 ret_hint = astgen.return_annotation_type(fn_ir)
             runner = HirRunner(self)
-            mir_fn, _ = runner.run_function(fn_ir, symbol_of(fn_name, arg_types), arg_types, ret_hint)
+            mir_fn, _ = runner.run_function(
+                fn_ir, symbol_of(entry.name_base, arg_types), arg_types, ret_hint
+            )
             native = compile_native(mir_fn.name, mir_fn, self._extern_symbols())
             entry.specs[arg_types] = native
             self._symbols[native.name] = native
@@ -287,6 +300,7 @@ class JitContext:
         if fn in self._entries:
             raise ValueError(f'function {fn.__name__} is already registered in this JitContext')
         entry = FnEntry(self, fn, kind)
+        entry.name_base = self._allocate_name(fn, entry)
         self._entries[fn] = entry
         wrapper = _SpyFn(entry)
         if kind == 'aot':
@@ -297,6 +311,36 @@ class JitContext:
             )
             self.ensure_spec(entry, formal)
         return wrapper
+
+    def _allocate_name(self, fn: FunctionType, entry: FnEntry) -> str:
+        """The context-unique base name of the native symbols of ``fn``.
+
+        Two different functions registered in the same context may share
+        a ``__name__`` (e.g. same-named functions of two modules, or two
+        instances of a nested function); their symbols must still not
+        collide, because extern calls are linked by name.  The plain
+        ``__name__`` is kept when it is free; otherwise the
+        module-qualified name is used, then numbered suffixes."""
+        candidates: list[str] = [_sanitize(fn.__name__)]
+        qualified = _sanitize(f'{fn.__module__}.{fn.__qualname__}')
+        if qualified not in candidates:
+            candidates.append(qualified)
+        name: str | None = None
+        for candidate in candidates:
+            if candidate not in self._name_owners:
+                name = candidate
+                break
+        if name is None:
+            n = 2
+            while True:
+                candidate = f'{qualified}.{n}'
+                if candidate not in self._name_owners:
+                    name = candidate
+                    break
+                n += 1
+        assert name is not None
+        self._name_owners[name] = entry
+        return name
 
     def _extern_symbols(self) -> dict[str, int]:
         return {name: native.addr for name, native in self._symbols.items()}

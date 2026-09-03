@@ -72,6 +72,17 @@ def use_default[T](a: T) -> T:
     return add_default(a)
 
 
+def _make_twin():
+    """A factory whose results all share one ``__name__``; registered
+    into the same JitContext they must still get distinct native
+    symbols (see ``test_same_name_functions_get_distinct_symbols``)."""
+
+    def twin(a, b):
+        return a + b
+
+    return twin
+
+
 _ORIGINALS = {
     name: globals()[name] for name in (
         'add', 'add_aot', 'add_default', 'add_inline', 'foo',
@@ -210,6 +221,28 @@ class SpyExampleTest(TestCase):
     def test_defaults_inside_function_body(self) -> None:
         self.assertEqual(self.use_default(41), 41)
         self.assertEqual(self.use_default(1.5), 1.5)
+
+    def test_same_name_functions_get_distinct_symbols(self) -> None:
+        # two different functions that share a ``__name__`` must not
+        # collide in the context-wide native symbol table (calls between
+        # spy functions are linked by symbol name)
+        cache = spy.JitContext()
+        first = cache.jit()(_make_twin())
+        second = cache.jit()(_make_twin())
+        self.assertEqual(first(1, 2), 3)
+        self.assertEqual(second(1, 2), 3)
+        self.assertEqual(first(3, 4), 7)
+        self.assertEqual(second(5, 6), 11)
+        names = sorted(
+            spec.name
+            for entry in (first._spy_entry, second._spy_entry)
+            for spec in entry.specs.values()
+        )
+        self.assertEqual(len(names), 2, names)
+        # the first registration keeps the plain name, the second one
+        # gets a distinct one instead of overwriting it
+        self.assertIn('spy.twin.i32.i32', names)
+        self.assertEqual(len(set(names)), 2, names)
 
 
 all_tests = [SpyExampleTest]

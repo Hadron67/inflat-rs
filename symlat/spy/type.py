@@ -47,17 +47,9 @@ class TypeType(Type):
 
 TYPE_TYPE = TypeType(0)
 
+@dataclass(frozen=True)
 class BoolType(Type):
     """The boolean type; values are ``i1`` at the LLVM level."""
-
-    def __eq__(self, value: object, /) -> bool:
-        return isinstance(value, BoolType)
-
-    def __hash__(self) -> int:
-        return hash('spy.bool')
-
-    def __repr__(self) -> str:
-        return 'bool'
 
     @override
     def type(self) -> Type:
