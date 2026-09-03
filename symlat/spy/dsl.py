@@ -547,19 +547,19 @@ class JitContext(FunctionResolver):
         self._name_owners[name] = entry
         return name
 
-    def _extern_symbols(self) -> dict[str, int]:
+    def _extern_symbols(self) -> dict[str, NativeFn]:
         """The addresses of the native functions compiled in *earlier*
         modules, keyed by their symbol names: everything a module under
         construction may reference from outside (see
         :meth:`_compile_module`).  Every registered function of the
         context contributes its compiled specializations."""
-        externs: dict[str, int] = {}
+        externs: dict[str, NativeFn] = {}
         for entry in self._entries.values():
             if isinstance(entry, FunctionValue):
                 native = entry.native_fn
                 if native is not None:
-                    externs[native.name] = native.addr
+                    externs[native.name] = native
             else:
                 for native in entry.specs.values():
-                    externs[native.name] = native.addr
+                    externs[native.name] = native
         return externs

@@ -273,7 +273,7 @@ class _Lowerer:
 
 def compile_module(
     fns: Sequence[mir.Function],
-    extern: dict[str, int],
+    extern: dict[str, NativeFn],
 ) -> list[NativeFn]:
     """JIT-compile a group of MIR functions together into one LLVM
     module, returning one :class:`NativeFn` per function.
@@ -316,12 +316,12 @@ def compile_module(
     for f in llvm_mod.functions:
         if not f.is_declaration:
             continue
-        addr = extern.get(f.name)
-        if addr is None:
+        native_fn = extern.get(f.name)
+        if native_fn is None:
             raise CompileError(
                 f"cannot resolve the external function {f.name} referenced by {module_names}"
             )
-        engine.add_global_mapping(f, addr)
+        engine.add_global_mapping(f, native_fn.addr)
     engine.finalize_object()
     engine.run_static_constructors()
 

@@ -23,6 +23,8 @@ from contextlib import redirect_stdout
 from typing import Any
 from unittest import TestCase
 
+from symlat.spy.fn import LazyJitFunction
+
 from .. import spy
 
 # ---------------------------------------------------------------------------
@@ -460,11 +462,12 @@ class SpyExampleTest(TestCase):
         self.assertEqual(second(1, 2), 3)
         self.assertEqual(first(3, 4), 7)
         self.assertEqual(second(5, 6), 11)
-        names = sorted(
-            spec.name
-            for entry in (first._spy_entry, second._spy_entry)
-            for spec in entry.specs.values()
-        )
+        names = []
+        for entry in (first._spy_entry, second._spy_entry):
+            assert isinstance(entry, LazyJitFunction)
+            for spec in entry.specs.values():
+                names.append(spec.name)
+        names.sort()
         self.assertEqual(len(names), 2, names)
         # the first registration keeps the plain name, the second one
         # gets a distinct one instead of overwriting it
