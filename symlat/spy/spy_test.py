@@ -1,12 +1,13 @@
 """Integration tests for the spy JIT (``symlat.spy``).
 
-The functions under test are plain module-level Python functions (they
-are the *source* spy compiles, obtained with ``inspect.getsource``).
-Every test registers them into a fresh :class:`JitContext` and rebinds
-the module-level names to the returned wrappers before the first call,
-so that function bodies referring to other spy functions (like ``foo``
-calling ``add_aot``/``add_inline``) resolve to the wrappers of that
-context.
+The functions under test are defined inside :func:`make_samples`, which
+registers them into a :class:`JitContext` the way a user would, with
+the ordinary ``@cache.jit()``/``@cache.aot()`` decorators.  Bodies that
+call other spy functions (``foo`` calling ``add_aot``/``add_inline``,
+``is_even`` and ``is_odd`` calling each other, ...) resolve those names
+through the enclosing factory scope, exactly like closures in user
+code.  Every test builds a fresh context in ``setUp``, so no module
+globals are touched.
 """
 
 # pyright: reportGeneralTypeIssues=false
@@ -19,6 +20,7 @@ context.
 
 import io
 from contextlib import redirect_stdout
+from typing import Any
 from unittest import TestCase
 
 from .. import spy
@@ -28,166 +30,197 @@ from .. import spy
 # ---------------------------------------------------------------------------
 
 
-def add[T](a: T, b: T) -> T:
-    return a + b
+def make_samples(cache: spy.JitContext) -> dict[str, object]:
+    """Define and register the sample spy functions of the test suite
+    into ``cache``, returning the wrappers by name.  ``add_inline`` is
+    deliberately *not* registered: it stays the plain function that
+    ``foo`` inlines."""
 
+    @cache.jit()
+    def add[T](a: T, b: T) -> T:
+        return a + b
 
-def add_aot(a: spy.u64, b: spy.u64) -> spy.u64:
-    return a + b
+    @cache.aot()
+    def add_aot(a: spy.u64, b: spy.u64) -> spy.u64:
+        return a + b
 
+    @cache.jit()
+    def add_default[T](a: T, b: T = 0) -> T:
+        return a + b
 
-def add_default[T](a: T, b: T = 0) -> T:
-    return a + b
+    def add_inline[T](a: T, b: T) -> T:
+        spy.compile_log("add_inline was compiled")
+        return a + b
 
+    @cache.jit()
+    def foo(a, b):
+        if spy.type(a) == spy.u64 and spy.type(b) == spy.u64:
+            return add_aot(a, b)
+        else:
+            return add_inline(a, b)
 
-def add_inline[T](a: T, b: T) -> T:
-    spy.compile_log("add_inline was compiled")
-    return a + b
+    @cache.jit()
+    def is_i32(a):
+        return spy.type(a) == spy.i32
 
+    @cache.jit()
+    def call_add[T](a: T, b: T) -> T:
+        # calling another jit function with fresh types triggers a nested
+        # compilation during the compile of call_add
+        return add(a, b)
 
-def foo(a, b):
-    if spy.type(a) == spy.u64 and spy.type(b) == spy.u64:
-        return add_aot(a, b)
-    else:
-        return add_inline(a, b)
+    @cache.jit()
+    def use_default[T](a: T) -> T:
+        # call a spy function whose default parameter applies
+        return add_default(a)
 
+    # -- runtime ``if`` ----------------------------------------------------
 
-def is_i32(a):
-    return spy.type(a) == spy.i32
+    @cache.jit()
+    def sign(n):
+        # a runtime if whose branches both return
+        if n > 0:
+            return 1
+        else:
+            return -1
+
+    @cache.jit()
+    def clamped(n):
+        # the then-branch returns; the else falls through to the code after
+        # the if (the trailing return)
+        if n > 100:
+            return 100
+        return n
+
+    @cache.jit()
+    def classify(n):
+        # two consecutive partially-returning runtime ifs
+        if n > 100:
+            return 1
+        if n > 10:
+            return 2
+        return 3
+
+    @cache.jit()
+    def nested_if(n):
+        # a runtime if whose branches contain further runtime ifs
+        if n > 0:
+            if n > 100:
+                return 2
+            else:
+                return 1
+        else:
+            return 0
+
+    @cache.jit()
+    def bad_join(n):
+        # both branches fall through (a join): not supported yet
+        if n > 0:
+            pass
+        else:
+            pass
+        return n
+
+    # -- recursion ---------------------------------------------------------
+
+    @cache.jit()
+    def fact(n) -> spy.i32:
+        # direct recursion; the return annotation fixes the return type
+        if n <= 1:
+            return 1
+        return n * fact(n - 1)
+
+    @cache.aot()
+    def fact_aot(n: spy.i32) -> spy.i32:
+        if n <= 1:
+            return 1
+        return n * fact_aot(n - 1)
+
+    @cache.jit()
+    def gcd[T](a: T, b: T) -> T:
+        # recursion whose return annotation is the type parameter ``T``
+        if b == 0:
+            return a
+        return gcd(b, a % b)
+
+    @cache.jit()
+    def pow2[T](n: T) -> T:
+        # a generic recursion that is specialized to several types
+        if n <= 0:
+            return 1
+        return 2 * pow2(n - 1)
+
+    @cache.jit()
+    def fib(n) -> spy.i32:
+        # recursion inside the branches of a runtime if (and a recursive
+        # call used twice on one path)
+        if n <= 1:
+            return n
+        else:
+            return fib(n - 1) + fib(n - 2)
+
+    @cache.jit()
+    def is_even(n) -> spy.bool:
+        # mutual recursion with is_odd
+        if n == 0:
+            return True
+        return is_odd(n - 1)
+
+    @cache.jit()
+    def is_odd(n) -> spy.bool:
+        if n == 0:
+            return False
+        return is_even(n - 1)
+
+    @cache.jit()
+    def fact_untyped(n):
+        # recursion needs the return type while the body is being typed
+        if n <= 1:
+            return 1
+        return n * fact_untyped(n - 1)
+
+    @cache.jit()
+    def v_fn(a) -> spy.i32:
+        return a + 1
+
+    @cache.jit()
+    def abort_after_call(n):
+        # compiles v_fn first (nested, MIR-cached by the module build),
+        # then fails on its own unannotated recursion - the whole build
+        # aborts
+        v_fn(n)
+        return abort_after_call(n - 1)
+
+    return {
+        'add': add,
+        'add_aot': add_aot,
+        'add_default': add_default,
+        'foo': foo,
+        'is_i32': is_i32,
+        'call_add': call_add,
+        'use_default': use_default,
+        'sign': sign,
+        'clamped': clamped,
+        'classify': classify,
+        'nested_if': nested_if,
+        'bad_join': bad_join,
+        'fact': fact,
+        'fact_aot': fact_aot,
+        'gcd': gcd,
+        'pow2': pow2,
+        'fib': fib,
+        'is_even': is_even,
+        'is_odd': is_odd,
+        'fact_untyped': fact_untyped,
+        'v_fn': v_fn,
+        'abort_after_call': abort_after_call,
+    }
 
 
 def bad_aot(a: spy.u64, b: spy.u64) -> spy.u64:
-    # body computes a float; the return type annotation does not match
+    # body computes a float; the return type annotation does not match;
+    # only ever registered in the test that expects the failure
     return a + b + 1.5
-
-
-def call_add[T](a: T, b: T) -> T:
-    # calling another jit function with fresh types triggers a nested
-    # compilation during the compile of call_add
-    return add(a, b)
-
-
-def use_default[T](a: T) -> T:
-    # call a spy function whose default parameter applies
-    return add_default(a)
-
-
-# -- runtime ``if`` ----------------------------------------------------------
-
-
-def sign(n):
-    # a runtime if whose branches both return
-    if n > 0:
-        return 1
-    else:
-        return -1
-
-
-def clamped(n):
-    # the then-branch returns; the else falls through to the code after
-    # the if (the trailing return)
-    if n > 100:
-        return 100
-    return n
-
-
-def classify(n):
-    # two consecutive partially-returning runtime ifs
-    if n > 100:
-        return 1
-    if n > 10:
-        return 2
-    return 3
-
-
-def nested_if(n):
-    # a runtime if whose branches contain further runtime ifs
-    if n > 0:
-        if n > 100:
-            return 2
-        else:
-            return 1
-    else:
-        return 0
-
-
-def bad_join(n):
-    # both branches fall through (a join): not supported yet
-    if n > 0:
-        pass
-    else:
-        pass
-    return n
-
-
-# -- recursion ---------------------------------------------------------------
-
-
-def fact(n) -> spy.i32:
-    # direct recursion; the return annotation fixes the return type
-    if n <= 1:
-        return 1
-    return n * fact(n - 1)
-
-
-def fact_aot(n: spy.i32) -> spy.i32:
-    if n <= 1:
-        return 1
-    return n * fact_aot(n - 1)
-
-
-def gcd[T](a: T, b: T) -> T:
-    # recursion whose return annotation is the type parameter ``T``
-    if b == 0:
-        return a
-    return gcd(b, a % b)
-
-
-def pow2[T](n: T) -> T:
-    # a generic recursion that is specialized to several types
-    if n <= 0:
-        return 1
-    return 2 * pow2(n - 1)
-
-
-def fib(n) -> spy.i32:
-    # recursion inside the branches of a runtime if (and a recursive
-    # call used twice on one path)
-    if n <= 1:
-        return n
-    else:
-        return fib(n - 1) + fib(n - 2)
-
-
-def is_even(n) -> spy.bool:
-    # mutual recursion with is_odd
-    if n == 0:
-        return True
-    return is_odd(n - 1)
-
-
-def is_odd(n) -> spy.bool:
-    if n == 0:
-        return False
-    return is_even(n - 1)
-
-
-def fact_untyped(n):
-    # recursion needs the return type while the body is being typed
-    if n <= 1:
-        return 1
-    return n * fact_untyped(n - 1)
-
-
-def v_fn(a) -> spy.i32:
-    return a + 1
-
-
-def abort_after_call(n):
-    # compiles v_fn first (nested, MIR-cached by the module build), then
-    # fails on its own unannotated recursion - the whole build aborts
-    v_fn(n)
-    return abort_after_call(n - 1)
 
 
 def _make_twin():
@@ -278,70 +311,36 @@ def _make_unbound(cache):
     return unbound
 
 
-_ORIGINALS = {
-    name: globals()[name] for name in (
-        'add', 'add_aot', 'add_default', 'add_inline', 'foo',
-        'is_i32', 'call_add', 'use_default',
-        'sign', 'clamped', 'classify', 'nested_if', 'bad_join',
-        'fact', 'fact_aot', 'gcd', 'pow2', 'fib', 'is_even', 'is_odd',
-        'fact_untyped', 'v_fn', 'abort_after_call',
-    )
-}
-
-
 class SpyExampleTest(TestCase):
+    # the registered sample wrappers of this test's context (built by
+    # setUp from make_samples)
+    add: Any
+    add_aot: Any
+    add_default: Any
+    foo: Any
+    is_i32: Any
+    call_add: Any
+    use_default: Any
+    sign: Any
+    clamped: Any
+    classify: Any
+    nested_if: Any
+    bad_join: Any
+    fact: Any
+    fact_aot: Any
+    gcd: Any
+    pow2: Any
+    fib: Any
+    is_even: Any
+    is_odd: Any
+    fact_untyped: Any
+    v_fn: Any
+    abort_after_call: Any
+
     def setUp(self) -> None:
         self.cache = spy.JitContext()
-        g = globals()
-        self.add = self.cache.jit()(add)
-        self.add_aot = self.cache.aot()(add_aot)
-        self.add_default = self.cache.jit()(add_default)
-        self.foo = self.cache.jit()(foo)
-        self.is_i32 = self.cache.jit()(is_i32)
-        self.call_add = self.cache.jit()(call_add)
-        self.use_default = self.cache.jit()(use_default)
-        self.sign = self.cache.jit()(sign)
-        self.clamped = self.cache.jit()(clamped)
-        self.classify = self.cache.jit()(classify)
-        self.nested_if = self.cache.jit()(nested_if)
-        self.bad_join = self.cache.jit()(bad_join)
-        self.fact = self.cache.jit()(fact)
-        self.fact_aot = self.cache.aot()(fact_aot)
-        self.gcd = self.cache.jit()(gcd)
-        self.pow2 = self.cache.jit()(pow2)
-        self.fib = self.cache.jit()(fib)
-        self.is_even = self.cache.jit()(is_even)
-        self.is_odd = self.cache.jit()(is_odd)
-        self.fact_untyped = self.cache.jit()(fact_untyped)
-        self.v_fn = self.cache.jit()(v_fn)
-        self.abort_after_call = self.cache.jit()(abort_after_call)
-        g['add'] = self.add
-        g['add_aot'] = self.add_aot
-        g['add_default'] = self.add_default
-        g['foo'] = self.foo
-        g['is_i32'] = self.is_i32
-        g['call_add'] = self.call_add
-        g['use_default'] = self.use_default
-        g['sign'] = self.sign
-        g['clamped'] = self.clamped
-        g['classify'] = self.classify
-        g['nested_if'] = self.nested_if
-        g['bad_join'] = self.bad_join
-        g['fact'] = self.fact
-        g['fact_aot'] = self.fact_aot
-        g['gcd'] = self.gcd
-        g['pow2'] = self.pow2
-        g['fib'] = self.fib
-        g['is_even'] = self.is_even
-        g['is_odd'] = self.is_odd
-        g['fact_untyped'] = self.fact_untyped
-        g['v_fn'] = self.v_fn
-        g['abort_after_call'] = self.abort_after_call
-        # add_inline stays the raw function: it is *inlined*, not compiled
-        self.addCleanup(self._restore_globals)
-
-    def _restore_globals(self) -> None:
-        globals().update(_ORIGINALS)
+        for name, value in make_samples(self.cache).items():
+            setattr(self, name, value)
 
     def _spec_lines(self, wrapper, arg_types) -> list[str]:
         entry = wrapper._spy_entry

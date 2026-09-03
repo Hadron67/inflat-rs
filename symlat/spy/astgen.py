@@ -145,6 +145,15 @@ class _Builder:
                     try:
                         value = closure[i].cell_contents
                     except ValueError:
+                        if name == self._fn_ir.name:
+                            # the function refers to its own name while
+                            # it is being registered (an aot function
+                            # decorated in an enclosing scope is parsed
+                            # before the decorator has bound the name):
+                            # the name then holds the raw function
+                            # object, which the interpreter resolves to
+                            # the function value when a call runs
+                            return hir.Const(fn)
                         raise CompileError(
                             f"captured variable '{name}' is not bound yet in the "
                             f"scope of function {self._fn_ir.name}"
