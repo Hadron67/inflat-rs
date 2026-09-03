@@ -6,13 +6,16 @@ builder of ``symlat.jit.llvm`` (the same representation the rest of
 ``llvmlite.binding`` (MCJIT), following the pattern of
 ``symlat.jit.compile.CompiledBackendFunction``.
 
-One native function is compiled per module/engine.  Calls to other spy
-functions become ``declare``d symbols that are mapped, at link time, to
-the absolute addresses of the already compiled callees (every compiled
-function keeps its engine alive, so those addresses stay valid).
+Compilation is module-at-a-time: :func:`compile_module` lowers a whole
+group of MIR functions into *one* LLVM module, so calls between them
+become in-module ``define`` references.  Calls to functions compiled in
+earlier modules become ``declare``d symbols that are mapped, at link
+time, to the absolute addresses of the already compiled callees (every
+module keeps its engine alive, so those addresses stay valid).
 """
 
 import ctypes
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -89,25 +92,24 @@ def to_ctype(type: Type) -> type[ctypes._CDataType]:
 
 
 class _Lowerer:
-    def __init__(self, name: str, arg_types: tuple[Type, ...], ret_type: Type) -> None:
-        self._name = name
-        self._arg_types = arg_types
-        self._ret_type = ret_type
+    """Lowers the MIR functions of one module against their shared
+    ``sllvm.Function`` definitions: a call whose callee is a
+    :class:`mir.Function` of the same module references that definition,
+    a call to a :class:`mir.Symbol` references a (cached) extern
+    declaration instead."""
+
+    def __init__(self, llvm_fns: dict[str, sllvm.Function]) -> None:
+        self._llvm_fns = llvm_fns
         self._lowered: dict[object, sllvm.Value] = {}
         self._declarations: dict[str, sllvm.DeclareFunction] = {}
 
-    def lower(self, fn: mir.Function) -> list[str]:
-        llvm_fn = sllvm.Function(self._name)
-        arg_values = llvm_fn.add_args(*(to_llvm_type(t) for t in self._arg_types))
-        llvm_fn.set_return_type(to_llvm_type(self._ret_type))
-        block = llvm_fn.entry
-
+    def lower(self, fn: mir.Function) -> None:
+        """Lower the body of ``fn`` into its pre-created
+        ``sllvm.Function``."""
+        llvm_fn = self._llvm_fns[fn.name]
+        arg_values = llvm_fn.get_args()
         for inst in fn.insts:
-            self._lower_inst(block, llvm_fn, inst, arg_values)
-
-        mod = sllvm.Module()
-        mod.add_recursively(values=[llvm_fn])
-        return mod.write()
+            self._lower_inst(llvm_fn.entry, inst, arg_values)
 
     def _value(self, value: mir.Value, arg_values: tuple[sllvm.Value, ...]) -> sllvm.Value:
         if isinstance(value, mir.Param):
@@ -123,14 +125,22 @@ class _Lowerer:
             return sllvm.IntValue(value.value, sllvm.IntType(value.bits))
         if isinstance(value, FloatValue):
             return sllvm.FloatType(value.bits).from_float(value.value)
+        if isinstance(value, mir.Function):
+            # a function value of this very module: its definition
+            llvm_fn = self._llvm_fns.get(value.name)
+            if llvm_fn is None:
+                raise CompileError(
+                    f'internal error: function {value.name} is not part of the module'
+                )
+            return llvm_fn
         if isinstance(value, mir.Symbol):
             return self._declare(value)
         raise CompileError(f'cannot lower value {value!r}')
 
     def _declare(self, symbol: mir.Symbol) -> sllvm.DeclareFunction:
         """The declared external symbol a function value refers to.  All
-        calls to the same symbol share one declaration (per lowered
-        function), so the linker resolves a single extern per callee."""
+        calls to the same symbol share one declaration (per module), so
+        the linker resolves a single extern per callee."""
         decl = self._declarations.get(symbol.name)
         if decl is None:
             fn_type = sllvm.fn_type(
@@ -144,7 +154,6 @@ class _Lowerer:
     def _lower_inst(
         self,
         block: sllvm.BasicBlock,
-        llvm_fn: sllvm.Function,
         inst: mir.Inst,
         arg_values: tuple[sllvm.Value, ...],
     ) -> None:
@@ -206,9 +215,9 @@ class _Lowerer:
                 else:
                     result = block.fcmp(op, lhs, rhs)
             case mir.Call():
-                # the callee is a function value: lowering a Symbol yields
-                # its (cached) extern declaration, which the call site
-                # references by name
+                # the callee is a function value: lowering a Function of
+                # this module yields its definition, lowering a Symbol
+                # yields its (cached) extern declaration
                 callee = self._value(inst.callee, arg_values)
                 result = block.call(callee, *(self._value(a, arg_values) for a in inst.args))
             case mir.Ret():
@@ -243,20 +252,37 @@ class NativeFn:
         return self.lines
 
 
-def compile_native(
-    name: str,
-    fn: mir.Function,
+def compile_module(
+    fns: Sequence[mir.Function],
     extern: dict[str, int],
-) -> NativeFn:
-    """JIT-compile one MIR function into a :class:`NativeFn`.
+) -> list[NativeFn]:
+    """JIT-compile a group of MIR functions together into one LLVM
+    module, returning one :class:`NativeFn` per function.
 
-    ``extern`` maps the symbol names of other spy functions (already
-    compiled by this context) to their addresses; every declaration the
-    generated module refers to must be resolvable from it.
+    The functions must have distinct names.  ``extern`` maps the symbol
+    names of spy functions compiled by *earlier* modules to their
+    addresses; every declaration the generated module refers to must be
+    resolvable from it.
     """
-    assert name == fn.name
-    lowerer = _Lowerer(name, tuple(a.type for a in fn.args), fn.ret_type)
-    lines = lowerer.lower(fn)
+    assert len({fn.name for fn in fns}) == len(fns), 'duplicate function names in one module'
+
+    # create one sllvm.Function per MIR function up front: bodies may
+    # call any function of the module, and the call sites need the
+    # callee's definition (its signature) to type the call
+    llvm_fns: dict[str, sllvm.Function] = {}
+    for fn in fns:
+        llvm_fn = sllvm.Function(fn.name)
+        llvm_fn.add_args(*(to_llvm_type(a.type) for a in fn.args))
+        llvm_fn.set_return_type(to_llvm_type(fn.ret_type))
+        llvm_fns[fn.name] = llvm_fn
+
+    lowerer = _Lowerer(llvm_fns)
+    for fn in fns:
+        lowerer.lower(fn)
+
+    mod = sllvm.Module()
+    mod.add_recursively(values=[llvm_fns[fn.name] for fn in fns])
+    lines = mod.write()
 
     target = llvm.Target.from_default_triple()
     tm = target.create_target_machine()
@@ -266,24 +292,28 @@ def compile_native(
     backing_mod = llvm.parse_assembly('')
     engine = llvm.create_mcjit_compiler(backing_mod, tm)
     engine.add_module(llvm_mod)
+    module_names = ', '.join(sorted(fn.name for fn in fns))
     for f in llvm_mod.functions:
         if not f.is_declaration:
             continue
         addr = extern.get(f.name)
         if addr is None:
             raise CompileError(
-                f"cannot resolve the external function {f.name} referenced by {name}"
+                f"cannot resolve the external function {f.name} referenced by {module_names}"
             )
         engine.add_global_mapping(f, addr)
     engine.finalize_object()
     engine.run_static_constructors()
 
-    addr = engine.get_function_address(name)
-    arg_ctypes = tuple(to_ctype(t) for t in (a.type for a in fn.args))
-    proto = ctypes.CFUNCTYPE(to_ctype(fn.ret_type), *arg_ctypes)
-    entry = ctypes.cast(addr, proto)
-    ret = NativeFn(name, tuple(a.type for a in fn.args), fn.ret_type, lines)
-    ret._engine = engine
-    ret._addr = addr
-    ret._entry = entry
-    return ret
+    rets: list[NativeFn] = []
+    for fn in fns:
+        addr = engine.get_function_address(fn.name)
+        arg_ctypes = tuple(to_ctype(t) for t in (a.type for a in fn.args))
+        proto = ctypes.CFUNCTYPE(to_ctype(fn.ret_type), *arg_ctypes)
+        entry = ctypes.cast(addr, proto)
+        ret = NativeFn(fn.name, tuple(a.type for a in fn.args), fn.ret_type, lines)
+        ret._engine = engine
+        ret._addr = addr
+        ret._entry = entry
+        rets.append(ret)
+    return rets

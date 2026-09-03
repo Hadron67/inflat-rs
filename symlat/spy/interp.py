@@ -202,15 +202,6 @@ def to_spy_type(type: Type) -> SpyType:
 # the compile-time host interface
 # ---------------------------------------------------------------------------
 
-
-@dataclass
-class CallTarget:
-    """A compiled specialization another function can call."""
-
-    name: str
-    ret_type: Type
-
-
 class FunctionResolver:
     """The compile-time host of one :class:`HirRunner`.
 
@@ -227,9 +218,11 @@ class FunctionResolver:
         raise NotImplementedError
 
     @abstractmethod
-    def resolve_call(self, entry: SpyFunction, arg_types: tuple[SpyType, ...]) -> CallTarget:
-        """Resolve the native call target of one callee specialization
-        (compiling it when it does not exist yet)."""
+    def resolve_call(self, entry: SpyFunction, arg_types: tuple[SpyType, ...]) -> tuple[mir.Value, Type]:
+        """Resolve the callable value of one callee specialization from
+        inside a compiled function: functions that are not compiled yet
+        are compiled (MIR-wise) and defined in the module of the caller;
+        functions of earlier modules are returned as symbols."""
         raise NotImplementedError
 
 
@@ -242,9 +235,9 @@ class HirRunner:
     in practice) and provides:
 
     * ``hir_of(fn)``: the parsed (and cached) HIR of a Python function,
-    * ``resolve_call(entry, arg_types)``: make sure the specialization
-      of a spy function for ``arg_types`` is compiled and return its
-      native symbol name and return type.
+    * ``resolve_call(entry, arg_types)``: the callable value of one
+      callee specialization (compiled into the module of the caller
+      when it is still fresh, or a symbol of an earlier module).
     """
 
     def __init__(self, resolver: FunctionResolver) -> None:
@@ -786,12 +779,8 @@ class HirRunner:
             )
         fn_ir = self._resolver.hir_of(entry.fn)
         values, formal = self._arg_values_of(fn_ir, inst.args, entry.kind)
-        target = self._resolver.resolve_call(entry, formal)
-        # the callee is a function value: the symbol of the callee's native
-        # signature, which has the type of a pointer to that signature
-        fn_type = mir.FunctionType(tuple(to_mir_type(t) for t in formal), target.ret_type)
-        callee = mir.Symbol(target.name, fn_type)
-        value = self._emit(mir.Call(callee, values, target.ret_type))
+        callee, ret_type = self._resolver.resolve_call(entry, formal)
+        value = self._emit(mir.Call(callee, values, ret_type))
         return RuntimeVal(value)
 
     def _call_plain_function(self, fn: Any, inst: hir.Call) -> InterpVal:

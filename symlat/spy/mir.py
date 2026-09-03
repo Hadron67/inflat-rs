@@ -16,8 +16,10 @@ then maps MIR types mechanically onto LLVM types.
 
 The representation is deliberately close to LLVM so that ``lower`` is a
 mechanical mapping; every MIR value exposes a ``.type`` (a MIR type).
-A function value is a :class:`Symbol` (a named module symbol of a known
-signature); calls take the callee as such a value.
+A compiled function is a :class:`Function` value; calls within one
+LLVM module reference the callee's :class:`Function` (lowered to a
+``define``), while a callee compiled in an *earlier* module is
+referenced by a :class:`Symbol` (a ``declare``d external).
 """
 
 from dataclasses import dataclass
@@ -224,8 +226,9 @@ class Cmp(Inst):
 
 @dataclass(eq=False)
 class Call(Inst):
-    """A call of a function value (a :class:`Symbol` for now) returning
-    a value of type ``type``."""
+    """A call of a function value returning a value of type ``type``.
+    The callee is either a :class:`Function` (compiled in the same LLVM
+    module) or a :class:`Symbol` (compiled in an earlier module)."""
 
     callee: Value
     args: tuple[Value, ...]
@@ -237,9 +240,20 @@ class Ret(Inst):
     value: Value
 
 
-@dataclass
-class Function:
+@dataclass(eq=False)
+class Function(Value):
+    """One compiled MIR function.  As a value it is the in-module
+    function value of a call target: a call whose callee is this object
+    is lowered to a call of the ``define``d function (functions of one
+    module are compiled together)."""
+
     name: str
     args: tuple[FormalArg, ...]
     ret_type: Type
     insts: list[Inst]
+
+    @property
+    def type(self) -> Type:
+        """The type of the function value: a pointer to the function's
+        signature."""
+        return PointerType(FunctionType(tuple(a.type for a in self.args), self.ret_type))

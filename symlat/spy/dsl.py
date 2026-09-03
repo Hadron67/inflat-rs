@@ -24,11 +24,16 @@ through the same resolution but is compiled to a native ``call``; see
 from types import FunctionType
 from typing import Any
 
+from symlat.spy import mir
+
 from . import astgen
 from .builtins import AsValue
 from .errors import CompileError, SpyError, TypeMismatchError
-from .interp import CallTarget, FunctionResolver, HirRunner
-from .lower import NativeFn, compile_native
+from .interp import FunctionResolver, HirRunner
+from .lower import NativeFn, compile_module
+from .mir import Function as MirFunction
+from .mir import FunctionType as MirFunctionType
+from .mir import Symbol as MirSymbol
 from .type import (
     BoolType,
     FloatType,
@@ -168,6 +173,12 @@ class JitContext(FunctionResolver):
         # keeps the native symbols of different functions apart even when
         # they happen to share a ``__name__``
         self._name_owners: dict[str, SpyFunction] = {}
+        # typed MIR of every compiled specialization, keyed like
+        # ``_compiling``; survives the module it was compiled into
+        self._mir_cache: dict[tuple[SpyFunction, tuple[Type, ...]], MirFunction] = {}
+        # the MIR functions being compiled into the module under
+        # construction (see ``ensure_spec``); None outside a build
+        self._module: dict[tuple[SpyFunction, tuple[Type, ...]], MirFunction] | None = None
 
     # -- decorators ----------------------------------------------------------
 
@@ -244,22 +255,56 @@ class JitContext(FunctionResolver):
 
     def ensure_spec(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> NativeFn:
         """Compile (or look up) the specialization of ``entry`` for
-        ``arg_types`` and return its native function."""
+        ``arg_types`` and return its native function.
+
+        Compilation happens module-at-a-time: a fresh function and every
+        function it depends on that is not compiled yet are lowered
+        together into one LLVM module (``define``s); specializations
+        compiled in earlier modules are referenced as external symbols.
+        """
         spec = entry.specs.get(arg_types)
         if spec is not None:
             return spec
         message = entry.failed.get(arg_types)
         if message is not None:
             raise CompileError(message)
+        if self._module is not None:
+            raise CompileError('internal error: nested module compilation')
 
-        fn_name = entry.fn.__name__
+        self._module = {}
+        try:
+            self._compile_mir(entry, arg_types)
+            natives = self._compile_module()
+            if isinstance(entry, FunctionValue):
+                entry.mir_fn = self._mir_cache[(entry, arg_types)]
+            return natives[(entry, arg_types)]
+        except SpyError as e:
+            entry.failed[arg_types] = str(e)
+            raise CompileError(
+                f"error while compiling {entry.fn.__name__}({_types_str(arg_types)}): {e}"
+            ) from e
+        finally:
+            self._module = None
+
+    def _compile_mir(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> MirFunction:
+        """Produce (and cache) the typed MIR of one specialization.
+
+        Producing the MIR of a function runs its body, which resolves the
+        calls it makes; those may compile (MIR-wise) further functions,
+        which are then scheduled into the module under construction (see
+        :meth:`ensure_spec`).  The whole module is lowered at once.
+        """
         key = (entry, arg_types)
+        cached = self._mir_cache.get(key)
+        if cached is not None:
+            return cached
         if key in self._compiling:
             raise CompileError(
-                f"recursive calls are not supported yet: {fn_name}({_types_str(arg_types)})"
+                f"recursive calls are not supported yet: "
+                f"{entry.fn.__name__}({_types_str(arg_types)})"
             )
+        self._compiling.add(key)
         try:
-            self._compiling.add(key)
             fn_ir = self.hir_of(entry.fn)
             ret_hint: Type | None = None
             if entry.kind == 'aot':
@@ -268,25 +313,45 @@ class JitContext(FunctionResolver):
             mir_fn, _ = runner.run_function(
                 fn_ir, symbol_of(entry.name_base, arg_types), arg_types, ret_hint
             )
-            native = compile_native(mir_fn.name, mir_fn, self._extern_symbols())
-            if isinstance(entry, FunctionValue):
-                entry.mir_fn = mir_fn
-            entry.specs[arg_types] = native
-            self._symbols[native.name] = native
-            return native
-        except SpyError as e:
-            entry.failed[arg_types] = str(e)
-            raise CompileError(
-                f"error while compiling {fn_name}({_types_str(arg_types)}): {e}"
-            ) from e
+            self._mir_cache[key] = mir_fn
+            module = self._module
+            if module is None:
+                raise CompileError(
+                    f"internal error: {entry.fn.__name__}({_types_str(arg_types)}) "
+                    'is compiled outside of a module build'
+                )
+            module[key] = mir_fn
+            return mir_fn
         finally:
             self._compiling.discard(key)
 
-    def resolve_call(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> CallTarget:
-        """Resolve a native call of one specialization from inside a
-        compiled function (may trigger a nested compilation)."""
-        native = self.ensure_spec(entry, arg_types)
-        return CallTarget(native.name, native.ret_type)
+    def _compile_module(self) -> dict[tuple[SpyFunction, tuple[Type, ...]], NativeFn]:
+        """Lower the module under construction (see :meth:`ensure_spec`)
+        into one native module and register its specializations."""
+        assert self._module is not None
+        natives = compile_module(list(self._module.values()), self._extern_symbols())
+        by_name = {native.name: native for native in natives}
+        result: dict[tuple[SpyFunction, tuple[Type, ...]], NativeFn] = {}
+        for key, mir_fn in self._module.items():
+            native = by_name[mir_fn.name]
+            entry, arg_types = key
+            entry.specs[arg_types] = native
+            self._symbols[native.name] = native
+            result[key] = native
+        return result
+
+    def resolve_call(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> tuple[mir.Value, mir.Type]:
+        """The callable value of one callee specialization as seen from
+        inside a compiled function: a :class:`mir.Function` when the
+        callee is still fresh (it will be ``define``d in the module of
+        the caller) or a :class:`mir.Symbol` of a specialization
+        compiled in an earlier module."""
+        spec = entry.specs.get(arg_types)
+        if spec is not None:
+            fn_type = MirFunctionType(spec.arg_types, spec.ret_type)
+            return MirSymbol(spec.name, fn_type), spec.ret_type
+        mir_fn = self._compile_mir(entry, arg_types)
+        return mir_fn, mir_fn.ret_type
 
     # -- internals -----------------------------------------------------------
 
