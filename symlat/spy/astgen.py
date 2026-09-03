@@ -4,8 +4,11 @@ compile-time calls inside a function body (``interp``).
 
 ``parse_function`` turns the source of a Python function into a
 :class:`FunctionIR`: the declared type parameters (PEP 695 ``[T]``
-syntax), the formal parameters (annotations kept as AST nodes, defaults
-evaluated to Python values) and the translated body.
+syntax), the formal parameters and the translated body.  The parameter
+annotations, default values and return annotation are read off the
+function object itself (``fn.__annotations__``/``fn.__defaults__``/...),
+where Python has already evaluated them at definition time, so the
+source expressions are never re-evaluated.
 
 Like ``symlat.jit.llvm`` the body is one *linear* list of instructions;
 expression evaluation appends temporary instructions to the list and
@@ -33,8 +36,8 @@ import ast
 import inspect
 import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from . import hir
 from .errors import CompileError, TypeMismatchError
@@ -67,7 +70,9 @@ _CMP_OPS = {
 @dataclass(frozen=True)
 class ParamDef:
     name: str
-    annotation: ast.expr | None = None
+    # The evaluated annotation from ``fn.__annotations__``: either a concrete
+    # spy type or one of the function's PEP 695 type parameter objects.
+    annotation: Any | None = None
     has_default: bool = False
     default_value: Any | None = None
 
@@ -76,12 +81,13 @@ class ParamDef:
 class FunctionIR:
     fn: Callable
     name: str
-    type_params: tuple[str, ...]
+    # The declared PEP 695 type parameter objects (``[T]``), kept so that
+    # annotation values can be recognized as type parameters by identity.
+    type_params: tuple[TypeVar, ...]
     params: tuple[ParamDef, ...]
-    ret_annotation: ast.expr | None
+    # The evaluated return annotation from ``fn.__annotations__``.
+    ret_annotation: Any | None
     body: tuple[hir.Inst, ...]
-    # id(annotation AST node) -> evaluated spy Type (aot mode only)
-    _annotation_cache: dict[int, Type] = field(default_factory=dict)
 
 
 class _Builder:
@@ -234,13 +240,6 @@ class _Builder:
                 )
 
 
-def _eval_expr(node: ast.expr, fn: Callable, what: str) -> Any:
-    try:
-        return eval(compile(ast.Expression(node), '<spy>', 'eval'), fn.__globals__)
-    except Exception as e:
-        raise CompileError(f"cannot evaluate {what} of function {fn.__name__}: {e}") from e
-
-
 def parse_function(fn: Callable) -> FunctionIR:
     """Parse ``fn`` (a plain Python function) into a :class:`FunctionIR`."""
     try:
@@ -259,15 +258,6 @@ def parse_function(fn: Callable) -> FunctionIR:
     if node.name != fn.__name__:
         raise CompileError(f"function name mismatch: expected {node.name}, got {fn.__name__}")
 
-    type_params: list[str] = []
-    for type_param in node.type_params:
-        if isinstance(type_param, ast.TypeVar):
-            type_params.append(type_param.name)
-        else:
-            raise CompileError(
-                f"unsupported type parameter {type_param!r} in function {node.name}"
-            )
-
     if node.args.vararg is not None or node.args.kwarg is not None:
         raise CompileError(f"*args/**kwargs are not supported in spy function {node.name}")
     if len(node.args.posonlyargs) > 0:
@@ -275,18 +265,45 @@ def parse_function(fn: Callable) -> FunctionIR:
     if len(node.args.kwonlyargs) > 0:
         raise CompileError(f"keyword-only arguments are not supported in spy function {node.name}")
 
+    # Read the signature metadata off the function object instead of
+    # re-evaluating the source: Python already evaluated the annotations
+    # (PEP 695 annotations may evaluate lazily on access) and the default
+    # values when it created the function.
+    try:
+        annotations = fn.__annotations__
+        defaults = fn.__defaults__ if fn.__defaults__ is not None else ()
+    except Exception as e:
+        raise CompileError(
+            f"cannot read the annotations of function {node.name}: {e}"
+        ) from e
+
+    # ``fn.__type_params__`` exposes the declared PEP 695 type parameters
+    # (Python 3.13+); the AST ``[T]`` syntax may parse on 3.12, but the
+    # annotation values of a generic function are only accessible there
+    # through ``__type_params__``.
+    declared_type_params = getattr(fn, '__type_params__', ())
+    if len(node.type_params) > 0 and len(declared_type_params) == 0:
+        raise CompileError(
+            f"generic spy functions require Python 3.13 or newer (function {node.name})"
+        )
+    type_params: list[TypeVar] = []
+    for type_param in declared_type_params:
+        if isinstance(type_param, TypeVar):
+            type_params.append(type_param)
+        else:
+            raise CompileError(
+                f"unsupported type parameter {type_param!r} in function {node.name}"
+            )
+
     all_args = list(node.args.args)
-    defaults = node.args.defaults
-    offset = len(all_args) - len(defaults) if len(defaults) > 0 else len(all_args)
+    offset = len(all_args) - len(defaults)
     params: list[ParamDef] = []
     for i, arg in enumerate(all_args):
         has_default = i >= offset
-        default_value = None
-        if has_default:
-            default_value = _eval_expr(defaults[i - offset], fn, f"default value of parameter {arg.arg}")
-        params.append(ParamDef(arg.arg, arg.annotation, has_default, default_value))
+        default_value = defaults[i - offset] if has_default else None
+        params.append(ParamDef(arg.arg, annotations.get(arg.arg), has_default, default_value))
 
-    ir = FunctionIR(fn, node.name, tuple(type_params), tuple(params), node.returns, ())
+    ir = FunctionIR(fn, node.name, tuple(type_params), tuple(params), annotations.get('return'), ())
 
     # prologue: every parameter is addressable, so allocate one slot per
     # parameter and store its by-value argument into it.  ``env`` maps
@@ -315,45 +332,43 @@ def parse_function(fn: Callable) -> FunctionIR:
 def _type_param_of(fn_ir: FunctionIR, param: ParamDef) -> str | None:
     """If the parameter annotation names a type parameter, return its name."""
     ann = param.annotation
-    if isinstance(ann, ast.Name) and ann.id in fn_ir.type_params:
-        return ann.id
+    if ann is None:
+        return None
+    for type_param in fn_ir.type_params:
+        if ann is type_param:
+            return type_param.__name__
     return None
 
 
 def annotation_type(fn_ir: FunctionIR, param: ParamDef) -> Type:
-    """Evaluate the (concrete) annotation of a parameter to a spy type."""
+    """The (concrete) spy type of the annotation of an aot parameter."""
     if param.annotation is None:
         raise TypeMismatchError(
             f"parameter '{param.name}' of function {fn_ir.name} requires a type annotation"
         )
-    key = id(param.annotation)
-    cached = fn_ir._annotation_cache.get(key)
-    if cached is not None:
-        return cached
     tp = _type_param_of(fn_ir, param)
     if tp is not None:
         raise TypeMismatchError(
             f"type parameter {tp} is not allowed in aot function {fn_ir.name}"
         )
-    value = _eval_expr(param.annotation, fn_ir.fn, f"annotation of parameter {param.name}")
-    if not isinstance(value, Type):
+    if not isinstance(param.annotation, Type):
         raise TypeMismatchError(
             f"annotation of parameter '{param.name}' of function {fn_ir.name} "
-            f"is not a spy type: {value!r}"
+            f"is not a spy type: {param.annotation!r}"
         )
-    fn_ir._annotation_cache[key] = value
-    return value
+    return param.annotation
 
 
 def return_annotation_type(fn_ir: FunctionIR) -> Type:
-    if fn_ir.ret_annotation is None:
+    """The spy type of the return annotation of an aot function."""
+    ret_ann = fn_ir.ret_annotation
+    if ret_ann is None:
         raise TypeMismatchError(f"function {fn_ir.name} requires a return type annotation")
-    value = _eval_expr(fn_ir.ret_annotation, fn_ir.fn, 'return annotation')
-    if not isinstance(value, Type):
+    if not isinstance(ret_ann, Type):
         raise TypeMismatchError(
-            f"return annotation of function {fn_ir.name} is not a spy type: {value!r}"
+            f"return annotation of function {fn_ir.name} is not a spy type: {ret_ann!r}"
         )
-    return value
+    return ret_ann
 
 
 def _param_missing_error(fn_ir: FunctionIR, param: ParamDef) -> TypeMismatchError:
