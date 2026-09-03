@@ -16,14 +16,13 @@ module keeps its engine alive, so those addresses stay valid).
 
 import ctypes
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Any
 
 from llvmlite import binding as llvm
 
 from ..jit import llvm as sllvm
 from . import mir
 from .errors import CompileError
+from .fn import NativeFn
 from .mir import (
     BoolType,
     BoolValue,
@@ -95,9 +94,10 @@ class _Lowerer:
     """Lowers the region trees of the MIR functions of one module onto
     their shared ``sllvm.Function`` definitions (every region becomes a
     chain of LLVM basic blocks).  A call whose callee is a
-    :class:`mir.Function` or a symbol defined by this very module
-    references the in-module ``define``; a call to a :class:`mir.Symbol`
-    of an earlier module references a (cached) extern declaration."""
+    :class:`mir.Function` - of the module itself, or a function that is
+    being compiled into it (recursion) - references the in-module
+    ``define``; a call to a :class:`mir.Symbol` of an earlier module
+    references a (cached) extern declaration."""
 
     def __init__(self, llvm_fns: dict[str, sllvm.Function]) -> None:
         self._llvm_fns = llvm_fns
@@ -177,13 +177,9 @@ class _Lowerer:
                 )
             return llvm_fn
         if isinstance(value, mir.Symbol):
-            # a symbol names a function value: resolve it to the module's
-            # own definition when there is one (recursion, or a call to a
-            # function compiled into this very module), otherwise declare
-            # it as an external
-            llvm_fn = self._llvm_fns.get(value.name)
-            if llvm_fn is not None:
-                return llvm_fn
+            # a symbol is a callee compiled in an earlier module: it is
+            # always an external here (its address is resolved at link
+            # time)
             return self._declare(value)
         raise CompileError(f'cannot lower value {value!r}')
 
@@ -275,29 +271,6 @@ class _Lowerer:
             self._lowered[id(inst)] = result
 
 
-@dataclass
-class NativeFn:
-    """A compiled native function of one specialization."""
-
-    name: str
-    arg_types: tuple[Type, ...]
-    ret_type: Type
-    lines: list[str] = field(default_factory=list)
-    _engine: object = None  # type: ignore[assignment]
-    _addr: int = 0
-    _entry: Any = None
-
-    def call(self, *values) -> object:
-        return self._entry(*values)
-
-    @property
-    def addr(self) -> int:
-        return self._addr
-
-    def print_all(self) -> list[str]:
-        return self.lines
-
-
 def compile_module(
     fns: Sequence[mir.Function],
     extern: dict[str, int],
@@ -317,6 +290,7 @@ def compile_module(
     # callee's definition (its signature) to type the call
     llvm_fns: dict[str, sllvm.Function] = {}
     for fn in fns:
+        assert fn.ret_type is not None, f'function {fn.name} is not fully typed'
         llvm_fn = sllvm.Function(fn.name)
         llvm_fn.add_args(*(to_llvm_type(a.type) for a in fn.args))
         llvm_fn.set_return_type(to_llvm_type(fn.ret_type))
@@ -353,6 +327,7 @@ def compile_module(
 
     rets: list[NativeFn] = []
     for fn in fns:
+        assert fn.ret_type is not None, f'function {fn.name} is not fully typed'
         addr = engine.get_function_address(fn.name)
         arg_ctypes = tuple(to_ctype(t) for t in (a.type for a in fn.args))
         proto = ctypes.CFUNCTYPE(to_ctype(fn.ret_type), *arg_ctypes)

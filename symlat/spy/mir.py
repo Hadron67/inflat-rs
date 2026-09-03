@@ -18,12 +18,13 @@ then maps the region tree onto LLVM basic blocks.
 
 The representation is deliberately close to LLVM so that ``lower`` is a
 mechanical mapping; every MIR value exposes a ``.type`` (a MIR type).
-A compiled function is a :class:`Function` value; calls within one
-LLVM module reference the callee's :class:`Function` (lowered to a
-``define``), while a callee compiled in an *earlier* module - or a
-function still being compiled (recursion) - is referenced by a
-:class:`Symbol`.  Symbols resolve to the module-local ``define`` when
-there is one and to an external declaration otherwise.
+A compiled function is a :class:`Function` value: the host creates and
+registers it - with an empty body - *before* the body is run, so a call
+the body makes to it (recursion) resolves to the very :class:`Function`
+being typed; calls within one LLVM module reference the callee's
+:class:`Function` (lowered to a ``define``).  A callee compiled in an
+*earlier* module is referenced by a :class:`Symbol` (lowered to an
+external declaration).
 """
 
 from dataclasses import dataclass
@@ -134,9 +135,10 @@ class FloatValue(Value):
 
 @dataclass(frozen=True)
 class Symbol(Value):
-    """A function value bound to a module symbol: the target of a native
-    call, compiled by the same JitContext.  Lowered to a ``declare``d
-    external symbol whose address is resolved at link time."""
+    """A function value bound to a module symbol of an *earlier* module:
+    the target of a native call whose definition is linked in at compile
+    time.  Lowered to a ``declare``d external symbol whose address is
+    resolved at link time."""
 
     name: str
     fn_type: FunctionType
@@ -265,15 +267,24 @@ class Function(Value):
     """One compiled MIR function.  As a value it is the in-module
     function value of a call target: a call whose callee is this object
     is lowered to a call of the ``define``d function (functions of one
-    module are compiled together)."""
+    module are compiled together).
+
+    The host creates the function (with an empty body) and registers it
+    before the body is typed, so that recursive calls made by the body
+    resolve to the very object being filled in.  ``ret_type`` is fixed
+    at creation when the function declares one; otherwise it stays
+    ``None`` until the body has been typed (a function still being
+    typed and without a declared return type can only be observed by a
+    recursive call, which then is a compile error)."""
 
     name: str
     args: tuple[FormalArg, ...]
-    ret_type: Type
+    ret_type: Type | None
     insts: list[Inst]
 
     @property
     def type(self) -> Type:
         """The type of the function value: a pointer to the function's
         signature."""
+        assert self.ret_type is not None, 'the function is still being typed'
         return PointerType(FunctionType(tuple(a.type for a in self.args), self.ret_type))

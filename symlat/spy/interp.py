@@ -52,12 +52,12 @@ from typing import Any
 from . import astgen, hir, mir
 from . import builtins as spy_builtins
 from .errors import CompileError, TypeMismatchError
+from .fn import SpyFunction
 from .mir import (
     BoolType,
     BoolValue,
     FloatType,
     FloatValue,
-    FormalArg,
     IntType,
     IntValue,
     PointerType,
@@ -83,11 +83,10 @@ from .type import (
     PointerType as SpyPointerType,
 )
 from .type import (
-    SpyFunction,
-    value_type,
+    Type as SpyType,
 )
 from .type import (
-    Type as SpyType,
+    value_type,
 )
 
 _MAX_INLINE_DEPTH = 64
@@ -228,7 +227,8 @@ class FunctionResolver:
 
 class HirRunner:
     """Runs one function body (and everything it inlines) at compile
-    time, emitting one straight-line typed :class:`mir.Function`.
+    time, filling the pre-created typed :class:`mir.Function` of one
+    specialization.
 
     ``resolver`` is the compile-time host, typed as the
     :class:`FunctionResolver` interface it implements (``dsl.JitContext``
@@ -242,7 +242,6 @@ class HirRunner:
 
     def __init__(self, resolver: FunctionResolver) -> None:
         self._resolver = resolver
-        self._insts: list[mir.Inst] = []
         self._frames: list[Frame] = []
         self._regs: dict[hir.Inst, InterpVal] = {}
         self._inline_stack: list[astgen.FunctionIR] = []
@@ -259,39 +258,36 @@ class HirRunner:
 
     # -- entry point ---------------------------------------------------------
 
-    def run_function(
-        self,
-        fn_ir: astgen.FunctionIR,
-        native_name: str,
-        arg_types: tuple[SpyType, ...],
-        ret_hint: SpyType | None,
-    ) -> tuple[mir.Function, Type]:
-        """Run the body of ``fn_ir`` with the given argument types,
-        producing the compiled MIR function."""
-        assert len(arg_types) == len(fn_ir.params)
-        param_types = tuple(to_mir_type(t) for t in arg_types)
+    def run_function(self, fn: mir.Function, fn_ir: astgen.FunctionIR) -> None:
+        """Type the body of ``fn_ir`` into ``fn``.
+
+        The host created ``fn`` (fixing its name, arguments and, when
+        one is declared, its return type) and registered it *before*
+        running the body, so a call the body makes to the function
+        itself - recursion - resolves to ``fn``, whose signature is
+        already fixed.  This fills ``fn.insts`` and fixes
+        ``fn.ret_type``: the declared type, or the type inferred from
+        the return sites when none is declared.
+        """
         param_values = tuple(
-            mir.Param(i, t, fn_ir.params[i].name) for i, t in enumerate(param_types)
+            mir.Param(i, arg.type, arg.name) for i, arg in enumerate(fn.args)
         )
         self._push_frame(param_values)
         self._ret_type = None
-        self._ret_target = to_mir_type(ret_hint) if ret_hint is not None else None
+        self._ret_target = fn.ret_type
         self._ret_emit = True
-        self._regions = [self._insts]
+        self._regions = [fn.insts]
 
         flow, _ = self._run_list(fn_ir.body)
         if flow is not FLOW_RET:
             raise CompileError(f"function {fn_ir.name} must end with a 'return' statement")
-        assert self._ret_type is not None
         ret_type = self._ret_type
-
-        fn = mir.Function(
-            native_name,
-            tuple(FormalArg(fn_ir.params[i].name, param_types[i]) for i in range(len(param_types))),
-            ret_type,
-            self._insts,
-        )
-        return fn, ret_type
+        assert ret_type is not None
+        if fn.ret_type is not None:
+            # a declared return type is enforced at the return sites
+            # (see ``_finish_return``), so the two must agree
+            assert fn.ret_type == ret_type
+        fn.ret_type = ret_type
 
     # -- running instruction lists -------------------------------------------
 

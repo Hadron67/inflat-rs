@@ -29,8 +29,10 @@ from symlat.spy import mir
 from . import astgen
 from .builtins import AsValue
 from .errors import CompileError, SpyError, TypeMismatchError
+from .fn import FunctionValue, LazyJitFunction, SpyFunction
 from .interp import FunctionResolver, HirRunner, to_mir_type
 from .lower import NativeFn, compile_module
+from .mir import FormalArg as MirFormalArg
 from .mir import Function as MirFunction
 from .mir import FunctionType as MirFunctionType
 from .mir import Symbol as MirSymbol
@@ -38,11 +40,8 @@ from .type import (
     BoolType,
     FloatType,
     FormalArg,
-    FunctionValue,
     IntType,
-    LazyJitFunction,
     PointerType,
-    SpyFunction,
     Type,
     int_range,
     type_str,
@@ -166,18 +165,18 @@ class JitContext(FunctionResolver):
 
     def __init__(self) -> None:
         self._entries: dict[FunctionType, SpyFunction] = {}
+        # parsed HIR of plain Python functions that are only ever
+        # inlined; a registered function caches its HIR on the function
+        # value instead
         self._hir_cache: dict[FunctionType, astgen.FunctionIR] = {}
         self._symbols: dict[str, NativeFn] = {}
-        self._compiling: set[tuple[object, tuple[Type, ...]]] = set()
         # allocated base names (``spy.<name>.<types>``) -> their owner;
         # keeps the native symbols of different functions apart even when
         # they happen to share a ``__name__``
         self._name_owners: dict[str, SpyFunction] = {}
-        # typed MIR of every compiled specialization, keyed like
-        # ``_compiling``; survives the module it was compiled into
-        self._mir_cache: dict[tuple[SpyFunction, tuple[Type, ...]], MirFunction] = {}
-        # the MIR functions being compiled into the module under
-        # construction (see ``ensure_spec``); None outside a build
+        # the MIR functions defined by the module under construction
+        # (see ``ensure_spec``), keyed like the per-function
+        # ``mir_cache``; None outside a build
         self._module: dict[tuple[SpyFunction, tuple[Type, ...]], MirFunction] | None = None
 
     # -- decorators ----------------------------------------------------------
@@ -249,6 +248,16 @@ class JitContext(FunctionResolver):
     # -- registry ------------------------------------------------------------
 
     def hir_of(self, fn: FunctionType) -> astgen.FunctionIR:
+        # a registered function caches its HIR on its function value; a
+        # plain function (which is only ever inlined) is cached by the
+        # context
+        entry = self._entries.get(fn)
+        if entry is not None:
+            ir = entry.hir
+            if ir is None:
+                ir = astgen.parse_function(fn)
+                entry.hir = ir
+            return ir
         ir = self._hir_cache.get(fn)
         if ir is None:
             ir = astgen.parse_function(fn)
@@ -275,10 +284,10 @@ class JitContext(FunctionResolver):
 
         self._module = {}
         try:
-            self._compile_mir(entry, arg_types)
+            fn = self._compile_mir(entry, arg_types)
             natives = self._compile_module()
             if isinstance(entry, FunctionValue):
-                entry.mir_fn = self._mir_cache[(entry, arg_types)]
+                entry.mir_fn = fn
             return natives[(entry, arg_types)]
         except SpyError as e:
             entry.failed[arg_types] = str(e)
@@ -291,18 +300,23 @@ class JitContext(FunctionResolver):
     def _compile_mir(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> MirFunction:
         """Produce (and cache) the typed MIR of one specialization.
 
-        Producing the MIR of a function runs its body, which resolves the
-        calls it makes; those may compile (MIR-wise) further functions,
-        which are then scheduled into the module under construction (see
-        :meth:`ensure_spec`).  The whole module is lowered at once.
+        The function is created - with an empty body - and registered
+        (in the cache of its entry and in the module under
+        construction) *before* its body is run, so a call the body
+        makes to it - recursion, direct or mutual - resolves to the
+        very function being typed, whose signature is already fixed;
+        running the body fills it in.  Calls to other functions may
+        compile (MIR-wise) further functions, which are scheduled into
+        the module under construction as well (see :meth:`ensure_spec`);
+        the whole module is lowered at once.
         """
         key = (entry, arg_types)
-        cached = self._mir_cache.get(key)
-        if cached is not None:
-            # The MIR is cached but its spec is not registered, so the
+        fn = entry.mir_cache.get(arg_types)
+        if fn is not None:
+            # the MIR exists but its spec is not registered, so the
             # module build that produced it never finished (specs are
             # only registered when a module is lowered); the current
-            # build references the function, so it is defined here too.
+            # build references the function, so it is defined here too
             module = self._module
             if module is None:
                 raise CompileError(
@@ -310,44 +324,45 @@ class JitContext(FunctionResolver):
                     f'{entry.fn.__name__}({_types_str(arg_types)}) is reused '
                     'outside of a module build'
                 )
-            module[key] = cached
-            return cached
-        if key in self._compiling:
-            # recursion is resolved by ``resolve_call`` before reaching
-            # this point; reaching it means a caller bypassed resolution
+            module[key] = fn
+            return fn
+
+        fn_ir = self.hir_of(entry.fn)
+        assert len(arg_types) == len(fn_ir.params)
+        # a declared return type - concrete, or naming a type parameter
+        # bound by the parameters - fixes the return type of the
+        # specialization (a recursive function needs it: its calls are
+        # typed while its body is still being compiled); without one the
+        # return type is inferred from the return sites
+        ret_hint = self._declared_ret_type(entry, arg_types)
+        args = tuple(
+            MirFormalArg(fn_ir.params[i].name, to_mir_type(arg_types[i]))
+            for i in range(len(arg_types))
+        )
+        fn = MirFunction(
+            symbol_of(entry.name_base, arg_types),
+            args,
+            to_mir_type(ret_hint) if ret_hint is not None else None,
+            [],
+        )
+        module = self._module
+        if module is None:
             raise CompileError(
-                f'internal error: re-entrant compile of '
-                f'{entry.fn.__name__}({_types_str(arg_types)})'
+                f"internal error: {entry.fn.__name__}({_types_str(arg_types)}) "
+                'is compiled outside of a module build'
             )
-        self._compiling.add(key)
+        entry.mir_cache[arg_types] = fn
+        module[key] = fn
         try:
-            fn_ir = self.hir_of(entry.fn)
-            ret_hint: Type | None
-            if entry.kind == 'aot':
-                ret_hint = astgen.return_annotation_type(fn_ir)
-            else:
-                # a declared return annotation - concrete, or naming a
-                # type parameter bound by the parameters - fixes the
-                # return type of the specialization (a recursive function
-                # needs it: its calls are typed while its body is still
-                # being compiled); without one the return type is
-                # inferred from the return sites
-                ret_hint = self._declared_ret_type(entry, arg_types)
             runner = HirRunner(self)
-            mir_fn, _ = runner.run_function(
-                fn_ir, symbol_of(entry.name_base, arg_types), arg_types, ret_hint
-            )
-            self._mir_cache[key] = mir_fn
-            module = self._module
-            if module is None:
-                raise CompileError(
-                    f"internal error: {entry.fn.__name__}({_types_str(arg_types)}) "
-                    'is compiled outside of a module build'
-                )
-            module[key] = mir_fn
-            return mir_fn
-        finally:
-            self._compiling.discard(key)
+            runner.run_function(fn, fn_ir)
+            return fn
+        except BaseException:
+            # the body typing failed: drop the partially-filled function
+            # so that a retry starts from scratch (functions completed
+            # earlier in this build stay cached)
+            entry.mir_cache.pop(arg_types, None)
+            raise
 
     def _compile_module(self) -> dict[tuple[SpyFunction, tuple[Type, ...]], NativeFn]:
         """Lower the module under construction (see :meth:`ensure_spec`)
@@ -366,41 +381,22 @@ class JitContext(FunctionResolver):
 
     def resolve_call(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> tuple[mir.Value, mir.Type]:
         """The callable value of one callee specialization as seen from
-        inside a compiled function: a :class:`mir.Function` when the
-        callee is still fresh (it will be ``define``d in the module of
-        the caller), a :class:`mir.Symbol` of a specialization compiled
-        in an earlier module, or - for recursion - a symbol of the
-        specialization whose body is being typed right now (it will be
-        ``define``d by the module under construction as well)."""
-        spec = entry.specs.get(arg_types)
-        if spec is not None:
-            fn_type = MirFunctionType(spec.arg_types, spec.ret_type)
-            return MirSymbol(spec.name, fn_type), spec.ret_type
-        key = (entry, arg_types)
-        if key in self._compiling:
-            # a call of the specialization that is currently being
-            # compiled: recursion (direct or mutual).  The callee's MIR
-            # function only exists once its body has been typed, so the
-            # call references it by the symbol it will be defined under;
-            # ``lower`` resolves the symbol to that very definition.
-            return self._recursive_call(entry, arg_types)
-        mir_fn = self._compile_mir(entry, arg_types)
-        return mir_fn, mir_fn.ret_type
-
-    def _recursive_call(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> tuple[mir.Value, mir.Type]:
-        """The callable value of a recursive call.
-
-        The call must be typed while the callee body is still being
-        compiled, so its signature - including the return type - has to
-        be known up front (see :meth:`_declared_ret_type`); the callee
-        is referenced by the symbol its finished MIR function will be
-        defined under."""
-        ret = self._declared_ret_type(entry, arg_types)
+        inside a compiled function: a :class:`mir.Function` of the
+        module under construction - already compiled, or still being
+        compiled when the call is a recursive one - or a
+        :class:`mir.Symbol` of a specialization compiled in an earlier
+        module."""
+        native = entry.specs.get(arg_types)
+        if native is not None:
+            fn_type = MirFunctionType(native.arg_types, native.ret_type)
+            return MirSymbol(native.name, fn_type), native.ret_type
+        fn = self._compile_mir(entry, arg_types)
+        ret = fn.ret_type
         if ret is None:
+            # the callee is still being typed (a recursive call) and has
+            # no declared return type: the call cannot be typed
             raise CompileError(self._recursion_ret_type_error(entry, arg_types))
-        mir_ret = to_mir_type(ret)
-        fn_type = MirFunctionType(tuple(to_mir_type(t) for t in arg_types), mir_ret)
-        return MirSymbol(symbol_of(entry.name_base, arg_types), fn_type), mir_ret
+        return fn, ret
 
     def _declared_ret_type(self, entry: SpyFunction, arg_types: tuple[Type, ...]) -> Type | None:
         """The concrete spy return type of one specialization declared by
@@ -463,6 +459,7 @@ class JitContext(FunctionResolver):
             raise ValueError(f'function {fn.__name__} is already registered in this JitContext')
         entry: SpyFunction
         formal: tuple[Type, ...] | None = None
+        fn_ir: astgen.FunctionIR | None = None
         if kind == 'aot':
             # resolve the fixed signature from the annotations first; the
             # body is compiled right below (registration time)
@@ -477,6 +474,10 @@ class JitContext(FunctionResolver):
         entry.context = self
         entry.name_base = self._allocate_name(fn, entry)
         self._entries[fn] = entry
+        if kind == 'aot':
+            assert fn_ir is not None
+            # reuse the parse that was done for the signature above
+            entry.hir = fn_ir
         # mount the value on the function object, so that name resolution
         # inside spy bodies finds it (see ``astgen``)
         fn._spy_entry = entry  # type: ignore[attr-defined]

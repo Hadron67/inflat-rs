@@ -41,11 +41,11 @@ import ast
 import inspect
 import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from . import hir
 from .errors import CompileError, TypeMismatchError
+from .fn import FunctionIR, ParamDef
 from .type import Type, type_str, value_type
 
 _BIN_OPS = {
@@ -70,29 +70,6 @@ _CMP_OPS = {
     ast.Gt: '>',
     ast.GtE: '>=',
 }
-
-
-@dataclass(frozen=True)
-class ParamDef:
-    name: str
-    # The evaluated annotation from ``fn.__annotations__``: either a concrete
-    # spy type or one of the function's PEP 695 type parameter objects.
-    annotation: Any | None = None
-    has_default: bool = False
-    default_value: Any | None = None
-
-
-@dataclass
-class FunctionIR:
-    fn: Callable
-    name: str
-    # The declared PEP 695 type parameter objects (``[T]``), kept so that
-    # annotation values can be recognized as type parameters by identity.
-    type_params: tuple[TypeVar, ...]
-    params: tuple[ParamDef, ...]
-    # The evaluated return annotation from ``fn.__annotations__``.
-    ret_annotation: Any | None
-    body: tuple[hir.Inst, ...]
 
 
 class _Builder:
