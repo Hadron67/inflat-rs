@@ -21,7 +21,7 @@ from llvmlite import binding as llvm
 from ..jit import llvm as sllvm
 from . import mir
 from .errors import CompileError
-from .type import (
+from .mir import (
     BoolType,
     BoolValue,
     FloatType,
@@ -65,7 +65,7 @@ def to_llvm_type(type: Type) -> sllvm.Type:
             return sllvm.IntType(type.bits)
         case FloatType():
             return sllvm.FloatType(type.bits)
-        case PointerType(elem, _):
+        case PointerType(elem):
             return sllvm.PointerType(to_llvm_type(elem))
         case _:
             raise CompileError(f"type {type_str(type)} cannot be lowered to LLVM yet")
@@ -94,6 +94,7 @@ class _Lowerer:
         self._arg_types = arg_types
         self._ret_type = ret_type
         self._lowered: dict[object, sllvm.Value] = {}
+        self._declarations: dict[str, sllvm.DeclareFunction] = {}
 
     def lower(self, fn: mir.Function) -> list[str]:
         llvm_fn = sllvm.Function(self._name)
@@ -122,7 +123,23 @@ class _Lowerer:
             return sllvm.IntValue(value.value, sllvm.IntType(value.bits))
         if isinstance(value, FloatValue):
             return sllvm.FloatType(value.bits).from_float(value.value)
+        if isinstance(value, mir.Symbol):
+            return self._declare(value)
         raise CompileError(f'cannot lower value {value!r}')
+
+    def _declare(self, symbol: mir.Symbol) -> sllvm.DeclareFunction:
+        """The declared external symbol a function value refers to.  All
+        calls to the same symbol share one declaration (per lowered
+        function), so the linker resolves a single extern per callee."""
+        decl = self._declarations.get(symbol.name)
+        if decl is None:
+            fn_type = sllvm.fn_type(
+                to_llvm_type(symbol.fn_type.return_type),
+                *(to_llvm_type(t) for t in symbol.fn_type.args),
+            )
+            decl = sllvm.DeclareFunction(symbol.name, fn_type)
+            self._declarations[symbol.name] = decl
+        return decl
 
     def _lower_inst(
         self,
@@ -189,10 +206,11 @@ class _Lowerer:
                 else:
                     result = block.fcmp(op, lhs, rhs)
             case mir.Call():
-                ret_type = to_llvm_type(inst.type)
-                arg_llvm = tuple(to_llvm_type(mir.type_of(a)) for a in inst.args)
-                decl = sllvm.DeclareFunction(inst.callee_name, sllvm.fn_type(ret_type, *arg_llvm))
-                result = block.call(decl, *(self._value(a, arg_values) for a in inst.args))
+                # the callee is a function value: lowering a Symbol yields
+                # its (cached) extern declaration, which the call site
+                # references by name
+                callee = self._value(inst.callee, arg_values)
+                result = block.call(callee, *(self._value(a, arg_values) for a in inst.args))
             case mir.Ret():
                 value = self._value(inst.value, arg_values)
                 block.ret(value)

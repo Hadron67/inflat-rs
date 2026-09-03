@@ -1,34 +1,50 @@
-"""The type system of spy functions.
+"""The spy type system of the compile-time interpreter.
 
-Types appear in three roles:
+Types appear in two roles:
 
 * as the type annotation values in AOT functions (``spy.u64``,
-  ``spy.f64``, ...),
+  ``spy.f64``, ...), and
 * as compile-time values inside a function body (``spy.type(a) ==
-  spy.u64``), and
-* as the static types attached to the values of the typed MIR.
+  spy.u64``).
+
+The static types attached to the registers of the typed MIR are the
+mirrors of these types defined by ``mir``; the interpreter converts
+between the two when it emits instructions.
 
 Types are immutable and compare structurally (two ``IntType(64, False)``
 are equal), which is what makes the compile-time comparisons in
 ``spy.type(a) == spy.u64`` work.
 """
 
+from abc import abstractmethod
 from dataclasses import dataclass
+from typing import override
 
 INT_DEFAULT_BITS = 32
 """A plain Python ``int`` argument is mapped to this signedness/width by
 default (see ``value_type``)."""
 
 
-class Type:
-    pass
-
-
 class Value:
-    """Base of all *spy values*: typed constants (in this module) and the
-    typed MIR registers of ``mir``.  Concrete values expose their spy
-    type as ``.type``."""
+    """Base of the *spy values* of the compile-time domain: types
+    (used as values by ``spy.type``) and other compile-time objects.
+    Concrete values expose their spy type as ``.type``."""
+    @abstractmethod
+    def type(self) -> 'Type':
+        raise NotImplementedError
 
+class Type(Value):
+    @override
+    def type(self) -> 'Type':
+        return TYPE_TYPE
+
+class TypeType(Type):
+    @override
+    def type(self) -> Type:
+        # ummm, Girard paradox... but it doesn't matter?
+        return self
+
+TYPE_TYPE = TypeType()
 
 class BoolType(Type):
     """The boolean type; values are ``i1`` at the LLVM level."""
@@ -42,6 +58,9 @@ class BoolType(Type):
     def __repr__(self) -> str:
         return 'bool'
 
+    @override
+    def type(self) -> Type:
+        return TYPE_TYPE
 
 @dataclass(frozen=True)
 class IntType(Type):
@@ -70,45 +89,32 @@ class FormalArg:
 
 
 @dataclass(frozen=True)
-class FunctionPointerType(Type):
+class FunctionType(Type):
     args: tuple[FormalArg, ...]
     return_type: Type
 
 
 # ---------------------------------------------------------------------------
-# typed constants (MIR operands)
+# function values
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class IntValue(Value):
-    value: int
-    bits: int
-    signed: bool
+class FunctionValue(Value):
+    """Function values are also identity objects: two function values are equal if they are the same object."""
+    def __init__(self, args: tuple[FormalArg, ...], ret: Type, body: tuple[Value, ...]) -> None:
+        self.args = args
+        self.ret = ret
+        self.body = body
 
-    @property
+    def __eq__(self, value: object, /) -> bool:
+        return self is value
+
+    def __hash__(self) -> int:
+        return object.__hash__(self)
+
+    @override
     def type(self) -> Type:
-        return IntType(self.bits, self.signed)
-
-
-@dataclass(frozen=True)
-class FloatValue(Value):
-    value: float
-    bits: int
-
-    @property
-    def type(self) -> Type:
-        return FloatType(self.bits)
-
-
-@dataclass(frozen=True)
-class BoolValue(Value):
-    value: bool
-
-    @property
-    def type(self) -> Type:
-        return BoolType()
-
+        return PointerType(FunctionType(self.args, self.ret), True)
 
 def int_range(type: IntType) -> tuple[int, int]:
     if type.signed:
@@ -127,8 +133,8 @@ def type_str(type: Type) -> str:
         case FloatType():
             return 'f' + str(type.bits)
         case PointerType(elem, is_const):
-            return ('const ' if is_const else '') + type_str(elem) + '*'
-        case FunctionPointerType(args, ret):
+            return '*' + ('const ' if is_const else '') + type_str(elem)
+        case FunctionType(args, ret):
             return f'fn({', '.join(type_str(a.type) for a in args)}) -> {type_str(ret)}'
         case _:
             return str(type)

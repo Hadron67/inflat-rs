@@ -20,7 +20,11 @@ Instructions whose operands are all compile-time values are evaluated
 eagerly in Python (the comptime semantics of the DSL); instructions
 with runtime operands emit typed MIR.  A compile-time value flows into
 runtime code only by being converted to a typed constant of the type
-the runtime operation expects.
+the runtime operation expects.  Runtime values carry the static types
+of the MIR itself (``mir``); the interpreter computes in the ``spy``
+types of ``type.py`` and mirrors them into MIR types (``to_mir_type`` /
+``to_spy_type``) at the points where runtime instructions are emitted
+or read.
 
 Calls are dispatched at compile time:
 
@@ -47,7 +51,7 @@ from typing import Any
 from . import astgen, hir, mir
 from . import builtins as spy_builtins
 from .errors import CompileError, TypeMismatchError
-from .type import (
+from .mir import (
     BoolType,
     BoolValue,
     FloatType,
@@ -57,8 +61,30 @@ from .type import (
     IntValue,
     PointerType,
     Type,
-    int_range,
     type_str,
+)
+from .type import (
+    BoolType as SpyBoolType,
+)
+from .type import (
+    FloatType as SpyFloatType,
+)
+from .type import (
+    FormalArg as SpyFormalArg,
+)
+from .type import (
+    FunctionType as SpyFunctionType,
+)
+from .type import (
+    IntType as SpyIntType,
+)
+from .type import (
+    PointerType as SpyPointerType,
+)
+from .type import (
+    Type as SpyType,
+)
+from .type import (
     value_type,
 )
 
@@ -125,6 +151,51 @@ def typeof(value: mir.Value) -> Type:
     return value.type  # type: ignore[attr-defined]
 
 
+# ---------------------------------------------------------------------------
+# mirrors between the spy types (``type.py``) and the MIR types (``mir``)
+# ---------------------------------------------------------------------------
+
+
+def to_mir_type(type: SpyType) -> Type:
+    """The MIR mirror of a spy type: the static type the runtime register
+    of a value of ``type`` has.  The mapping is one-to-one over the types
+    that can cross into runtime code."""
+    match type:
+        case SpyBoolType():
+            return BoolType()
+        case SpyIntType():
+            return IntType(type.bits, type.signed)
+        case SpyFloatType():
+            return FloatType(type.bits)
+        case SpyPointerType(elem, _):
+            # const-ness is not tracked in the MIR
+            return PointerType(to_mir_type(elem))
+        case SpyFunctionType(args, ret):
+            return mir.FunctionType(tuple(to_mir_type(a.type) for a in args), to_mir_type(ret))
+        case _:
+            raise CompileError(f"spy type {type!r} has no MIR representation")
+
+
+def to_spy_type(type: Type) -> SpyType:
+    """The spy type a MIR type mirrors (the inverse of
+    :func:`to_mir_type` on its accepted types)."""
+    match type:
+        case BoolType():
+            return SpyBoolType()
+        case IntType():
+            return SpyIntType(type.bits, type.signed)
+        case FloatType():
+            return SpyFloatType(type.bits)
+        case PointerType(elem):
+            return SpyPointerType(to_spy_type(elem), is_const=False)
+        case mir.FunctionType(args, ret):
+            return SpyFunctionType(
+                tuple(SpyFormalArg('', to_spy_type(a)) for a in args), to_spy_type(ret)
+            )
+        case _:
+            raise CompileError(f"MIR type {type_str(type)} has no spy counterpart")
+
+
 class HirRunner:
     """Runs one function body (and everything it inlines) at compile
     time, emitting one straight-line typed :class:`mir.Function`.
@@ -153,14 +224,15 @@ class HirRunner:
         self,
         fn_ir: astgen.FunctionIR,
         native_name: str,
-        arg_types: tuple[Type, ...],
-        ret_hint: Type | None,
+        arg_types: tuple[SpyType, ...],
+        ret_hint: SpyType | None,
     ) -> tuple[mir.Function, Type]:
         """Run the body of ``fn_ir`` with the given argument types,
         producing the compiled MIR function."""
         assert len(arg_types) == len(fn_ir.params)
+        param_types = tuple(to_mir_type(t) for t in arg_types)
         param_values = tuple(
-            mir.Param(i, t, fn_ir.params[i].name) for i, t in enumerate(arg_types)
+            mir.Param(i, t, fn_ir.params[i].name) for i, t in enumerate(param_types)
         )
         self._push_frame(param_values)
 
@@ -168,7 +240,8 @@ class HirRunner:
         if flow is not FLOW_RET or not isinstance(value, InterpVal):
             raise CompileError(f"function {fn_ir.name} must end with a 'return' statement")
 
-        ret_value = self._to_runtime(value, ret_hint)
+        target = to_mir_type(ret_hint) if ret_hint is not None else None
+        ret_value = self._to_runtime(value, target)
         ret_type = typeof(ret_value)
         if self._ret_type is not None and self._ret_type != ret_type:
             raise CompileError(
@@ -180,7 +253,7 @@ class HirRunner:
 
         fn = mir.Function(
             native_name,
-            tuple(FormalArg(fn_ir.params[i].name, arg_types[i]) for i in range(len(arg_types))),
+            tuple(FormalArg(fn_ir.params[i].name, param_types[i]) for i in range(len(param_types))),
             ret_type,
             self._insts,
         )
@@ -316,7 +389,8 @@ class HirRunner:
             case RuntimeVal(value):
                 return typeof(value)
             case ComptimeVal(obj):
-                return value_type(obj)
+                t = value_type(obj)
+                return to_mir_type(t) if t is not None else None
             case _:
                 return None
 
@@ -338,7 +412,10 @@ class HirRunner:
             case IntType():
                 if isinstance(obj, bool) or not isinstance(obj, int):
                     raise CompileError(f"cannot use {obj!r} as an integer constant")
-                lo, hi = int_range(type)
+                if type.signed:
+                    lo, hi = (-(2 ** (type.bits - 1)), 2 ** (type.bits - 1) - 1)
+                else:
+                    lo, hi = (0, 2 ** type.bits - 1)
                 if not lo <= obj <= hi:
                     raise CompileError(
                         f"integer constant {obj} is out of range for {type_str(type)}"
@@ -405,7 +482,7 @@ class HirRunner:
             t = value_type(ev.obj)
             if t is None:
                 raise CompileError(f"cannot return the compile-time value {ev.obj!r}")
-            return self._const_of_py(ev.obj, t)
+            return self._const_of_py(ev.obj, to_mir_type(t))
         raise CompileError('cannot return this value')
 
     # -- compile-time (comptime) operators ------------------------------------
@@ -582,7 +659,13 @@ class HirRunner:
         if len(inst.args) != 1:
             raise CompileError('spy.type takes exactly one argument')
         arg = self._operand(inst.args[0])
-        type = self._type_of(arg)
+        match arg:
+            case ComptimeVal(obj):
+                type = value_type(obj)
+            case RuntimeVal(value):
+                type = to_spy_type(typeof(value))
+            case _:
+                type = None
         if type is None:
             raise CompileError(
                 f"spy.type of the compile-time value {self._describe(arg)} is not supported"
@@ -603,11 +686,12 @@ class HirRunner:
 
     def _arg_values_of(
         self, fn_ir: astgen.FunctionIR, args: tuple[hir.Value, ...], mode: str
-    ) -> tuple[tuple[mir.Value, ...], tuple[Type, ...]]:
+    ) -> tuple[tuple[mir.Value, ...], tuple[SpyType, ...]]:
         """Resolve the arguments of one call against the callee signature.
 
         Returns the marshaled argument values (defaults included) and the
-        concrete types of all formal parameters.
+        concrete spy types of all formal parameters (the ``spy`` side
+        drives the call resolution).
         """
         if len(args) > len(fn_ir.params):
             raise CompileError(
@@ -615,9 +699,15 @@ class HirRunner:
                 f"got {len(args)}"
             )
         evals = [self._operand(a) for a in args]
-        provided: list[Type | None] = [None] * len(fn_ir.params)
+        provided: list[SpyType | None] = [None] * len(fn_ir.params)
         for i, ev in enumerate(evals):
-            t = self._type_of(ev)
+            match ev:
+                case ComptimeVal(obj):
+                    t = value_type(obj)
+                case RuntimeVal(value):
+                    t = to_spy_type(typeof(value))
+                case _:
+                    t = None
             if t is None:
                 raise CompileError(
                     f"cannot pass the compile-time value {self._describe(ev)} "
@@ -629,26 +719,27 @@ class HirRunner:
         except TypeMismatchError as e:
             raise CompileError(str(e)) from e
 
+        formal_types = tuple(to_mir_type(t) for t in formal)
         values: list[mir.Value] = []
         for i, param in enumerate(fn_ir.params):
             if i < len(evals):
                 ev = evals[i]
                 if isinstance(ev, ComptimeVal):
-                    values.append(self._const_of_py(ev.obj, formal[i]))
+                    values.append(self._const_of_py(ev.obj, formal_types[i]))
                 elif isinstance(ev, RuntimeVal):
                     value = ev.value
-                    if typeof(value) != formal[i]:
+                    if typeof(value) != formal_types[i]:
                         raise CompileError(
                             f"cannot pass a {type_str(typeof(value))} value as the "
                             f"'{param.name}' argument of function {fn_ir.name} "
-                            f"(expected {type_str(formal[i])})"
+                            f"(expected {type_str(formal_types[i])})"
                         )
                     values.append(value)
                 else:
                     raise CompileError('cannot pass this value as an argument')
             else:
                 assert param.has_default
-                values.append(self._const_of_py(param.default_value, formal[i]))
+                values.append(self._const_of_py(param.default_value, formal_types[i]))
         return tuple(values), formal
 
     def _call_spy_function(self, entry: Any, inst: hir.Call) -> InterpVal:
@@ -659,7 +750,11 @@ class HirRunner:
         fn_ir = self._resolver.hir_of(entry.fn)
         values, formal = self._arg_values_of(fn_ir, inst.args, entry.kind)
         target = self._resolver.resolve_call(entry, formal)
-        value = self._emit(mir.Call(target.name, values, target.ret_type))
+        # the callee is a function value: the symbol of the callee's native
+        # signature, which has the type of a pointer to that signature
+        fn_type = mir.FunctionType(tuple(to_mir_type(t) for t in formal), target.ret_type)
+        callee = mir.Symbol(target.name, fn_type)
+        value = self._emit(mir.Call(callee, values, target.ret_type))
         return RuntimeVal(value)
 
     def _call_plain_function(self, fn: Any, inst: hir.Call) -> InterpVal:

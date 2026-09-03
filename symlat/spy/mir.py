@@ -6,14 +6,138 @@ arguments and of the return value.  Executing the function body emits
 straight-line code only; runtime control flow (runtime ``if``/``while``)
 will be added later as explicit basic blocks with branches and phis.
 
+The MIR owns its static type system (:class:`Type`): a closed,
+LLVM-shaped universe of the types a runtime register can have.  The
+interpreter computes its types in the ``spy`` type system of
+``type.py`` (which also has to represent compile-time values - type
+descriptors, functions, ... - that never cross into runtime code) and
+mirrors them into these types when it emits an instruction.  ``lower``
+then maps MIR types mechanically onto LLVM types.
+
 The representation is deliberately close to LLVM so that ``lower`` is a
-mechanical mapping; every MIR value exposes a ``.type`` (a
-``type.Type``).
+mechanical mapping; every MIR value exposes a ``.type`` (a MIR type).
+A function value is a :class:`Symbol` (a named module symbol of a known
+signature); calls take the callee as such a value.
 """
 
 from dataclasses import dataclass
 
-from .type import BoolType, FormalArg, PointerType, Type, Value
+# ---------------------------------------------------------------------------
+# static types
+# ---------------------------------------------------------------------------
+
+
+class Type:
+    pass
+
+
+@dataclass(frozen=True)
+class BoolType(Type):
+    """Booleans; they are ``i1`` at the LLVM level."""
+
+
+@dataclass(frozen=True)
+class IntType(Type):
+    bits: int
+    signed: bool
+
+
+@dataclass(frozen=True)
+class FloatType(Type):
+    bits: int
+
+
+@dataclass(frozen=True)
+class PointerType(Type):
+    elem: Type
+
+
+@dataclass(frozen=True)
+class FunctionType(Type):
+    """The signature of a function value (the element type of its
+    pointer)."""
+
+    args: tuple[Type, ...]
+    return_type: Type
+
+
+@dataclass(frozen=True)
+class FormalArg:
+    name: str
+    type: Type
+
+
+def type_str(type: Type) -> str:
+    """A short printable name of a type (used in error messages).  It
+    mirrors the strings of the corresponding ``spy`` types; the mangled
+    names of compiled specializations are still built from the ``spy``
+    side."""
+    match type:
+        case BoolType():
+            return 'bool'
+        case IntType():
+            return ('i' if type.signed else 'u') + str(type.bits)
+        case FloatType():
+            return 'f' + str(type.bits)
+        case PointerType(elem):
+            return '*' + type_str(elem)
+        case FunctionType(args, ret):
+            return f'fn({', '.join(type_str(a) for a in args)}) -> {type_str(ret)}'
+        case _:
+            return str(type)
+
+
+# ---------------------------------------------------------------------------
+# values
+# ---------------------------------------------------------------------------
+
+
+class Value:
+    pass
+
+
+@dataclass(frozen=True)
+class BoolValue(Value):
+    value: bool
+
+    @property
+    def type(self) -> Type:
+        return BoolType()
+
+
+@dataclass(frozen=True)
+class IntValue(Value):
+    value: int
+    bits: int
+    signed: bool
+
+    @property
+    def type(self) -> Type:
+        return IntType(self.bits, self.signed)
+
+
+@dataclass(frozen=True)
+class FloatValue(Value):
+    value: float
+    bits: int
+
+    @property
+    def type(self) -> Type:
+        return FloatType(self.bits)
+
+
+@dataclass(frozen=True)
+class Symbol(Value):
+    """A function value bound to a module symbol: the target of a native
+    call, compiled by the same JitContext.  Lowered to a ``declare``d
+    external symbol whose address is resolved at link time."""
+
+    name: str
+    fn_type: FunctionType
+
+    @property
+    def type(self) -> Type:
+        return PointerType(self.fn_type)
 
 
 @dataclass
@@ -100,10 +224,10 @@ class Cmp(Inst):
 
 @dataclass(eq=False)
 class Call(Inst):
-    """A call to a native function previously compiled by the same
-    JitContext (an LLVM ``call`` to a declared symbol)."""
+    """A call of a function value (a :class:`Symbol` for now) returning
+    a value of type ``type``."""
 
-    callee_name: str
+    callee: Value
     args: tuple[Value, ...]
     type: Type
 

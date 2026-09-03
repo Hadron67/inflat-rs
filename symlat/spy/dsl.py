@@ -28,6 +28,7 @@ from .builtins import AsValue
 from .errors import CompileError, SpyError, TypeMismatchError
 from .interp import HirRunner
 from .lower import NativeFn, compile_native
+from .mir import Type as MirType
 from .type import (
     BoolType,
     FloatType,
@@ -126,7 +127,7 @@ class CallTarget:
     """A compiled specialization another function can call."""
 
     name: str
-    ret_type: Type
+    ret_type: MirType
 
 
 class FnEntry:
