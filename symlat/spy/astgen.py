@@ -19,13 +19,15 @@ is addressable, the translated body starts with an
 ``Alloca``/``Store`` prologue per parameter (storing the by-value
 ``Arg(i)``), and a read of a parameter becomes a ``Load`` of its Alloca.
 Global names - everything that is not a parameter - are resolved here to
-their Python objects and embedded as ``hir.Const`` leaves; attributes on
-such compile-time objects (``spy.type``, ``spy.u64``, ...) are evaluated
-here as well.  Whether a function object denotes a registered spy
-function - and which function value it stands for - is decided by the
-interpreter when a call runs: a function body may be parsed before its
-callees, or even itself (an aot function parses its own body while it is
-being registered), are registered.
+their Python objects and embedded as ``hir.Const`` leaves; a name
+captured from an enclosing Python scope (a spy function may be defined
+inside a factory) is read from its closure cell and embedded the same
+way.  Attributes on such compile-time objects (``spy.type``,
+``spy.u64``, ...) are evaluated here as well.  Whether a function object
+denotes a registered spy function - and which function value it stands
+for - is decided by the interpreter when a call runs: a function body
+may be parsed before its callees, or even itself (an aot function parses
+its own body while it is being registered), are registered.
 
 ``solve_call_types`` computes the concrete spy types of all formal
 parameters of one call:
@@ -130,7 +132,25 @@ class _Builder:
     # -- expressions ----------------------------------------------------------
 
     def _resolve_global(self, name: str) -> hir.Const:
-        globals = self._fn_ir.fn.__globals__
+        fn = self._fn_ir.fn
+        # a variable captured from an enclosing Python scope (a spy
+        # function may be defined inside a factory, e.g. ``def make(k):
+        # @cache.jit() def f(x): return x * k``): it behaves like a
+        # global - the value of its closure cell at parse time is
+        # embedded as a compile-time constant
+        closure = fn.__closure__
+        if closure is not None:
+            for i, free_var in enumerate(fn.__code__.co_freevars):
+                if free_var == name:
+                    try:
+                        value = closure[i].cell_contents
+                    except ValueError:
+                        raise CompileError(
+                            f"captured variable '{name}' is not bound yet in the "
+                            f"scope of function {self._fn_ir.name}"
+                        ) from None
+                    return hir.Const(value)
+        globals = fn.__globals__
         if name in globals:
             return hir.Const(globals[name])
         raise CompileError(

@@ -201,6 +201,83 @@ def _make_twin():
     return twin
 
 
+# -- closure variables -------------------------------------------------------
+
+
+def _make_scale(k):
+    """Factory: the returned ``scale(x)`` computes ``x * k`` with the
+    captured ``k`` acting as a compile-time constant of that function."""
+
+    def scale(x):
+        return x * k
+
+    return scale
+
+
+def _make_is_type(ty):
+    """Factory: the returned function compares ``spy.type(x)`` with the
+    captured type descriptor ``ty`` (a compile-time comparison)."""
+
+    def is_ty(x):
+        return spy.type(x) == ty
+
+    return is_ty
+
+
+def _make_call_pair(cache):
+    """Factory: the returned spy function captures and calls the sibling
+    spy function defined in the same factory."""
+
+    @cache.jit()
+    def add_pair(a, b):
+        return a + b
+
+    @cache.jit()
+    def twice_pair(x, y):
+        return add_pair(x, y) * 2
+
+    return twice_pair
+
+
+def _make_offset_aot(cache, k):
+    """Factory: an ``aot`` function capturing a factory argument."""
+
+    @cache.aot()
+    def offset_aot(x: spy.i32) -> spy.i32:
+        return x + k
+
+    return offset_aot
+
+
+threshold = 1000  # module global shadowed by the factory parameter below
+
+
+def _make_cap(cache, threshold):
+    """Factory: the captured ``threshold`` parameter shadows the module
+    global of the same name."""
+
+    @cache.jit()
+    def cap(x):
+        if x > threshold:
+            return threshold
+        return x
+
+    return cap
+
+
+def _make_unbound(cache):
+    """Factory whose aot function captures ``late``, which is only
+    assigned *after* the function has been compiled: its closure cell is
+    empty when the body is parsed."""
+
+    @cache.aot()
+    def unbound(x: spy.i32) -> spy.i32:
+        return x + late
+
+    late = 1
+    return unbound
+
+
 _ORIGINALS = {
     name: globals()[name] for name in (
         'add', 'add_aot', 'add_default', 'add_inline', 'foo',
@@ -486,6 +563,56 @@ class SpyExampleTest(TestCase):
             self.abort_after_call(3)
         self.assertEqual(self.v_fn(41), 42)
         self.assertEqual(self.v_fn(1), 2)
+
+    # -- closure variables ---------------------------------------------------
+
+    def test_closure_value_is_compile_time_constant(self) -> None:
+        scale = self.cache.jit()(_make_scale(3))
+        self.assertEqual(scale(2), 6)
+        # a second specialization of the same function still sees k = 3
+        self.assertEqual(scale(2.0), 6.0)
+        self.assertEqual(scale(5), 15)
+        # each factory call captures its own k
+        other = self.cache.jit()(_make_scale(10))
+        self.assertEqual(other(2), 20)
+        self.assertEqual(scale(4), 12)
+
+    def test_closure_captures_spy_type(self) -> None:
+        # a captured type descriptor usable in a compile-time comparison
+        is_u64 = self.cache.jit()(_make_is_type(spy.u64))
+        self.assertFalse(is_u64(1))
+        self.assertTrue(is_u64(spy.as_(1, spy.u64)))
+        is_f64 = self.cache.jit()(_make_is_type(spy.f64))
+        self.assertTrue(is_f64(1.0))
+        self.assertFalse(is_f64(1))
+
+    def test_closure_calls_captured_spy_function(self) -> None:
+        # the body captures and calls the sibling spy function of the
+        # same factory; both are compiled into one module
+        twice = _make_call_pair(self.cache)
+        self.assertEqual(twice(1, 2), 6)
+        self.assertEqual(twice(3, 4), 14)
+
+    def test_closure_aot(self) -> None:
+        # an aot function is compiled at registration, inside the
+        # factory, with the captured argument already bound
+        off = _make_offset_aot(self.cache, 100)
+        self.assertEqual(off(5), 105)
+        self.assertEqual(off(-100), 0)
+
+    def test_closure_shadows_module_global(self) -> None:
+        cap = _make_cap(self.cache, 50)
+        self.assertEqual(cap(5), 5)
+        # 50 (the captured factory argument), not the module global 1000
+        self.assertEqual(cap(5000), 50)
+
+    def test_closure_unbound_at_parse_time(self) -> None:
+        # the aot body is compiled while the captured variable is not
+        # assigned yet: its closure cell is empty
+        cache = spy.JitContext()
+        with self.assertRaises(spy.CompileError) as ctx:
+            _make_unbound(cache)
+        self.assertIn('not bound yet', str(ctx.exception))
 
 
 all_tests = [SpyExampleTest]
