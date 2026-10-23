@@ -1,33 +1,5 @@
 # Instructions
 
-This is a computational package for lattice cosmology.
-
-## Key Directories and Files
-* `symlat/` uses Python as the interactive language and leverages LLVM to JIT-compile high-performance computational kernels.
-* `lat/` implements lattice simulations for various models, such as single-field inflation.
-* The repository root contains a `run_tests.py` script for running the tests under `symlat/`. The testing framework is `unittest`, not `pytest`.
-
-For changes under any of these directories, the scope part in the commit message should always be the name of that directory, regardless of whether the changes are made in a subdirectory within or in the package root. For example, after modifying `symlat/jit/compile.py`, the scope should be `symlat`.
-
-## Coding Guidelines
-
-### Python specific
-* Prefer relative imports.
-* Always use type annotations.
-* Local variables should be assigned first, i.e., write
-```python
-a: Foo | None = None
-if foo():
-    a = bar()
-else:
-    a = baz()
-check(a)
-```
-instead of
-```python
-if foo():
-    a = bar()
-else:
-    a = baz()
-check(a)
-```
+* `inflat/`下面是Rust的格点计算程序包，具体的可执行程序位于`inflat/bin/`
+* `inflat/out/`下面是程序的输出，都是放在一起的。
+* Gauss bonnet的歌点计算的输出有两个，`inflat/gauss_bonnet/`和`inflat/gauss_bonnet.bak/`，**不要**动后面这个，这个是备份。

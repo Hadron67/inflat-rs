@@ -1,0 +1,54 @@
+The authors study USR inflation in scalar Gauss-Bonnet gravity with lattice
+simulations, compare the curvature power spectrum with linear theory, and use it
+to compute SIGWs and fit NANOGrav 15-year data. They conclude that lattice
+corrections improve the model's fit to the PTA signal. These results are
+interesting, but the paper has major problems that need to be addressed before I
+can recommend it for publication in PRD.
+
+MAJOR POINTS
+
+1. The Bayesian analysis is not described. The lattice spectra are computed only
+at 14 discrete values of $\alpha$ (Eqs.~40--41), yet the sampler explores
+$\alpha$ continuously. The manuscript does not explain how the lattice results
+enter the likelihood at arbitrary $\alpha$: what is interpolated, how, and how
+the spectrum is extended beyond the lattice $k$ range. The prior
+$\alpha-\alpha_0 \in [9000, 10200]$ contains only five lattice runs, and the
+posterior width ($\pm 100$) is smaller than the grid spacing where the posterior
+peaks. As presented, the analysis can be neither reproduced nor assessed. Since
+the main conclusion rests on it, this must be clarified, and the robustness of
+the posterior to the interpolation should be demonstrated.
+
+2. No lattice convergence tests are presented. The manuscript shows no tests
+with respect to resolution, box size, time step, or initial and final simulation
+times. These are needed to establish that the lattice spectra, and the reported
+deviations from linear theory, are numerically converged. The authors should
+present these tests at least for the largest-amplitude cases, which drive their
+conclusions.
+
+3. The SIGWs are not computed from the lattice, and this limitation is not
+discussed anywhere in the text. The lattice $\mathcal{P}_\zeta$ is inserted into
+the standard Gaussian formula (Eq.~52), which discards the non-Gaussianity of
+$\zeta$ captured by the $\delta N$ reconstruction. This should be stated clearly
+in the abstract and discussed in the text. Lattice computations of SIGWs that
+retain this information already exist, and some of them are accompanied with
+public codes (e.g.~arXiv:2604.03628, arXiv:2508.10812). They show
+$\mathcal{O}(1)$ non-Gaussian corrections to $\Omega_{\rm GW}$ even for mild
+non-Gaussianity, comparable to the effects the authors' conclusions rely on. The
+authors should state this limitation explicitly, including in the abstract, and
+discuss the possible role of non-Gaussianity, which is never mentioned in the
+manuscript.
+
+MINOR POINTS
+
+1. Fig.~2 shows $\alpha-\alpha_0 = 0.71\times10^4$, which is not one of the grid
+values in Eqs.~(40)--(41). Please clarify.
+
+2. Eq.~(5) seems to be missing a factor. From Eq.~(4), the condition should read
+$V' + (V^2/6)\,\xi' = 0$. Unlike Eq.~(5) as written, this is satisfied at
+$\phi_c$ with the parameters of Table~I.
+
+3. On p.~4, the authors justify the truncated Wigner approximation by large
+occupation numbers. This is correct, but it holds robustly only for
+super-horizon modes. At the start of the simulation all modes are sub-horizon,
+where the classical treatment relies instead on their evolution being
+approximately linear. The authors should comment on this.
