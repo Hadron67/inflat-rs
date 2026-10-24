@@ -53,5 +53,9 @@ name = "gauss_bonnet"
 path = "src/bin/gauss_bonnet.rs"
 
 [[bin]]
+name = "gauss_bonnet_convergence"
+path = "src/bin/gauss_bonnet_convergence.rs"
+
+[[bin]]
 name = "log_normal"
 path = "src/bin/log_normal.rs"

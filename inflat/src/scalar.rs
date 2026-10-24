@@ -2,20 +2,23 @@ use std::{
     collections::HashMap,
     f64::consts::PI,
     fmt::Debug,
+    fs,
     iter::zip,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use bincode::{Decode, Encode};
 use libm::{fmin, pow, sin, sqrt};
 use num_complex::ComplexFloat;
+use num_traits::Zero;
 use plotly::{
     Layout, Plot, Scatter,
     common::ExponentFormat,
     layout::{Axis, AxisType, LayoutGrid},
 };
 use random::Source;
+use rayon::prelude::*;
 use rustfft::{FftDirection, num_complex::Complex64};
 
 use crate::{
@@ -705,21 +708,225 @@ where
         if tm.load(Ordering::SeqCst) {
             reference_phi
         } else {
-            let dt = fmin(max_dt, (reference_phi - phi) / v_phi / (dt_segs as f64));
-            let mut state = solver.create_state(a, v_a, phi, v_phi);
-            solver.evaluate_to_phi(&mut state, dt, reference_phi);
+            let ret = zeta_at_site(
+                solver,
+                a,
+                v_a,
+                phi,
+                v_phi,
+                reference_phi,
+                dt_segs,
+                max_dt,
+            );
             sm(done_count.fetch_add(1, Ordering::SeqCst) + 1, total_count);
-            let ret = (state.scale_factor(solver) / a).ln();
-            if ret.is_infinite() || ret.is_nan() {
-                println!(
-                    "[warning/zeta] found NaN, a = {}, v_a = {}, phi = {}, v_phi = {}, final_state = {:?}",
-                    a, v_a, phi, v_phi, &state
-                );
-            }
             ret
         }
     }));
     !*terminated.get_mut()
+}
+
+/// Evolve a single lattice site to `reference_phi` and return the corresponding
+/// number of e-folds.
+fn zeta_at_site<Solver>(
+    solver: &Solver,
+    a: f64,
+    v_a: f64,
+    phi: f64,
+    v_phi: f64,
+    reference_phi: f64,
+    dt_segs: usize,
+    max_dt: f64,
+) -> f64
+where
+    Solver: BackgroundSolver + Kappa,
+    Solver::State: Clone + Phi<Solver> + PhiD<Solver> + ScaleFactor<Solver> + Debug,
+{
+    let dt = fmin(max_dt, (reference_phi - phi) / v_phi / (dt_segs as f64));
+    let mut state = solver.create_state(a, v_a, phi, v_phi);
+    solver.evaluate_to_phi(&mut state, dt, reference_phi);
+    let ret = (state.scale_factor(solver) / a).ln();
+    if ret.is_infinite() || ret.is_nan() {
+        println!(
+            "[warning/zeta] found NaN, a = {}, v_a = {}, phi = {}, v_phi = {}, final_state = {:?}",
+            a, v_a, phi, v_phi, &state
+        );
+    }
+    ret
+}
+
+#[derive(Encode, Decode)]
+struct ZetaCheckpoint<const D: usize> {
+    a: f64,
+    v_a: f64,
+    phi_mean: f64,
+    v_phi_mean: f64,
+    reference_phi: f64,
+    dt_segs: usize,
+    max_dt: f64,
+    dim: VecN<D, usize>,
+    done: usize,
+    zeta: BoxLattice<D, f64>,
+}
+
+impl<const D: usize> ZetaCheckpoint<D> {
+    fn matches(
+        &self,
+        a: f64,
+        v_a: f64,
+        phi_mean: f64,
+        v_phi_mean: f64,
+        reference_phi: f64,
+        dt_segs: usize,
+        max_dt: f64,
+        dim: &VecN<D, usize>,
+    ) -> bool {
+        fn close(a: f64, b: f64) -> bool {
+            (a - b).abs() <= 1e-6 * (1.0 + a.abs().max(b.abs()))
+        }
+        close(self.a, a)
+            && close(self.v_a, v_a)
+            && close(self.phi_mean, phi_mean)
+            && close(self.v_phi_mean, v_phi_mean)
+            && close(self.reference_phi, reference_phi)
+            && close(self.max_dt, max_dt)
+            && self.dt_segs == dt_segs
+            && self.dim == *dim
+            && self.done <= dim.product()
+    }
+}
+
+/// Same as [`construct_zeta_inplace`], but evaluates the lattice site by site in
+/// chunks and periodically writes the partially filled `zeta` field to
+/// `checkpoint_file`. If a matching checkpoint is found, the computation resumes
+/// from where it stopped.
+///
+/// The per-site delta-N integration is by far the most expensive part of the
+/// extraction (`O(N^3)` independent ODE solves), so losing it to an interruption
+/// is costly for large lattices.
+pub fn construct_zeta_checkpointed<const D: usize, Phi1, Phi2, Solver, M>(
+    checkpoint_file: &str,
+    a: f64,
+    v_a: f64,
+    phi: &Phi1,
+    v_phi: &Phi2,
+    reference_phi: f64,
+    dt_segs: usize,
+    max_dt: f64,
+    solver: &Solver,
+    step_monitor: M,
+) -> BoxLattice<D, f64>
+where
+    Phi1: Lattice<D, f64> + Sync,
+    Phi2: Lattice<D, f64> + Sync,
+    Solver: BackgroundSolver + Kappa + Sync,
+    Solver::State: Clone + Phi<Solver> + PhiD<Solver> + ScaleFactor<Solver> + Debug,
+    M: Fn(usize, usize) + Sync,
+{
+    let dim = *phi.dim();
+    let total = dim.product();
+    let phi_mean = phi.average();
+    let v_phi_mean = v_phi.average();
+
+    let mut zeta = BoxLattice::zeros(dim);
+    let mut done = 0usize;
+    match decode_from_file::<ZetaCheckpoint<D>, _>(checkpoint_file, BINCODE_CONFIG) {
+        Ok(checkpoint)
+            if checkpoint.matches(
+                a,
+                v_a,
+                phi_mean,
+                v_phi_mean,
+                reference_phi,
+                dt_segs,
+                max_dt,
+                &dim,
+            ) =>
+        {
+            println!(
+                "[zeta] resuming from checkpoint {} ({}/{})",
+                checkpoint_file, checkpoint.done, total
+            );
+            zeta = checkpoint.zeta;
+            done = checkpoint.done;
+        }
+        Ok(_) => println!(
+            "[zeta] checkpoint {} does not match the current state, starting over",
+            checkpoint_file
+        ),
+        Err(_) => println!("[zeta] no checkpoint at {}, starting from scratch", checkpoint_file),
+    }
+
+    // Trade-off between the checkpoint file size and how much work can be lost.
+    let chunk_size = (total / 256).clamp(1 << 12, 1 << 20);
+    let save_interval = Duration::from_secs(60);
+    let mut last_save = Instant::now();
+
+    let save = |zeta: &BoxLattice<D, f64>, done: usize| {
+        // Encode a copy of the field together with the progress marker atomically.
+        let checkpoint = ZetaCheckpoint {
+            a,
+            v_a,
+            phi_mean,
+            v_phi_mean,
+            reference_phi,
+            dt_segs,
+            max_dt,
+            dim,
+            done,
+            zeta: clone_lattice(zeta, dim),
+        };
+        let tmp_file = format!("{}.tmp", checkpoint_file);
+        match encode_to_file(&tmp_file, BINCODE_CONFIG, &checkpoint) {
+            Ok(()) => match fs::rename(&tmp_file, checkpoint_file) {
+                Ok(()) => println!("[zeta] checkpoint saved ({}/{})", done, total),
+                Err(err) => println!("[zeta] failed to move checkpoint into place: {}", err),
+            },
+            Err(err) => println!("[zeta] failed to save checkpoint: {}", err),
+        }
+    };
+
+    while done < total {
+        let end = (done + chunk_size).min(total);
+        let values = (done..end)
+            .into_par_iter()
+            .map(|index| {
+                let coord = dim.decode_coord(index);
+                zeta_at_site(
+                    solver,
+                    a,
+                    v_a,
+                    phi.get(index, &coord),
+                    v_phi.get(index, &coord),
+                    reference_phi,
+                    dt_segs,
+                    max_dt,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (index, value) in (done..end).zip(values) {
+            let coord = dim.decode_coord(index);
+            *zeta.get_mut(index, &coord) = value;
+        }
+        done = end;
+        step_monitor(done, total);
+        if done == total || last_save.elapsed() >= save_interval {
+            save(&zeta, done);
+            last_save = Instant::now();
+        }
+    }
+    zeta
+}
+
+fn clone_lattice<const D: usize, T>(
+    lattice: &BoxLattice<D, T>,
+    dim: VecN<D, usize>,
+) -> BoxLattice<D, T>
+where
+    T: Zero + Copy + Send + Sync,
+{
+    let mut ret = BoxLattice::zeros(dim);
+    ret.par_assign(lattice);
+    ret
 }
 
 pub fn construct_zeta<const D: usize, Phi1, Phi2, Solver, M>(
@@ -1097,8 +1304,8 @@ impl<const D: usize, S> LatticeInput<D, S> {
                         ));
                     }
                 }
-                let mut zeta = BoxLattice::zeros(self.lattice.size);
-                let zeta_spectrum = {
+                let zeta_checkpoint_file = format!("{}.zeta.checkpoint.bincode", out_file);
+                let (zeta, zeta_spectrum) = {
                     let percentage = AtomicUsize::new(0);
                     let denom = 100usize;
                     // let reference_phi_old = simulator.field.phi.as_ref().map(|f| f[0]).max().1;
@@ -1117,8 +1324,8 @@ impl<const D: usize, S> LatticeInput<D, S> {
                         "[lattice] calculating spectrum, reference_phi = {}",
                         reference_phi
                     );
-                    construct_zeta_inplace(
-                        &mut zeta,
+                    let zeta = construct_zeta_checkpointed(
+                        &zeta_checkpoint_file,
                         lattice_state.scale_factor(input),
                         lattice_state.v_scale_factor(input),
                         &lattice_state.phi_field(input),
@@ -1136,10 +1343,11 @@ impl<const D: usize, S> LatticeInput<D, S> {
                             }
                         },
                     );
-                    spectrum_with_scratch(&zeta, &self.lattice, &mut spectrum_scratch)
+                    let spectrum = spectrum_with_scratch(&zeta, &self.lattice, &mut spectrum_scratch)
                         .iter()
                         .map(|f| f.1)
-                        .collect()
+                        .collect();
+                    (zeta, spectrum)
                 };
                 LatticeOutputData {
                     measurables,

@@ -93,7 +93,37 @@ pub trait BackgroundSolver {
         Self: Kappa,
     {
         while (phi_goal - state.phi(self)) * state.v_phi(self).signum() > 0.0 {
+            let prev = state.clone();
             self.update(state, dt);
+            let sign = (state.phi(self) - prev.phi(self)).signum();
+            if sign == 0.0 {
+                // The state is stuck (e.g. v_phi == 0), stop to avoid looping forever.
+                break;
+            }
+            if (phi_goal - state.phi(self)) * sign <= 0.0 {
+                // The last step crossed the target. Stepping a full dt past phi_goal
+                // overshoots it, and the size of the overshoot depends on how many
+                // steps each site happened to take. In the delta N formalism this
+                // becomes a site-dependent error of order H * dt, which shows up as
+                // spurious high-k power in the extracted spectrum. Shrink the last
+                // step so that the endpoint lands on phi_goal.
+                let mut lo = 0.0;
+                let mut hi = dt;
+                // phi is monotonic in the step size over a single step, so bisection
+                // converges. 16 iterations leave an overshoot of < dt / 65536.
+                for _ in 0..16 {
+                    let mid = 0.5 * (lo + hi);
+                    let mut trial = prev.clone();
+                    self.update(&mut trial, mid);
+                    if (phi_goal - trial.phi(self)) * sign > 0.0 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                *state = prev;
+                self.update(state, 0.5 * (lo + hi));
+            }
         }
     }
 }
@@ -2291,10 +2321,49 @@ where
 mod tests {
     use std::f64::consts::PI;
 
-    use crate::background::spectrum_factor;
+    use crate::background::{BackgroundSolver, spectrum_factor};
 
     #[test]
     fn spec_factor() {
         assert_approx_eq::assert_approx_eq!(spectrum_factor(3), 1.0 / 2.0 / PI / PI);
+    }
+
+    #[test]
+    fn evaluate_to_phi_lands_on_target() {
+        use crate::c2fn::C2Fn;
+
+        struct ConstantPotential;
+
+        impl C2Fn<f64> for ConstantPotential {
+            type Output = f64;
+
+            fn value(&self, _: f64) -> f64 {
+                1.0
+            }
+
+            fn value_d(&self, _: f64) -> f64 {
+                0.0
+            }
+
+            fn value_dd(&self, _: f64) -> f64 {
+                0.0
+            }
+        }
+
+        let input = super::BackgroundStateInput {
+            kappa: 1.0,
+            potential: ConstantPotential,
+        };
+        let mut state = input.create_state(1.0, 0.0, 0.0, -0.1);
+        let goal = -0.02;
+        // Deliberately coarse: the first step reaches phi ~= -0.059, overshooting the
+        // target, so a naive loop would stop there instead of at goal.
+        input.evaluate_to_phi(&mut state, 1.0, goal);
+        assert!(
+            (state.phi - goal).abs() < 1e-5,
+            "phi = {}, expected {}",
+            state.phi,
+            goal
+        );
     }
 }

@@ -985,7 +985,7 @@ where
     E: Encode,
     C: Config,
 {
-    encode_into_std_write(encode, &mut BufWriter::new(File::open(file)?), config)?;
+    encode_into_std_write(encode, &mut BufWriter::new(File::create(file)?), config)?;
     Ok(())
 }
 
