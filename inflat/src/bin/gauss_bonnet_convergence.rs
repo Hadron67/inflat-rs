@@ -208,6 +208,16 @@ fn configs() -> Vec<Config> {
             seed: BASELINE_SEED,
         },
         Config {
+            name: "dt1_n64",
+            group: "timestep",
+            n: 64,
+            k0: BASELINE_K0,
+            dt: 1.0,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
+        Config {
             name: "dt4_n128",
             group: "timestep",
             n: 128,
@@ -543,6 +553,11 @@ fn comparison_grid(ka: &[f64], kb: &[f64]) -> Vec<f64> {
 }
 
 fn rel_curve(ka: &[f64], pa: &[f64], kb: &[f64], pb: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+    // Drop the first and last bins: the lowest shell is coarse and the highest
+    // bin is affected by the lattice UV cutoff.  These are also removed from
+    // the paper figures.
+    let (ka, pa) = trim(ka, pa);
+    let (kb, pb) = trim(kb, pb);
     let grid = comparison_grid(ka, kb);
     if grid.len() < 2 {
         return None;
@@ -838,12 +853,13 @@ fn color_for(name: &str) -> &'static str {
         "n128" => "#d62728",
         "box_n64_k0_6p25e-9" => "#9467bd",
         "box_n128_k0_3p125e-9" => "#8c564b",
-        "dt4_n128" => "#2ca02c",
-        "dt8_n128" => "#98dfa2",
+        "dt1_n64" => "#2ca02c",
+        "dt4_n128" => "#98df8a",
+        "dt8_n128" => "#bcbd22",
         "sub2_n128" => "#ff7f0e",
         "super500_n128" => "#e377c2",
         "seed11_n128" => "#17becf",
-        "seed12_n128" => "#bcbd22",
+        "seed12_n128" => "#aec7e8",
         _ => "#7f7f7f",
     }
 }

@@ -126,6 +126,64 @@ pub trait BackgroundSolver {
             }
         }
     }
+
+    /// March `state` until `phi` reaches `phi_goal`, moving either forward or
+    /// backward in time. `dt` is a positive step magnitude.
+    ///
+    /// Unlike [`evaluate_to_phi`], this works for sites that have already rolled
+    /// past the target: they are evolved backwards to the time when `phi` was
+    /// equal to `phi_goal`. Returns `false` if the target is never reached (for
+    /// example because the field turns around first), in which case the caller
+    /// should not trust the resulting `ln a`.
+    fn evaluate_to_phi_directed(
+        &self,
+        state: &mut Self::State,
+        dt: f64,
+        phi_goal: f64,
+        forward: bool,
+    ) -> bool
+    where
+        Self::State: Clone + Phi<Self> + PhiD<Self> + Debug,
+        Self: Kappa,
+    {
+        let sign = (phi_goal - state.phi(self)).signum();
+        if sign == 0.0 {
+            return true;
+        }
+        let step = if forward { dt } else { -dt };
+        loop {
+            let dist = (phi_goal - state.phi(self)) * sign;
+            if dist <= 0.0 {
+                return true;
+            }
+            let prev = state.clone();
+            self.update(state, step);
+            let new_dist = (phi_goal - state.phi(self)) * sign;
+            if new_dist <= 0.0 {
+                // Land exactly on phi_goal instead of overshooting by up to one step.
+                let mut lo = 0.0;
+                let mut hi = dt;
+                for _ in 0..16 {
+                    let mid = 0.5 * (lo + hi);
+                    let mut trial = prev.clone();
+                    self.update(&mut trial, if forward { mid } else { -mid });
+                    if (phi_goal - trial.phi(self)) * sign > 0.0 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                *state = prev;
+                let partial = 0.5 * (lo + hi);
+                self.update(state, if forward { partial } else { -partial });
+                return true;
+            }
+            if new_dist >= dist {
+                // The field turned around (or is stuck) before reaching the target.
+                return false;
+            }
+        }
+    }
 }
 
 pub trait Interpolate {

@@ -701,14 +701,16 @@ where
 {
     let total_count = phi.dim().product();
     let done_count = AtomicUsize::new(0);
+    let mut failed_count = AtomicUsize::new(0);
     let mut terminated = AtomicBool::new(false);
     let sm = &step_monitor;
     let tm = &terminated;
+    let fc = &failed_count;
     zeta.par_assign(&phi.as_ref().zip(v_phi.as_ref()).map(move |(phi, v_phi)| {
         if tm.load(Ordering::SeqCst) {
             reference_phi
         } else {
-            let ret = zeta_at_site(
+            let (ret, ok) = zeta_at_site(
                 solver,
                 a,
                 v_a,
@@ -718,15 +720,26 @@ where
                 dt_segs,
                 max_dt,
             );
+            if !ok {
+                fc.fetch_add(1, Ordering::SeqCst);
+            }
             sm(done_count.fetch_add(1, Ordering::SeqCst) + 1, total_count);
             ret
         }
     }));
-    !*terminated.get_mut()
+    let failed = *failed_count.get_mut();
+    if failed > 0 {
+        println!(
+            "[warning/zeta] {} / {} sites did not reach reference_phi",
+            failed, total_count
+        );
+    }
+    !*terminated.get_mut() && failed == 0
 }
 
 /// Evolve a single lattice site to `reference_phi` and return the corresponding
-/// number of e-folds.
+/// number of e-folds together with a success flag.
+#[allow(clippy::too_many_arguments)]
 fn zeta_at_site<Solver>(
     solver: &Solver,
     a: f64,
@@ -736,26 +749,42 @@ fn zeta_at_site<Solver>(
     reference_phi: f64,
     dt_segs: usize,
     max_dt: f64,
-) -> f64
+) -> (f64, bool)
 where
     Solver: BackgroundSolver + Kappa,
     Solver::State: Clone + Phi<Solver> + PhiD<Solver> + ScaleFactor<Solver> + Debug,
 {
-    let dt = fmin(max_dt, (reference_phi - phi) / v_phi / (dt_segs as f64));
+    let dist = reference_phi - phi;
+    if dist == 0.0 {
+        return (0.0, true);
+    }
+    // If the site has already rolled past the target, evolve it backwards in
+    // time to the moment where phi was equal to reference_phi.
+    let forward = dist * v_phi > 0.0;
+    let dt = fmin(
+        max_dt,
+        dist.abs() / v_phi.abs() / (dt_segs as f64),
+    );
     let mut state = solver.create_state(a, v_a, phi, v_phi);
-    solver.evaluate_to_phi(&mut state, dt, reference_phi);
+    let ok = solver.evaluate_to_phi_directed(&mut state, dt, reference_phi, forward);
     let ret = (state.scale_factor(solver) / a).ln();
     if ret.is_infinite() || ret.is_nan() {
         println!(
             "[warning/zeta] found NaN, a = {}, v_a = {}, phi = {}, v_phi = {}, final_state = {:?}",
             a, v_a, phi, v_phi, &state
         );
+        return (ret, false);
     }
-    ret
+    (ret, ok)
 }
+
+/// Bumped whenever the per-site zeta algorithm changes, so that stale
+/// checkpoints are ignored.
+const ZETA_ALGORITHM_VERSION: u32 = 2;
 
 #[derive(Encode, Decode)]
 struct ZetaCheckpoint<const D: usize> {
+    version: u32,
     a: f64,
     v_a: f64,
     phi_mean: f64,
@@ -784,6 +813,7 @@ impl<const D: usize> ZetaCheckpoint<D> {
             (a - b).abs() <= 1e-6 * (1.0 + a.abs().max(b.abs()))
         }
         close(self.a, a)
+            && self.version == ZETA_ALGORITHM_VERSION
             && close(self.v_a, v_a)
             && close(self.phi_mean, phi_mean)
             && close(self.v_phi_mean, v_phi_mean)
@@ -860,10 +890,12 @@ where
     let chunk_size = (total / 256).clamp(1 << 12, 1 << 20);
     let save_interval = Duration::from_secs(60);
     let mut last_save = Instant::now();
+    let mut failed = 0usize;
 
     let save = |zeta: &BoxLattice<D, f64>, done: usize| {
         // Encode a copy of the field together with the progress marker atomically.
         let checkpoint = ZetaCheckpoint {
+            version: ZETA_ALGORITHM_VERSION,
             a,
             v_a,
             phi_mean,
@@ -903,9 +935,20 @@ where
                 )
             })
             .collect::<Vec<_>>();
-        for (index, value) in (done..end).zip(values) {
+        let mut chunk_failed = 0usize;
+        for (index, (value, ok)) in (done..end).zip(values) {
+            if !ok {
+                chunk_failed += 1;
+            }
             let coord = dim.decode_coord(index);
             *zeta.get_mut(index, &coord) = value;
+        }
+        failed += chunk_failed;
+        if chunk_failed > 0 {
+            println!(
+                "[warning/zeta] {} sites in {}-{} did not reach reference_phi",
+                chunk_failed, done, end
+            );
         }
         done = end;
         step_monitor(done, total);
@@ -913,6 +956,12 @@ where
             save(&zeta, done);
             last_save = Instant::now();
         }
+    }
+    if failed > 0 {
+        println!(
+            "[warning/zeta] {} / {} sites did not reach reference_phi in total",
+            failed, total
+        );
     }
     zeta
 }
