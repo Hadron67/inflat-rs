@@ -59,6 +59,11 @@ const BASELINE_SEED: u64 = 10;
 const SPECTRUM_COUNT: usize = 10;
 const MAX_SUMMARY_MEASURABLES: usize = 10_000;
 
+// Well-resolved comparison window for the relative-difference diagnostics.
+// The highest-k bins are affected by the finite UV cutoff, especially at N=64.
+const COMPARISON_K_MIN: f64 = 1e-8;
+const COMPARISON_K_MAX_FRACTION: f64 = 0.7;
+
 struct NaturalInflationPotential {
     pub lambda4: f64,
     pub f: f64,
@@ -180,6 +185,16 @@ fn configs() -> Vec<Config> {
             name: "n128",
             group: "resolution",
             n: 128,
+            k0: BASELINE_K0,
+            dt: BASELINE_DT,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
+        Config {
+            name: "n300",
+            group: "resolution",
+            n: 300,
             k0: BASELINE_K0,
             dt: BASELINE_DT,
             sub: BASELINE_SUB,
@@ -544,8 +559,8 @@ fn comparison_grid(ka: &[f64], kb: &[f64]) -> Vec<f64> {
     if ka.len() < 2 || kb.len() < 2 {
         return Vec::new();
     }
-    let lo = ka[0].max(kb[0]);
-    let hi = ka[ka.len() - 1].min(kb[kb.len() - 1]) * 0.9;
+    let lo = ka[0].max(kb[0]).max(COMPARISON_K_MIN);
+    let hi = COMPARISON_K_MAX_FRACTION * ka[ka.len() - 1].min(kb[kb.len() - 1]);
     if !(hi > lo) {
         return Vec::new();
     }
@@ -598,13 +613,15 @@ fn rel_stats(ka: &[f64], pa: &[f64], kb: &[f64], pb: &[f64]) -> Option<RelStats>
 }
 
 fn corr_stats(l: &Loaded) -> RelStats {
-    let (_, p) = trim(&l.k, &l.p);
+    let (k, p) = trim(&l.k, &l.p);
     let (_, p_lin) = trim(&l.k, &l.p_lin);
-    let corr = p
-        .iter()
-        .zip(p_lin)
-        .map(|(p, p_lin)| p / p_lin - 1.0)
-        .collect::<Vec<_>>();
+    let k_max = COMPARISON_K_MAX_FRACTION * k[k.len() - 1];
+    let mut corr = Vec::new();
+    for i in 0..k.len() {
+        if k[i] >= COMPARISON_K_MIN && k[i] <= k_max {
+            corr.push(p[i] / p_lin[i] - 1.0);
+        }
+    }
     stats(&corr)
 }
 
@@ -851,6 +868,7 @@ fn color_for(name: &str) -> &'static str {
     match name {
         "n64" => "#1f77b4",
         "n128" => "#d62728",
+        "n300" => "#ff7f0e",
         "box_n64_k0_6p25e-9" => "#9467bd",
         "box_n128_k0_3p125e-9" => "#8c564b",
         "dt1_n64" => "#2ca02c",
@@ -1090,10 +1108,8 @@ fn write_csv(path: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Result<()> 
     let mut file = File::create(path)?;
     writeln!(
         file,
-        "config,group,N,k0_Hz,dt,sub,super,seed,L_Mpc,dx_Mpc,L_pc,dx_pc,k_min_Hz,k_max_Hz,H_start_dt,peak_k_Hz,peak_P,peak_P_over_lin,corr_max,corr_median,rel_baseline_max,rel_baseline_median,rel_baseline_rms,rel_n128_max,rel_n128_median,rel_n128_rms,sigw_rel_baseline_max,sigw_rel_baseline_median"
+        "config,group,N,k0_Hz,dt,sub,super,seed,L_Mpc,dx_Mpc,L_pc,dx_pc,k_min_Hz,k_max_Hz,H_start_dt,peak_k_Hz,peak_P,peak_P_over_lin,corr_max,corr_median,rel_baseline_max,rel_baseline_median,rel_baseline_rms,rel_sameN_max,rel_sameN_median,rel_sameN_rms,sigw_rel_baseline_max,sigw_rel_baseline_median"
     )?;
-
-    let reference = loaded.iter().find(|l| l.cfg.name == "n128");
 
     for l in loaded {
         let corr = corr_stats(l);
@@ -1102,9 +1118,23 @@ fn write_csv(path: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Result<()> 
         } else {
             rel_stats(&l.k, &l.p, &baseline.lat_k, &baseline.lat_p)
         };
-        let rel_n128 = reference
-            .filter(|r| r.cfg.name != l.cfg.name)
-            .and_then(|r| rel_stats(&l.k, &l.p, &r.k, &r.p));
+        let same_n = if matches!(l.cfg.group, "timestep" | "times" | "seed") {
+            let reference_name = match l.cfg.n {
+                64 => "n64",
+                128 => "n128",
+                _ => "",
+            };
+            if l.cfg.name == reference_name {
+                None
+            } else {
+                loaded
+                    .iter()
+                    .find(|r| r.cfg.name == reference_name)
+            }
+        } else {
+            None
+        };
+        let rel_same_n = same_n.and_then(|r| rel_stats(&l.k, &l.p, &r.k, &r.p));
         let sigw_rel = if baseline.lat_sigw.is_empty() {
             None
         } else {
@@ -1137,9 +1167,9 @@ fn write_csv(path: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Result<()> 
             opt(rel_baseline.map(|s| s.max)),
             opt(rel_baseline.map(|s| s.median)),
             opt(rel_baseline.map(|s| s.rms)),
-            opt(rel_n128.map(|s| s.max)),
-            opt(rel_n128.map(|s| s.median)),
-            opt(rel_n128.map(|s| s.rms)),
+            opt(rel_same_n.map(|s| s.max)),
+            opt(rel_same_n.map(|s| s.median)),
+            opt(rel_same_n.map(|s| s.rms)),
             opt(sigw_rel.map(|s| s.max)),
             opt(sigw_rel.map(|s| s.median)),
         )?;
@@ -1209,14 +1239,29 @@ fn write_outputs(case_dir: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Res
             continue;
         }
 
-        // For time-step and tolerance tests the meaningful same-N reference is
-        // the N=128 baseline, not the production N=200 run.
+        // For time-step and tolerance tests the meaningful reference is the
+        // same-N run (n64 or n128), not the production N=200 baseline, and not
+        // a run with a different N.
         if matches!(group, "timestep" | "times" | "seed") {
-            if let Some(reference) = loaded.iter().find(|l| l.cfg.name == "n128") {
-                if !include.iter().any(|l| l.cfg.name == reference.cfg.name) {
-                    include.push(reference);
+            let mut references: Vec<&Loaded> = Vec::new();
+            for l in &include {
+                let reference_name = match l.cfg.n {
+                    64 => "n64",
+                    128 => "n128",
+                    _ => continue,
+                };
+                if let Some(reference) = loaded.iter().find(|r| r.cfg.name == reference_name)
+                {
+                    if !include.iter().any(|x| x.cfg.name == reference.cfg.name)
+                        && !references
+                            .iter()
+                            .any(|x| x.cfg.name == reference.cfg.name)
+                    {
+                        references.push(reference);
+                    }
                 }
             }
+            include.extend(references);
         }
 
         write_spectrum_plot(
