@@ -357,6 +357,7 @@ struct Args {
     configs: Vec<String>,
     xi0: f64,
     baseline: Option<PathBuf>,
+    dump_background: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -368,6 +369,7 @@ fn parse_args() -> Result<Args> {
         configs: Vec::new(),
         xi0: XI0_DEFAULT,
         baseline: None,
+        dump_background: None,
     };
 
     let mut it = env::args().skip(1);
@@ -392,6 +394,11 @@ fn parse_args() -> Result<Args> {
             "--baseline" => {
                 args.baseline = Some(PathBuf::from(
                     it.next().context("--baseline requires a path")?,
+                ))
+            }
+            "--dump-background" => {
+                args.dump_background = Some(PathBuf::from(
+                    it.next().context("--dump-background requires a path")?,
                 ))
             }
             "--help" | "-h" => {
@@ -423,6 +430,7 @@ fn print_help() {
            --config <name>       run/load a single named configuration (repeatable)\n\
            --xi0 <value>         alpha value (default {XI0_DEFAULT:e})\n\
            --baseline <path>     existing baseline npz (default inflat/out/gauss_bonnet.bak/case1-final.output.npz)\n\
+           --dump-background <path>  write downsampled background ln a, H, phi, v_phi and exit\n\
            --list                print the test plan and exit\n\
            --help                print this help"
     );
@@ -1312,10 +1320,45 @@ fn write_outputs(case_dir: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Res
     Ok(())
 }
 
+fn dump_background(
+    path: &Path,
+    background: &[GaussBonnetBackgroundState],
+    k_star: f64,
+) -> Result<()> {
+    // Same start condition as LatticeInput::from_background_and_k_normalized
+    // for the resolution runs (k0 = BASELINE_K0, sub = BASELINE_SUB).
+    let starting_horizon = BASELINE_K0 / k_star / BASELINE_SUB;
+    let start = background
+        .iter()
+        .position(|state| state.v_a >= starting_horizon)
+        .context("no background state reaches the lattice starting horizon")?;
+    let a_start = background[start].a;
+
+    let stride = (background.len() / MAX_SUMMARY_MEASURABLES).max(1);
+    let mut ln_a = Vec::new();
+    let mut h = Vec::new();
+    let mut phi = Vec::new();
+    let mut v_phi = Vec::new();
+    for state in background[start..].iter().step_by(stride) {
+        ln_a.push((state.a / a_start).ln());
+        h.push(state.v_a / state.a);
+        phi.push(state.phi);
+        v_phi.push(state.v_phi);
+    }
+
+    let mut npz = NpzWriter::new(BufWriter::new(File::create(path)?));
+    npz.add_array("ln_a", &Array1::from_vec(ln_a))?;
+    npz.add_array("H", &Array1::from_vec(h))?;
+    npz.add_array("phi", &Array1::from_vec(phi))?;
+    npz.add_array("v_phi", &Array1::from_vec(v_phi))?;
+    npz.finish()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = parse_args()?;
 
-    if args.list || (!args.run && !args.plot_only) {
+    if args.list || (args.dump_background.is_none() && !args.run && !args.plot_only) {
         print_plan();
         return Ok(());
     }
@@ -1359,6 +1402,13 @@ fn main() -> Result<()> {
 
     let all = configs();
     let selected = select_configs(&all, &args);
+
+    if let Some(path) = &args.dump_background {
+        dump_background(path, &background, baseline.k_star)?;
+        println!("[background] wrote {}", path.display());
+        return Ok(());
+    }
+
     if selected.is_empty() {
         bail!("no configuration selected");
     }
