@@ -201,6 +201,27 @@ fn configs() -> Vec<Config> {
             sup: BASELINE_SUPER,
             seed: BASELINE_SEED,
         },
+        Config {
+            name: "n400",
+            group: "resolution",
+            n: 400,
+            k0: BASELINE_K0,
+            dt: BASELINE_DT,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
+        // Fixed Delta x, smaller boxes: N * k0 = 200 * 2e-9.
+        Config {
+            name: "n512",
+            group: "resolution",
+            n: 512,
+            k0: BASELINE_K0,
+            dt: BASELINE_DT,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
         // Fixed Delta x, smaller boxes: N * k0 = 200 * 2e-9.
         Config {
             name: "box_n128_k0_3p125e-9",
@@ -869,6 +890,8 @@ fn color_for(name: &str) -> &'static str {
         "n64" => "#1f77b4",
         "n128" => "#d62728",
         "n300" => "#ff7f0e",
+        "n400" => "#9467bd",
+        "n512" => "#2ca02c",
         "box_n64_k0_6p25e-9" => "#9467bd",
         "box_n128_k0_3p125e-9" => "#8c564b",
         "dt1_n64" => "#2ca02c",

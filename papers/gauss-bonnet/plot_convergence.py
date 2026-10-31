@@ -3,7 +3,8 @@
 
 Two figures are produced:
 
-  * convergence-resolution: N=64, N=128 and the existing N=200 baseline.
+  * convergence-resolution: N=64, N=128, N=300, N=400 and the existing N=200
+    baseline.
   * convergence-dt:         N=64 with dt=1 and dt=2.
 
 SIGW is intentionally not plotted.  The current `sigw_2_spectrum` truncates
@@ -138,7 +139,7 @@ def add_uv_legend(ax):
     )
 
 
-def make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300):
+def make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300, n400):
     fig, (ax1, ax2) = plt.subplots(
         2,
         1,
@@ -151,17 +152,21 @@ def make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300):
     n64_k, n64_p = trim(n64[0], n64[1])
     n128_k, n128_p = trim(n128[0], n128[1])
     n300_k, n300_p = trim(n300[0], n300[1])
+    n400_k, n400_p = trim(n400[0], n400[1])
 
-    k_lo = min(base_k_t[0], n64_k[0], n128_k[0], n300_k[0]) * 0.95
-    k_hi_raw = max(base_k_t[-1], n64_k[-1], n128_k[-1], n300_k[-1]) * 1.05
+    k_lo = min(base_k_t[0], n64_k[0], n128_k[0], n300_k[0], n400_k[0]) * 0.95
+    k_hi_raw = (
+        max(base_k_t[-1], n64_k[-1], n128_k[-1], n300_k[-1], n400_k[-1]) * 1.05
+    )
     k_uv = common_hi(
         (base_k, base_p),
         (n64[0], n64[1]),
         (n128[0], n128[1]),
         (n300[0], n300[1]),
+        (n400[0], n400[1]),
     )
     # Show the peak and the beginning of the UV region, but do not let the
-    # much longer N=300 tail compress the comparison window.
+    # much longer N=400 tail compress the comparison window.
     k_hi = min(k_hi_raw, 2.0 * k_uv)
 
     add_uv_region(ax1, ax2, k_uv, k_hi)
@@ -176,6 +181,7 @@ def make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300):
         label="linear",
     )
     ax1.loglog(base_k_t, base_p_t, color="k", lw=1.8, label=r"$N=200$ (baseline)")
+    ax1.loglog(n400_k, n400_p, color="C2", lw=1.8, label=r"$N=400$")
     ax1.loglog(n300_k, n300_p, color="C4", lw=1.8, label=r"$N=300$")
     ax1.loglog(n128_k, n128_p, color="C3", lw=1.8, label=r"$N=128$")
     ax1.loglog(n64_k, n64_p, color="C0", lw=1.8, label=r"$N=64$")
@@ -188,6 +194,7 @@ def make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300):
     style_log_xaxis(ax1)
 
     for data, color, label in [
+        (n400, "C2", r"$N=400$ / baseline"),
         (n300, "C4", r"$N=300$ / baseline"),
         (n128, "C3", r"$N=128$ / baseline"),
         (n64, "C0", r"$N=64$ / baseline"),
@@ -199,7 +206,7 @@ def make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300):
     ax2.set_xlabel(r"$k\ [\mathrm{Hz}]$")
     ax2.set_ylabel(r"$P_\zeta/P_{\zeta,\rm base}-1$")
     ax2.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
-    ax2.legend(loc="upper left", frameon=False, ncol=3, fontsize=7.5)
+    ax2.legend(loc="upper left", frameon=False, ncol=2, fontsize=7.5)
     style_axes(ax2)
     style_log_xaxis(ax2)
 
@@ -285,9 +292,10 @@ def main():
     n64 = load_case("n64")
     n128 = load_case("n128")
     n300 = load_case("n300")
+    n400 = load_case("n400")
     dt1 = load_case("dt1_n64")
 
-    make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300)
+    make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300, n400)
     make_dt_plot(n64, dt1)
 
     hi_res = common_hi(
@@ -295,6 +303,7 @@ def main():
         (n64[0], n64[1]),
         (n128[0], n128[1]),
         (n300[0], n300[1]),
+        (n400[0], n400[1]),
     )
     hi_dt = common_hi((n64[0], n64[1]), (dt1[0], dt1[1]))
 
@@ -303,6 +312,7 @@ def main():
     report("N=64 vs baseline", n64[0], n64[1], base_k, base_p, hi=hi_res)
     report("N=128 vs baseline", n128[0], n128[1], base_k, base_p, hi=hi_res)
     report("N=300 vs baseline", n300[0], n300[1], base_k, base_p, hi=hi_res)
+    report("N=400 vs baseline", n400[0], n400[1], base_k, base_p, hi=hi_res)
     report("N=64 dt=1 vs dt=2", dt1[0], dt1[1], n64[0], n64[1], hi=hi_dt)
 
     print(f"wrote {FIG_DIR / 'convergence-resolution.pdf'}")

@@ -31,6 +31,7 @@ $$
 - $N=128$，$\Delta t=2.0$（`reex-zerotier`）
 - $N=300$，$\Delta t=2.0$（`reex-zerotier`）
 - $N=64$，$\Delta t=1.0$（`reex-zerotier`）
+- $N=400$，$\Delta t=2.0$（`reex-zerotier`，分辨率）
 
 N=200 的生产结果直接复用 `inflat/out/gauss_bonnet.bak/case1-final.output.npz`，没有重跑，也没有覆盖旧数据。
 
@@ -294,6 +295,8 @@ seed    = 10
 | `n64` | resolution | 64 | 2e-9 | 2.0 | 1.3 | 200 | 10 |
 | `n128` | resolution | 128 | 2e-9 | 2.0 | 1.3 | 200 | 10 |
 | `n300` | resolution | 300 | 2e-9 | 2.0 | 1.3 | 200 | 10 |
+| `n400` | resolution | 400 | 2e-9 | 2.0 | 1.3 | 200 | 10 |
+| `n512` | resolution | 512 | 2e-9 | 2.0 | 1.3 | 200 | 10 |
 | `box_n128_k0_3p125e-9` | box | 128 | 3.125e-9 | 2.0 | 1.3 | 200 | 10 |
 | `box_n64_k0_6p25e-9` | box | 64 | 6.25e-9 | 2.0 | 1.3 | 200 | 10 |
 | `dt1_n64` | timestep | 64 | 2e-9 | 1.0 | 1.3 | 200 | 10 |
@@ -305,6 +308,8 @@ seed    = 10
 | `seed12_n128` | seed | 128 | 2e-9 | 2.0 | 1.3 | 200 | 12 |
 
 `box_n128_k0_3p125e-9` 和 `box_n64_k0_6p25e-9` 保持 $Nk_0=4\times10^{-7}$，即固定 $\Delta x$，盒子分别只有 baseline 的 $1/1.5625$ 和 $1/3.125$。它们测试的是更小的盒子，不是更大的盒子。更大的盒子需要 $N>200$。
+
+`n512` 已加入配置但尚未运行（外推约 9 天）。
 
 #### CLI
 
@@ -528,6 +533,7 @@ ssh -t reex-zerotier 'screen -r gb_conv'
 | `n64` | 本地 | 64 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
 | `n128` | `reex-zerotier` | 128 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
 | `n300` | `reex-zerotier` | 300 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
+| `n400` | `reex-zerotier` | 400 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成（未收敛，见 4.2） |
 | `dt1_n64` | `reex-zerotier` | 64 | 2e-9 | 1.0 | 1.3 | 200 | 10 | 完成 |
 
 本次实测耗时（仅供粗略参考，实际以日志里的 ETA 为准）：
@@ -538,6 +544,7 @@ ssh -t reex-zerotier 'screen -r gb_conv'
 | `dt1_n64` | `reex-zerotier` | 约 3.3 h |
 | `n128` | `reex-zerotier` | 约 4.5 h |
 | `n300` | `reex-zerotier` | 约 43 h |
+| `n400` | `reex-zerotier` | 约 91 h（约 3.8 天） |
 
 N=64 的开销有较多固定/并行效率因素，不建议直接用 $N^3$ 外推到更大 N；提交后先看 `[lattice] eta remaining` 的实际估计。
 
@@ -550,6 +557,7 @@ N=64 的开销有较多固定/并行效率因素，不建议直接用 $N^3$ 外�
 | `dt1_n64` | $2.503\times10^{-8}$ | $8.060\times10^{-2}$ | $1.408$ |
 | `n128` | $2.385\times10^{-8}$ | $7.654\times10^{-2}$ | $1.323$ |
 | `n300` | $2.805\times10^{-8}$ | $7.739\times10^{-2}$ | $1.450$ |
+| `n400` | $2.017\times10^{-8}$ | $6.650\times10^{-2}$ | $1.217$ |
 
 ### 4.2 收敛指标
 
@@ -566,6 +574,7 @@ $$
 | N=64 vs baseline | 8.58% | 42.7% |
 | N=128 vs baseline | 2.11% | 8.62% |
 | N=300 vs baseline | 2.81% | 10.79% |
+| N=400 vs baseline | 10.41% | 17.35% |
 | N=64 dt=1 vs dt=2 | 2.33% | 11.99% |
 
 解释：
@@ -574,16 +583,24 @@ $$
 - N=300 的中位/最大差异没有单调优于 N=128（2.81% vs 2.11%），但两者在该窗口内已经非常接近；剩余差异与随机实现/其他系统误差同量级，不能简单解读为 N=300 更差。
 - N=64 的偏差在窗口高 $k$ 端明显增大。
 - N=64 的 $\Delta t=1$ 与 $\Delta t=2$ 在大部分区间只差 1–3%，仅在接近 UV 截断处增大到约 12%，说明 $\Delta t=2$ 对 N=64 已基本收敛。
-- 图中分辨率对比已加入 N=300；为了不让 N=300 更长的尾部压缩比较窗口，上面板横轴截到 $2\times$ 共同窗口（约 $9.9\times10^{-8}$ Hz），灰色 UV 区域只展示到该处。
+- **N=400 没有继续收敛**：共同窗口内中位 10.41%、最大 17.35%，明显差于 N=128/N=300 的 2–3%；峰值也最低（$6.65\times10^{-2}$），峰位移到 $2.02\times10^{-8}$ Hz。
+- N=400 的演化时间反而最长（末态 $\ln a=10.98$，N=300 为 10.69，N=128 为 9.84），所以整体偏低不是「演化时间不够」造成的；更可能是随机实现或尚未识别的系统误差。
+- 用 `plot_evolution.py` 检查 `spectrums`：窗口内模式在 $\ln a\approx1.9$–$3.5$ 出视界，末态 $k/(aH)\sim10^{-4}$–$10^{-3}$；但线性化估计在最后两三个 e-fold 仍上漂约 20%（N=300 同样如此），因此不能仅凭中期快照证明 $\zeta$ 已冻结。
+- 图中分辨率对比已加入 N=300 与 N=400；为了不让 N=400 更长的尾部压缩比较窗口，上面板横轴截到 $2\times$ 共同窗口（约 $9.9\times10^{-8}$ Hz），灰色 UV 区域只展示到该处。
 
 ### 4.3 图
 
 - `papers/gauss-bonnet/fig/convergence-resolution.pdf`
 - `papers/gauss-bonnet/fig/convergence-resolution.png`
-  - 包含 N=64、N=128、N=300 与 N=200 baseline。
+  - 包含 N=64、N=128、N=300、N=400 与 N=200 baseline。
 - `papers/gauss-bonnet/fig/convergence-dt.pdf`
 - `papers/gauss-bonnet/fig/convergence-dt.png`
   - N=64 $\Delta t=1$ vs $\Delta t=2$。
+- `papers/gauss-bonnet/fig/convergence-evolution-n400.pdf`
+- `papers/gauss-bonnet/fig/convergence-evolution-n400.png`
+  - N=400 的 `spectrums` 中期谱快照、晚期冻结曲线和估计量因子 $H/\langle\dot\phi\rangle$（`plot_evolution.py`）。
+- `papers/gauss-bonnet/fig/convergence-evolution-n300.pdf/png`
+  - 同上，作为 N=300 对照。
 
 ### 4.4 数据位置
 
@@ -608,6 +625,11 @@ dt1_n64.lattice.bincode
 n300.summary.npz
 n300.final_field.npz
 n300.lattice.bincode
+n400.summary.npz
+n400.final_field.npz
+n400.lattice.bincode
+n400.lattice.checkpoint.bincode
+n400.lattice.zeta.checkpoint.bincode
 summary.csv
 comparison.npz
 resolution.*.html
@@ -619,6 +641,12 @@ all.*.html
 
 ```text
 inflat/out/gauss_bonnet_convergence_remote/
+```
+
+N=400 的原始下载归档（含日志、HTML 和全部 bincode，约 6.6 GB）：
+
+```text
+inflat/out/gauss_bonnet_convergence_remote_n400/
 ```
 
 注意：`_remote` 里的 `timestep.*` 是远端最后一次 `--plot-only --group timestep` 生成的，当时只有 `dt1_n64` 和 `n128`，不能作为纯 dt 对比；本地工作目录中的 `timestep.*` 已用修正后的同 N 逻辑重新生成。
@@ -646,16 +674,17 @@ inflat/out/gauss_bonnet_convergence_remote/
 
 ### 6.1 推荐算例顺序
 
-N=300 本次已经完成（结果见第 4 节）。下一步建议优先做 N=400 或 N=320，并补 N=300 的 seed/dt/盒子测试。
+N=300 与 N=400 分辨率算例均已完成（结果见第 4 节）。N=400 在共同窗口内相对 baseline 偏中位约 10%，没有继续收敛（见 4.2），因此下一步优先做 N=400 的对照，而不是直接上更大的 N。
 
 先做分辨率收敛，再做盒子、dt、seed 等：
 
-1. `N=256`，`k0=2e-9`，`dt=2.0`，其余同 baseline（分辨率；如果已做 N=300，这一步可选）
+1. ~~`N=256`，`k0=2e-9`，`dt=2.0`~~（已由 N=300 覆盖，跳过）
 2. `N=256`，`k0=1.5625e-9`，`dt=2.0`（固定 $\Delta x$，盒子 $1.28L$）
 3. `N=320`，`k0=2e-9`（可选，分辨率）
 4. `N=320`，`k0=1.25e-9`（固定 $\Delta x$，盒子 $1.6L$）
 5. `N=400`，`k0=1e-9`（可选，固定 $\Delta x$，盒子 $2L$）
-6. 在 N=256 上补 `seed=11,12` 和 `dt=4,8`、`sub=2.0`、`super=500`
+6. **优先**：在 N=400 上补 `seed=11,12` 和 `super=500`，确认 4.2 中约 10% 的偏差是随机实现还是系统误差
+7. `N=512`，`k0=2e-9`，`dt=2.0`（分辨率；实测外推约 9 天）
 
 对应频率范围：
 
@@ -845,7 +874,8 @@ python3 papers/gauss-bonnet/plot_convergence.py
 9. **磁盘**
    - `final_field.npz` 和 `.lattice.bincode` 都保存最终场。
    - N=256 最终场约 400 MB（未压缩）；压缩 NPZ 会小一些，但总量仍可观。
-   - N=400 会到 GB 量级，注意磁盘空间。
+   - N=400 实测：`n400.final_field.npz` 1.36 GB、`n400.lattice.bincode` 1.55 GB、checkpoint 1.02 GB、zeta checkpoint 0.51 GB，单个算例约 4.4 GB。
+   - N=512 会更大，注意磁盘空间。
 
 10. **SIGW**
     - `sigw_2_spectrum` 会截断采样范围外的点。
@@ -862,6 +892,16 @@ python3 papers/gauss-bonnet/plot_convergence.py
     - N=128 的 overlap 可以延伸到 $0.7k_{\max}(N=128)\approx 9.9\times10^{-8}$；N=300 可以延伸到约 $2.3\times10^{-7}$。因此它们的 `max` 会比图里共同窗口的 8.62%/10.79% 大。
     - 图里的数字使用所有算例共同的 N=64 窗口，便于公平比较。
 
+13. **`spectrums` 不能直接当作 $\zeta$ 的冻结判据**
+    - `summary.npz` 的 `spectrums` 是 $\mathcal P_\phi(H/\langle\dot\phi\rangle)^2$ 的线性化估计，不是最终的非线性 $\delta N$ 谱。
+    - USR 期间 $H/\langle\dot\phi\rangle$ 会先暴涨约 $7\times10^2$ 倍再回落，所以中期快照的绝对幅度不能直接解读为 $\zeta$ 演化。
+    - 用 `plot_evolution.py` 时应同时看第三个面板的估计量因子。
+
+14. **N=400 尚未收敛**
+    - 共同窗口内相对 baseline 中位 10.41%、最大 17.35%，差于 N=128/N=300 的 2–3%。
+    - 谱整体偏低、峰位更低（$2.02\times10^{-8}$ Hz），而 N=400 的演化反而最长，因此不是「时间不够」。
+    - 在 seed / `super=500` 对照完成前，不要把 N=400 当作分辨率收敛的证据。
+
 ---
 
 ## 8. 快速命令清单
@@ -876,11 +916,14 @@ cargo build --release --offline --bin gauss_bonnet_convergence
 
 # 本地跑/读取已有结果后出图
 ../target/release/gauss_bonnet_convergence --plot-only \
-    --config n64 --config n128 --config dt1_n64
+    --config n64 --config n128 --config n300 --config n400 --config dt1_n64
 
 # 画论文图
 cd ..
 python3 papers/gauss-bonnet/plot_convergence.py
+
+# 画 N=400 的中期谱演化诊断
+python3 papers/gauss-bonnet/plot_evolution.py n400
 
 # 上传源码到远端
 rsync -avz --exclude 'out/' --exclude '.DS_Store' \
@@ -893,26 +936,20 @@ ssh -o BatchMode=yes reex-zerotier \
 
 # 远端 screen 运行单个算例
 ssh -o BatchMode=yes reex-zerotier \
-    'cd ~/computations-cfy && screen -dmS gb_n256 bash -lc \
+    'cd ~/computations-cfy && screen -dmS gb_n400 bash -lc \
      "./target/release/gauss_bonnet_convergence \
         --baseline baseline/case1-final.output.npz \
-        --run --config n256 \
-        > out/gauss_bonnet_convergence/n256.run.log 2>&1"'
+        --run --config n400 \
+        > out/gauss_bonnet_convergence/n400.run.log 2>&1"'
 
 # 查看 screen / 日志
 ssh reex-zerotier 'screen -ls'
-ssh reex-zerotier 'tail -5 ~/computations-cfy/out/gauss_bonnet_convergence/n256.run.log'
+ssh reex-zerotier 'tail -5 ~/computations-cfy/out/gauss_bonnet_convergence/n400.run.log'
 
 # 下载远端结果
 rsync -avz -e 'ssh -o BatchMode=yes' \
     reex-zerotier:~/computations-cfy/out/gauss_bonnet_convergence/ \
-    inflat/out/gauss_bonnet_convergence_remote_n256/
+    inflat/out/gauss_bonnet_convergence_remote_n400/
 ```
 
 ---
-
-## 9. 本次提交信息
-
-```text
-feat(gauss-bonnet): add resolution and dt convergence figures
-```
