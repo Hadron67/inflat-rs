@@ -1282,14 +1282,17 @@ impl<const D: usize, S> LatticeInput<D, S> {
                     &mut spectrum_scratch,
                 );
                 let spectrum_k = initial_spectrum.iter().map(|f| f.0 * self.k_unit).collect();
-                let mut spectrums = vec![(self.state.scale_factor(input).ln(), {
+                // On resume, start the snapshot record/schedule from the
+                // checkpoint's scale factor instead of the original a = 1.
+                let spectrum_start_n = lattice_state.scale_factor(input).ln();
+                let mut spectrums = vec![(spectrum_start_n, {
                     let zeta_factor = lattice_state.scale_factor(input);
                     initial_spectrum
                         .iter()
                         .map(|f| f.1 * zeta_factor * zeta_factor)
                         .collect()
                 })];
-                let n_range = self.state.scale_factor(input).ln()..self.end_n;
+                let n_range = spectrum_start_n..self.end_n;
                 let spectrum_delta_n = (n_range.end - n_range.start) / (spectrum_count as f64);
                 let mut next_spectrum_n = n_range.start + spectrum_delta_n;
                 let mut measurables = vec![];
