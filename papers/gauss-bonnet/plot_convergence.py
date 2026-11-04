@@ -271,6 +271,69 @@ def make_dt_plot(dt2, dt1):
     plt.close(fig)
 
 
+def make_dt_scaling_plot(dt2, dt4, dt8):
+    """N=128, dt=2/4/8 with the same seed and the same dn reconstruction."""
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(6.2, 4.8),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.2, 1.0], "hspace": 0.06},
+    )
+
+    k2, p2 = trim(dt2[0], dt2[1])
+    k4, p4 = trim(dt4[0], dt4[1])
+    k8, p8 = trim(dt8[0], dt8[1])
+    _, p_lin = trim(dt2[0], dt2[2])
+
+    k_lo = min(k2[0], k4[0], k8[0]) * 0.95
+    k_hi = max(k2[-1], k4[-1], k8[-1]) * 1.05
+    k_uv = common_hi((dt2[0], dt2[1]), (dt4[0], dt4[1]), (dt8[0], dt8[1]))
+
+    add_uv_region(ax1, ax2, k_uv, k_hi)
+
+    linear_grid = np.exp(np.linspace(np.log(k_lo), np.log(k_hi), 600))
+    ax1.loglog(
+        linear_grid,
+        interp_loglog(linear_grid, k2, p_lin),
+        "--",
+        color="0.55",
+        lw=1.4,
+        label="linear",
+    )
+    ax1.loglog(k2, p2, color="C0", lw=2.4, label=r"$N=128,\ \Delta t=2$")
+    ax1.loglog(k4, p4, color="C1", lw=1.4, label=r"$N=128,\ \Delta t=4$")
+    ax1.loglog(k8, p8, color="C3", lw=1.0, ls="--", label=r"$N=128,\ \Delta t=8$")
+
+    ax1.set_ylabel(r"$\mathcal{P}_\zeta$")
+    ax1.set_ylim(5e-5, 2e-1)
+    add_uv_legend(ax1)
+    ax1.tick_params(labelbottom=False)
+    style_axes(ax1)
+    style_log_xaxis(ax1)
+
+    for data, color, label in [
+        (dt4, "C1", r"$\Delta t=4\,/\,\Delta t=2 - 1$"),
+        (dt8, "C3", r"$\Delta t=8\,/\,\Delta t=2 - 1$"),
+    ]:
+        grid, rel = relative_curve(data[0], data[1], dt2[0], dt2[1], hi=k_uv)
+        ax2.semilogx(grid, rel, color=color, lw=1.5, label=label)
+    ax2.axhline(0.0, color="k", ls=":", lw=1.0)
+    ax2.set_xlabel(r"$k\ [\mathrm{Hz}]$")
+    ax2.set_ylabel(r"$P_{\Delta t}/P_{\Delta t=2}-1$")
+    ax2.set_ylim(-2e-5, 2e-5)
+    ax2.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=3))
+    ax2.legend(loc="lower left", frameon=False, fontsize=7.5)
+    style_axes(ax2)
+    style_log_xaxis(ax2)
+
+    ax1.set_xlim(k_lo, k_hi)
+    fig.align_ylabels([ax1, ax2])
+    fig.savefig(FIG_DIR / "convergence-dt-n128.pdf", bbox_inches="tight")
+    fig.savefig(FIG_DIR / "convergence-dt-n128.png", dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     plt.rcParams.update(
         {
@@ -294,9 +357,12 @@ def main():
     n300 = load_case("n300")
     n400 = load_case("n400")
     dt1 = load_case("dt1_n64")
+    dt4 = load_case("dt4_n128")
+    dt8 = load_case("dt8_n128")
 
     make_resolution_plot(base_k, base_p, lin_k, lin_p, n64, n128, n300, n400)
     make_dt_plot(n64, dt1)
+    make_dt_scaling_plot(n128, dt4, dt8)
 
     hi_res = common_hi(
         (base_k, base_p),
@@ -314,9 +380,12 @@ def main():
     report("N=300 vs baseline", n300[0], n300[1], base_k, base_p, hi=hi_res)
     report("N=400 vs baseline", n400[0], n400[1], base_k, base_p, hi=hi_res)
     report("N=64 dt=1 vs dt=2", dt1[0], dt1[1], n64[0], n64[1], hi=hi_dt)
+    report("N=128 dt=4 vs dt=2", dt4[0], dt4[1], n128[0], n128[1])
+    report("N=128 dt=8 vs dt=2", dt8[0], dt8[1], n128[0], n128[1])
 
     print(f"wrote {FIG_DIR / 'convergence-resolution.pdf'}")
     print(f"wrote {FIG_DIR / 'convergence-dt.pdf'}")
+    print(f"wrote {FIG_DIR / 'convergence-dt-n128.pdf'}")
 
 
 if __name__ == "__main__":

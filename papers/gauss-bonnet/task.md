@@ -530,11 +530,13 @@ ssh -t reex-zerotier 'screen -r gb_conv'
 | 算例 | 运行位置 | N | $k_0$ [Hz] | dt | sub | super | seed | 状态 |
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | baseline | 现有 `case1-final.output.npz` | 200 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 复用 |
-| `n64` | 本地 | 64 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
+| `n64` | 本地 | 64 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 作废，待重算 |
 | `n128` | `reex-zerotier` | 128 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
 | `n300` | `reex-zerotier` | 300 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
 | `n400` | `reex-zerotier` | 400 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成（未收敛，见 4.2） |
 | `dt1_n64` | `reex-zerotier` | 64 | 2e-9 | 1.0 | 1.3 | 200 | 10 | 完成 |
+
+> `n64` 使用旧 $\delta N$ 算法，数据已删除，需重新计算；表中 n64 相关数值作废。
 
 本次实测耗时（仅供粗略参考，实际以日志里的 ETA 为准）：
 
@@ -588,6 +590,33 @@ $$
 - 用 `plot_evolution.py` 检查 `spectrums`：窗口内模式在 $\ln a\approx1.9$–$3.5$ 出视界，末态 $k/(aH)\sim10^{-4}$–$10^{-3}$；但线性化估计在最后两三个 e-fold 仍上漂约 20%（N=300 同样如此），因此不能仅凭中期快照证明 $\zeta$ 已冻结。
 - 图中分辨率对比已加入 N=300 与 N=400；为了不让 N=400 更长的尾部压缩比较窗口，上面板横轴截到 $2\times$ 共同窗口（约 $9.9\times10^{-8}$ Hz），灰色 UV 区域只展示到该处。
 
+#### 4.2.1 N=400 偏低的候选机制：未重整化的 UV 真空能改变初始背景
+
+理论上，当前固定 $L$、增大 $N$ 的分辨率测试同时也在提高初始 BD 真空的 UV 截断：
+
+$$
+\Lambda_{\rm UV}\sim k_{\max}\propto N.
+$$
+
+TWA/Wigner 真空包含每个模式的零点能。对高频模式 $E_{\mathbf k}\simeq k_{\rm eff}/2$，所以未减除的真空能密度具有标准的三维 quartic UV 发散：
+
+$$
+\rho_{\rm vac}(\Lambda_{\rm UV})
+\simeq \frac12\int^{|k|<\Lambda_{\rm UV}}
+\frac{d^3k}{(2\pi)^3}\,k
+=\frac{\Lambda_{\rm UV}^4}{16\pi^2}
+\propto N^4.
+$$
+
+代码中的 `populate_noise` 按 BD 方差生成 $\phi$ 和 $\dot\phi$ 噪声，随后 `solve_hubble` 将包含这些噪声的梯度、动能和势能代入完整 SGB Hamilton 约束，重新确定初始 $H$。这里没有相应的真空减除或随截断变化的反项。因此，不同 $N$ 不只是空间离散精度不同，也对应不同的裸初始总能量和背景膨胀历史。
+
+现有日志支持这一渠道确实存在：
+
+- N=300 和 N=400 的初始梯度量分别为 $9.42853\times10^{-12}$ 和 $2.97906\times10^{-11}$，比值为 $3.16$，几乎等于 $(400/300)^4=3.1605$。
+- 无噪声背景为 $H_{\rm bg}=2.7006884\times10^{-5}$；N=300 和 N=400 的初始 $H$ 分别为 $2.7064997\times10^{-5}$ 和 $2.7190104\times10^{-5}$，即分别偏高约 $0.215\%$ 和 $0.679\%$。在当前背景仍占主导时，$\delta H/H\propto\rho_{\rm vac}\propto N^4$；若继续取裸 $N\to\infty$，真空项最终占主导，$H_{\rm ini}$ 会渐近按 $N^2$ 发散。
+
+这可能通过敏感的 USR 背景轨迹造成宽频段的谱振幅和峰位偏移，因此是 N=400 整体偏低的一个候选系统误差。但目前尚未证明它能产生约 10% 的压低：真空梯度能会红移，且仅凭初始 $H$ 增大不能确定最终谱变化的方向和大小。需要区分的是，**没有有限连续极限的是当前未重整化的裸 $H_{\rm ini}(N)$，不必然是重整化后的物理模型或 IR 功率谱**。在控制这一效应前，N=400 的结果不能被视为纯粹的空间分辨率收敛测试。
+
 ### 4.3 图
 
 - `papers/gauss-bonnet/fig/convergence-resolution.pdf`
@@ -613,9 +642,6 @@ inflat/out/gauss_bonnet_convergence/alpha_1.13412e7/
 包含：
 
 ```text
-n64.summary.npz
-n64.final_field.npz
-n64.lattice.bincode
 n128.summary.npz
 n128.final_field.npz
 n128.lattice.bincode
@@ -637,19 +663,29 @@ timestep.*.html
 all.*.html
 ```
 
-远端全部原始输出（下载归档，包含日志、HTML、所有 bincode）：
+远端全部原始输出仍保留在：
 
 ```text
-inflat/out/gauss_bonnet_convergence_remote/
+reex-zerotier:~/computations-cfy/out/gauss_bonnet_convergence/
 ```
 
-N=400 的原始下载归档（含日志、HTML 和全部 bincode，约 6.6 GB）：
+本地曾用 `inflat/out/gauss_bonnet_convergence_remote*` 保存下载归档；这些归档已在算例合并后删除（释放约 7.6 GB）。原始运行日志已复制到 `inflat/out/gauss_bonnet_convergence/` 顶层，与远端结构一致：
 
 ```text
-inflat/out/gauss_bonnet_convergence_remote_n400/
+build.log
+dt1_n64.run.log
+n128.run.log
+n300.run.log
+n400.run.log
+n512.run.log
+timestep.plot.log
 ```
 
-注意：`_remote` 里的 `timestep.*` 是远端最后一次 `--plot-only --group timestep` 生成的，当时只有 `dt1_n64` 和 `n128`，不能作为纯 dt 对比；本地工作目录中的 `timestep.*` 已用修正后的同 N 逻辑重新生成。
+（`n64.run.log` 是本地运行产生的，远端没有；`n512.run.log` 是早期一次中止的 N=512 尝试，只有 29 步，没有留下数据。）
+
+清理后本地与远端仍有的差异：远端多 `n300.lattice.checkpoint.bincode`、`n300.lattice.zeta.checkpoint.bincode` 和 `backup_before_n300/`；本地多 `n64.*`。checkpoint 在 `.lattice.bincode` 存在时不会被读取，不影响复现。
+
+注意：远端 `timestep.*` 仍是旧版 `--plot-only` 生成的（当时只有 `dt1_n64` 和 `n128`），不能作为纯 dt 对比；本地工作目录中的 `timestep.*` 已用修正后的同 N 逻辑重新生成。
 
 ---
 
