@@ -31,13 +31,17 @@ use inflat::{
     },
     c2fn::C2Fn,
     gauss_bonnet::{
-        GaussBonnetBInput, GaussBonnetBackgroundState, GaussBonnetField, GaussBonnetFieldSimulatorCreator,
-        GaussBonnetScalarPerturbationCoef, GaussBonnetScalarPerturbationPotential,
+        GaussBonnetBInput, GaussBonnetBackgroundState, GaussBonnetField, GaussBonnetFieldSimulator,
+        GaussBonnetFieldSimulatorCreator, GaussBonnetScalarPerturbationCoef,
+        GaussBonnetScalarPerturbationPotential,
     },
     igw::sigw_2_spectrum,
-    lat::Lattice,
+    lat::{Lattice, LatticeParam},
     models::TanhPotential,
-    scalar::{LatticeInput, LatticeOutputData},
+    scalar::{
+        LatticeInitializer, LatticeInput, LatticeNoiseGenerator, LatticeOutputData, LatticeSimulator,
+        LatticeSimulatorCreator,
+    },
     util::{self, ParamRange, VecN, lazy_file},
 };
 use libm::{cos, sin};
@@ -58,6 +62,16 @@ const BASELINE_SUPER: f64 = 200.0;
 const BASELINE_SEED: u64 = 10;
 const SPECTRUM_COUNT: usize = 10;
 const MAX_SUMMARY_MEASURABLES: usize = 10_000;
+
+/// Initial Hubble rate of the existing N=400 run, read from the
+/// `[lattice] ... initial H = 0.000027190104429563513` line in
+/// `inflat/out/gauss_bonnet_convergence/n400.run.log`.  The first measured
+/// point in `n400.summary.npz` agrees to ~5e-6 relative.
+///
+/// Used by the `n128_h400` diagnostic, which starts the N=128 lattice from
+/// the N=400 initial background H to isolate the effect of the unrenormalized
+/// UV vacuum energy.
+const N400_INITIAL_H: f64 = 2.7190104429563513e-5;
 
 // Well-resolved comparison window for the relative-difference diagnostics.
 // The highest-k bins are affected by the finite UV cutoff, especially at N=64.
@@ -211,6 +225,18 @@ fn configs() -> Vec<Config> {
             sup: BASELINE_SUPER,
             seed: BASELINE_SEED,
         },
+        // Diagnostic for the N=400 anomaly: the standard N=128 run, except
+        // that the lattice initial H is forced to the N=400 value.
+        Config {
+            name: "n128_h400",
+            group: "hubble",
+            n: 128,
+            k0: BASELINE_K0,
+            dt: BASELINE_DT,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
         // Fixed Delta x, smaller boxes: N * k0 = 200 * 2e-9.
         Config {
             name: "n512",
@@ -326,6 +352,105 @@ fn configs() -> Vec<Config> {
     ]
 }
 
+/// Extra initial-H override for the `hubble` diagnostic cases.
+fn initial_hubble_override(name: &str) -> Option<f64> {
+    match name {
+        "n128_h400" => Some(N400_INITIAL_H),
+        _ => None,
+    }
+}
+
+/// Wraps [`GaussBonnetFieldSimulator`] and replaces the initial Hubble rate
+/// after the noise has been populated.  `GaussBonnetField::populate_noise`
+/// recomputes `v_a` from the Hamiltonian constraint, so the only way to start
+/// the N=128 lattice from the N=400 initial H is to overwrite it afterwards.
+struct HOverrideSimulator<'a, const D: usize, V, Xi> {
+    inner: GaussBonnetFieldSimulator<'a, D, V, Xi>,
+    initial_hubble: f64,
+}
+
+impl<'a, const D: usize, V, Xi> LatticeSimulator for HOverrideSimulator<'a, D, V, Xi>
+where
+    V: C2Fn<f64, Output = f64> + Sync,
+    Xi: C2Fn<f64, Output = f64> + Sync,
+{
+    type LatticeState = GaussBonnetField<D>;
+
+    fn update_lattice_state(&mut self, field: &mut Self::LatticeState, dt: f64) {
+        self.inner.update_lattice_state(field, dt)
+    }
+
+    fn metric_perturbations(&self, field: &Self::LatticeState) -> (f64, f64) {
+        self.inner.metric_perturbations(field)
+    }
+
+    fn hubble_constraint(&self, field: &Self::LatticeState) -> f64 {
+        self.inner.hubble_constraint(field)
+    }
+}
+
+impl<'a, const D: usize, V, Xi> LatticeNoiseGenerator for HOverrideSimulator<'a, D, V, Xi>
+where
+    V: C2Fn<f64, Output = f64> + Sync,
+    Xi: C2Fn<f64, Output = f64> + Sync,
+{
+    type LatticeState = GaussBonnetField<D>;
+
+    fn populate_noise<S: random::Source>(&self, field: &mut Self::LatticeState, rand: &mut S) {
+        LatticeNoiseGenerator::populate_noise(&self.inner, field, rand);
+        field.v_a = field.a * self.initial_hubble;
+        println!(
+            "[noise] override initial H = {:e} (v_a = {:e}, a = {})",
+            field.v_a / field.a,
+            field.v_a,
+            field.a
+        );
+    }
+}
+
+impl<'a, const D: usize, V, Xi> LatticeInitializer<GaussBonnetBackgroundState>
+    for HOverrideSimulator<'a, D, V, Xi>
+where
+    V: C2Fn<f64, Output = f64> + Sync,
+    Xi: C2Fn<f64, Output = f64> + Sync,
+{
+    type LatticeState = GaussBonnetField<D>;
+
+    fn init_from_state(&self, field: &mut Self::LatticeState, state: &GaussBonnetBackgroundState) {
+        self.inner.init_from_state(field, state)
+    }
+}
+
+struct HOverrideCreator {
+    initial_hubble: f64,
+}
+
+impl<const D: usize, V, Xi> LatticeSimulatorCreator<D, GaussBonnetBInput<V, Xi>>
+    for HOverrideCreator
+where
+    V: C2Fn<f64, Output = f64> + Sync,
+    Xi: C2Fn<f64, Output = f64> + Sync,
+{
+    type Simulator<'a>
+        = HOverrideSimulator<'a, D, V, Xi>
+    where
+        GaussBonnetBInput<V, Xi>: 'a;
+
+    fn create<'a>(
+        &self,
+        lattice: LatticeParam<D>,
+        input: &'a GaussBonnetBInput<V, Xi>,
+    ) -> Self::Simulator<'a>
+    where
+        GaussBonnetBInput<V, Xi>: 'a,
+    {
+        HOverrideSimulator {
+            inner: GaussBonnetFieldSimulator::new(lattice, input),
+            initial_hubble: self.initial_hubble,
+        }
+    }
+}
+
 struct Baseline {
     k_star: f64,
     linear_k: Vec<f64>,
@@ -436,7 +561,7 @@ fn print_help() {
          Options:\n\
            --run                 compute missing configurations (existing files are read, not overwritten)\n\
            --plot-only           load existing bincode files and regenerate plots/tables\n\
-           --group <name>        resolution (default) | box | timestep | times | seed | all\n\
+           --group <name>        resolution (default) | box | timestep | times | seed | hubble | all\n\
            --config <name>       run/load a single named configuration (repeatable)\n\
            --xi0 <value>         alpha value (default {XI0_DEFAULT:e})\n\
            --baseline <path>     existing baseline npz (default inflat/out/gauss_bonnet.bak/case1-final.output.npz)\n\
@@ -463,6 +588,14 @@ fn print_plan() {
             "{:<26} {:<12} {:>4} {:>12.3e} {:>6.1} {:>6.1} {:>7.1} {:>5} {:>12.4} {:>12.5}",
             c.name, c.group, c.n, c.k0, c.dt, c.sub, c.sup, c.seed, l_pc, dx_pc
         );
+    }
+    for c in configs() {
+        if let Some(hubble) = initial_hubble_override(c.name) {
+            println!(
+                "{:<26} initial H override: {:.10e}",
+                c.name, hubble
+            );
+        }
     }
 }
 
@@ -816,16 +949,31 @@ fn process_config(
     let k_max = lat_in.k_max() * k_star;
     let l_mpc = 2.0 * PI * MPC_HZ / k_min;
     let dx_mpc = l_mpc / (cfg.n as f64);
-    let h_dt = (lat_in.state.v_a / lat_in.state.a) * cfg.dt;
+    let h_start = initial_hubble_override(cfg.name)
+        .unwrap_or_else(|| lat_in.state.v_a / lat_in.state.a);
+    let h_dt = h_start * cfg.dt;
 
     let out_base = format!("{}/{}.lattice", out_dir.display(), cfg.name);
-    let data = match lat_in.run(
-        &GaussBonnetFieldSimulatorCreator,
-        input,
-        &out_base,
-        create,
-        SPECTRUM_COUNT,
-    ) {
+    let run_result = if let Some(hubble) = initial_hubble_override(cfg.name) {
+        lat_in.run(
+            &HOverrideCreator {
+                initial_hubble: hubble,
+            },
+            input,
+            &out_base,
+            create,
+            SPECTRUM_COUNT,
+        )
+    } else {
+        lat_in.run(
+            &GaussBonnetFieldSimulatorCreator,
+            input,
+            &out_base,
+            create,
+            SPECTRUM_COUNT,
+        )
+    };
+    let data = match run_result {
         Ok(data) => data,
         Err(err) => {
             println!("[skip] {}: {}", cfg.name, err);
@@ -909,6 +1057,7 @@ fn color_for(name: &str) -> &'static str {
         "n128" => "#d62728",
         "n300" => "#ff7f0e",
         "n400" => "#9467bd",
+        "n128_h400" => "#8c564b",
         "n512" => "#2ca02c",
         "box_n64_k0_6p25e-9" => "#9467bd",
         "box_n128_k0_3p125e-9" => "#8c564b",
@@ -1160,7 +1309,7 @@ fn write_csv(path: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Result<()> 
         } else {
             rel_stats(&l.k, &l.p, &baseline.lat_k, &baseline.lat_p)
         };
-        let same_n = if matches!(l.cfg.group, "timestep" | "times" | "seed") {
+        let same_n = if matches!(l.cfg.group, "timestep" | "times" | "seed" | "hubble") {
             let reference_name = match l.cfg.n {
                 64 => "n64",
                 128 => "n128",
@@ -1272,7 +1421,7 @@ fn write_outputs(case_dir: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Res
     write_csv(&case_dir.join("summary.csv"), baseline, loaded)?;
     write_comparison_npz(&case_dir.join("comparison.npz"), baseline, loaded)?;
 
-    for group in ["resolution", "box", "timestep", "times", "seed"] {
+    for group in ["resolution", "box", "timestep", "times", "seed", "hubble"] {
         let mut include = loaded
             .iter()
             .filter(|l| l.cfg.group == group)
@@ -1304,6 +1453,18 @@ fn write_outputs(case_dir: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Res
                 }
             }
             include.extend(references);
+        }
+
+        // The initial-H diagnostic is meaningful only next to the standard
+        // N=128 run and the N=400 run it is emulating.
+        if group == "hubble" {
+            for reference_name in ["n128", "n400"] {
+                if let Some(reference) = loaded.iter().find(|r| r.cfg.name == reference_name) {
+                    if !include.iter().any(|x| x.cfg.name == reference.cfg.name) {
+                        include.push(reference);
+                    }
+                }
+            }
         }
 
         write_spectrum_plot(
