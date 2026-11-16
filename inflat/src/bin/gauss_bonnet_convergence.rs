@@ -269,6 +269,24 @@ fn configs() -> Vec<Config> {
             sup: BASELINE_SUPER,
             seed: BASELINE_SEED,
         },
+        // Fixed Delta x, LARGER box: N * k0 = 400 * 1e-9 = 200 * 2e-9.
+        // Same physical dx and same Lambda_UV as the N=200 baseline, but L = 2 L_base.
+        //
+        // Caveat: rho_vac/rho_tot is fixed by N alone (Lambda_UV/H = 0.5513*sub*N),
+        // so this run has the SAME vacuum-energy fraction as `n400`.  It therefore
+        // separates the "coarse dx / dispersion" channel (which does change here)
+        // from everything that depends on N only.  See papers/gauss-bonnet/task.md
+        // sections 4.2.3 and 4.2.4.
+        Config {
+            name: "box_n400_k0_1e-9",
+            group: "box",
+            n: 400,
+            k0: 1e-9,
+            dt: BASELINE_DT,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
         Config {
             name: "dt1_n64",
             group: "timestep",
@@ -1061,6 +1079,7 @@ fn color_for(name: &str) -> &'static str {
         "n512" => "#2ca02c",
         "box_n64_k0_6p25e-9" => "#9467bd",
         "box_n128_k0_3p125e-9" => "#8c564b",
+        "box_n400_k0_1e-9" => "#e377c2",
         "dt1_n64" => "#2ca02c",
         "dt4_n128" => "#98df8a",
         "dt8_n128" => "#bcbd22",

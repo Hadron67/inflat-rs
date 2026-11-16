@@ -32,6 +32,11 @@ $$
 - $N=300$，$\Delta t=2.0$（`reex-zerotier`）
 - $N=64$，$\Delta t=1.0$（`reex-zerotier`）
 - $N=400$，$\Delta t=2.0$（`reex-zerotier`，分辨率）
+- $N=400$，$k_0=10^{-9}$ Hz（`reex-zerotier`，固定 $\Delta x$、$L=2L_{\rm base}$ 的**盒子/UV 对照**，2026-11-12 启动，进行中）
+
+> 2026-11-12 补：新增 `box_n400_k0_1e-9` 作为 §4.2.1 的判别算例，见 §4.2.4；
+> 同时补入文献 arXiv:2610.26669（Braglia–Franciolini–Ijaz–Peloso）对该机制的独立诊断与
+> 绝热减除方案，见 §4.2.2。
 
 N=200 的生产结果直接复用 `inflat/out/gauss_bonnet.bak/case1-final.output.npz`，没有重跑，也没有覆盖旧数据。
 
@@ -299,6 +304,7 @@ seed    = 10
 | `n512` | resolution | 512 | 2e-9 | 2.0 | 1.3 | 200 | 10 |
 | `box_n128_k0_3p125e-9` | box | 128 | 3.125e-9 | 2.0 | 1.3 | 200 | 10 |
 | `box_n64_k0_6p25e-9` | box | 64 | 6.25e-9 | 2.0 | 1.3 | 200 | 10 |
+| `box_n400_k0_1e-9` | box | 400 | 1e-9 | 2.0 | 1.3 | 200 | 10 |
 | `dt1_n64` | timestep | 64 | 2e-9 | 1.0 | 1.3 | 200 | 10 |
 | `dt4_n128` | timestep | 128 | 2e-9 | 4.0 | 1.3 | 200 | 10 |
 | `dt8_n128` | timestep | 128 | 2e-9 | 8.0 | 1.3 | 200 | 10 |
@@ -307,7 +313,11 @@ seed    = 10
 | `seed11_n128` | seed | 128 | 2e-9 | 2.0 | 1.3 | 200 | 11 |
 | `seed12_n128` | seed | 128 | 2e-9 | 2.0 | 1.3 | 200 | 12 |
 
-`box_n128_k0_3p125e-9` 和 `box_n64_k0_6p25e-9` 保持 $Nk_0=4\times10^{-7}$，即固定 $\Delta x$，盒子分别只有 baseline 的 $1/1.5625$ 和 $1/3.125$。它们测试的是更小的盒子，不是更大的盒子。更大的盒子需要 $N>200$。
+`box_n128_k0_3p125e-9` 和 `box_n64_k0_6p25e-9` 保持 $Nk_0=4\times10^{-7}$，即固定 $\Delta x$，盒子分别只有 baseline 的 $1/1.5625$ 和 $1/3.125$。它们测试的是更小的盒子，不是更大的盒子。
+
+`box_n400_k0_1e-9` 同样保持 $Nk_0=4\times10^{-7}$，但方向相反：$N=400$、$k_0=10^{-9}$ Hz，
+给出 $L=9.720$ pc $=2L_{\rm base}$、$\Delta x=0.02430$ pc $=\Delta x_{\rm base}$。这是目前唯一一个
+"更大盒子 + 与 baseline 相同 $\Delta x$" 的算例，用途见 §4.2.4。
 
 `n512` 已加入配置但尚未运行（外推约 9 天）。
 
@@ -534,7 +544,9 @@ ssh -t reex-zerotier 'screen -r gb_conv'
 | `n128` | `reex-zerotier` | 128 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
 | `n300` | `reex-zerotier` | 300 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成 |
 | `n400` | `reex-zerotier` | 400 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成（未收敛，见 4.2） |
+| `n400_super500` | `reex-zerotier` | 400 | 2e-9 | 2.0 | 1.3 | 500 | 10 | 完成（仅远端） |
 | `dt1_n64` | `reex-zerotier` | 64 | 2e-9 | 1.0 | 1.3 | 200 | 10 | 完成 |
+| `box_n400_k0_1e-9` | `reex-zerotier` | 400 | 1e-9 | 2.0 | 1.3 | 200 | 10 | **运行中**（2026-11-12 启动，见 4.2.3/4.2.4） |
 
 > `n64` 使用旧 $\delta N$ 算法，数据已删除，需重新计算；表中 n64 相关数值作废。
 
@@ -547,6 +559,8 @@ ssh -t reex-zerotier 'screen -r gb_conv'
 | `n128` | `reex-zerotier` | 约 4.5 h |
 | `n300` | `reex-zerotier` | 约 43 h |
 | `n400` | `reex-zerotier` | 约 91 h（约 3.8 天） |
+| `n400_super500` | `reex-zerotier` | 约 100 h |
+| `box_n400_k0_1e-9` | `reex-zerotier` | 约 92 h（日志 ETA，2026-11-12 启动） |
 
 N=64 的开销有较多固定/并行效率因素，不建议直接用 $N^3$ 外推到更大 N；提交后先看 `[lattice] eta remaining` 的实际估计。
 
@@ -560,6 +574,12 @@ N=64 的开销有较多固定/并行效率因素，不建议直接用 $N^3$ 外�
 | `n128` | $2.385\times10^{-8}$ | $7.654\times10^{-2}$ | $1.323$ |
 | `n300` | $2.805\times10^{-8}$ | $7.739\times10^{-2}$ | $1.450$ |
 | `n400` | $2.017\times10^{-8}$ | $6.650\times10^{-2}$ | $1.217$ |
+| `n400_super500` | $2.017\times10^{-8}$ | $6.499\times10^{-2}$ | — |
+| `box_n400_k0_1e-9` | 运行中（预计 $\approx1.0\times10^{-8}$） | — | — |
+
+`n400_super500`（super 从 200 提到 500，末态 $\ln a$ 从 10.98 到 11.91）与 `n400` 相比
+峰值只变 $-2.3\%$、**峰位完全不动**（$2.017\times10^{-8}$ Hz）。这独立确认了
+"N=400 偏低不是演化时间不够"。注意该算例只在远端，本地只下载了 `summary.npz`。
 
 ### 4.2 收敛指标
 
@@ -571,7 +591,7 @@ k\in[10^{-8},\,4.931\times10^{-8}]\,\mathrm{Hz}
 [10^{-8},\,0.7\,k_{\max}(N=64)].
 $$
 
-| 比较 | 中位 $|\Delta P/P|$ | 最大 $|\Delta P/P|$ |
+| 比较 | 中位 $\lvert\Delta P/P\rvert$ | 最大 $\lvert\Delta P/P\rvert$ |
 |---|---:|---:|
 | N=64 vs baseline | 8.58% | 42.7% |
 | N=128 vs baseline | 2.11% | 8.62% |
@@ -587,6 +607,15 @@ $$
 - N=64 的 $\Delta t=1$ 与 $\Delta t=2$ 在大部分区间只差 1–3%，仅在接近 UV 截断处增大到约 12%，说明 $\Delta t=2$ 对 N=64 已基本收敛。
 - **N=400 没有继续收敛**：共同窗口内中位 10.41%、最大 17.35%，明显差于 N=128/N=300 的 2–3%；峰值也最低（$6.65\times10^{-2}$），峰位移到 $2.02\times10^{-8}$ Hz。
 - N=400 的演化时间反而最长（末态 $\ln a=10.98$，N=300 为 10.69，N=128 为 9.84），所以整体偏低不是「演化时间不够」造成的；更可能是随机实现或尚未识别的系统误差。
+- `n400_super500`（2026-11-12 补齐）把 $\zeta$ 冻结判据从 $k_{\max}=aH/200$ 放宽到 $aH/500$、末态
+  $\ln a$ 推到 11.91，峰值只再降 2.3%、峰位不动，进一步排除了"末态未冻结"。详见 §4.1。
+- 若把 $\rho_{\rm vac}/\rho_{\rm tot}\propto N^4$ 的线性响应当作模型，用 N=300/400 两点定系数会给出
+  $P_\infty\simeq8.24\times10^{-2}$、$c\simeq7.6\times10^{-12}$（$P(N)=P_\infty(1-cN^4)$），
+  则 N=200 预言 $8.14\times10^{-2}$（实测 8.00，差 1.8%，可接受）、
+  **N=128 预言 $8.23\times10^{-2}$（实测 7.65，差 7%，不可接受）**。
+  即 $N^4$ 通道能解释 N=300→400 的跳变，但解释不了 N=128 已经偏低 3–4%。
+  由于四个算例 seed 都是 10（同一随机实现，不能提供散度），这说明至少还有第二条通道，
+  或者响应不是线性的。详见 §4.2.3。
 - 用 `plot_evolution.py` 检查 `spectrums`：窗口内模式在 $\ln a\approx1.9$–$3.5$ 出视界，末态 $k/(aH)\sim10^{-4}$–$10^{-3}$；但线性化估计在最后两三个 e-fold 仍上漂约 20%（N=300 同样如此），因此不能仅凭中期快照证明 $\zeta$ 已冻结。
 - 图中分辨率对比已加入 N=300 与 N=400；为了不让 N=400 更长的尾部压缩比较窗口，上面板横轴截到 $2\times$ 共同窗口（约 $9.9\times10^{-8}$ Hz），灰色 UV 区域只展示到该处。
 
@@ -616,6 +645,129 @@ $$
 - 无噪声背景为 $H_{\rm bg}=2.7006884\times10^{-5}$；N=300 和 N=400 的初始 $H$ 分别为 $2.7064997\times10^{-5}$ 和 $2.7190104\times10^{-5}$，即分别偏高约 $0.215\%$ 和 $0.679\%$。在当前背景仍占主导时，$\delta H/H\propto\rho_{\rm vac}\propto N^4$；若继续取裸 $N\to\infty$，真空项最终占主导，$H_{\rm ini}$ 会渐近按 $N^2$ 发散。
 
 这可能通过敏感的 USR 背景轨迹造成宽频段的谱振幅和峰位偏移，因此是 N=400 整体偏低的一个候选系统误差。但目前尚未证明它能产生约 10% 的压低：真空梯度能会红移，且仅凭初始 $H$ 增大不能确定最终谱变化的方向和大小。需要区分的是，**没有有限连续极限的是当前未重整化的裸 $H_{\rm ini}(N)$，不必然是重整化后的物理模型或 IR 功率谱**。在控制这一效应前，N=400 的结果不能被视为纯粹的空间分辨率收敛测试。
+
+#### 4.2.2 外部证据：arXiv:2610.26669 的绝热减除与格点对账
+
+> Braglia, Franciolini, Ijaz, Peloso, *Mean-Field Backreaction in Single-Field Inflation*,
+> arXiv:2610.26669（2026-10-19，CERN-TH-2026-239）。作者之一 Franciolini 也是 §3.4
+> 所用格点方法（Caravano–Franciolini–Renaux-Petel, arXiv:2410.23942）的作者，
+> 因此这是格点这一派对自己结果的修正，而不是外部质疑。
+
+文章内容（与本文直接相关的部分）：
+
+1. 在 decoupling limit 下做 homogeneous（mean-field）backreaction，1-loop 阶保留
+   $\rho_{\delta\phi},p_{\delta\phi}$ 对 $H^2$、$\dot H$ 和 Klein–Gordon 的反馈；
+2. 指出裸 Bunch–Davies 真空在格点上**没有被减除**：裸被积函数在 UV 端
+   $|B_\phi|\propto k^2$、$B_H\propto k^4$，因此 $\int d\ln k$ 出的真空能
+   $\propto\Lambda_{\rm UV}^4$，与截断强相关；
+3. 给出标准修法：WKB/绝热减除（adiabatic subtraction）到 2 阶与 4 阶，
+   显式 counterterm 见其式 (3.10)、(3.17)–(3.18)，并加 $S_0,S_2,S_4$ filter
+   避免在 WKB 失效区引入假 IR 贡献；
+4. **关键结论**：不做减除的 mean-field 计算可以高精度重现 arXiv:2410.23942 的
+   三组 USR 格点谱，但需要把 effective cutoff 从名义的 $45k_{\rm in}$ 调到
+   $16.6k_{\rm in}$（同一个值对三组都对上）；减除之后 USR 的 backreaction 掉到
+   $O(10^{-3})$（$P_{\zeta,\max}\le6\times10^{-3}$ 时峰值只变 0.03–0.17%）。
+   即：那批格点里看到的 backreaction 有相当一部分来自未减除的 UV 真空。
+
+对我们有用的三个数字/事实：
+
+- **符号**：裸（未减除）backreaction 在 USR 里压制峰值，与 N=400 偏低方向一致；
+- **量级**：其 Fig. 5 给出裸格点的峰值压制随振幅增长
+  $P_{\zeta,\max}^{\rm tree}=10^{-4},10^{-3},10^{-2},10^{-1},1$
+  对应 $2.0\%,6.0\%,17.4\%,42.3\%,75.0\%$。本文 $\mathcal P_{\zeta,\rm peak}\approx8\times10^{-2}$
+  落在最后两档之间，对数插值约 35–40%，所以 N=400 的 10–17% 在这个机制的量级之内；
+- **陷阱**：用连续估计 $\Lambda_{\rm UV}^4/16\pi^2$ 去对格点，cutoff 必须缩到
+  $16.6k_{\rm in}$ 才吻合（$\Lambda^4$ 上差约 54 倍）。所以做减除时**必须用格点求和**
+  $\frac{1}{2V}\sum_{\mathbf k}\omega_{\mathbf k}$，不能用解析式。
+
+不能直接搬过来的地方：该文是 GR + 单场 + decoupling limit + 反推的 $\eta_H$ 三段势，
+没有 $\xi(\phi)\mathcal G$ 项，也没有做 cutoff 扫描（只做了"名义 vs 有效 cutoff"的对账），
+并且明确说减除后的有限部分是 scheme 依赖的（量级可差 $O(1)$；$d^3V/d\phi^3$ 大的变体在
+最大振幅下残余可达 $-20.2\%$ 与 $+36.2\%$，符号可正可负）。
+
+引文措辞建议（写文章时）：不要说"标准做法是重整化"；说
+"lattice USR simulations without adiabatic subtraction are known to be UV-cutoff
+dependent [Braglia et al. 2026]；我们用 $N$ 扫描和固定 $\Delta x$ 的盒子对照显式检验这一点"。
+
+#### 4.2.3 本代码的参数化事实：真空能占比只由 $N$ 决定
+
+2026-11-12 核对 `LatticeInput::from_background_and_k_normalized` 后发现一个此前没注意到的
+结构性事实。由
+
+```text
+dx       = 2*pi / (sub*H*N)          // H 取起始态的 H
+Lambda   = 2*sqrt(3)/dx = 0.5513*sub*N*H
+```
+
+可得
+
+$$
+\frac{\Lambda_{\rm UV}}{H}=0.5513\,{\rm sub}\,N ,
+$$
+
+**与 $L$ 无关，与 $k_0$ 只在 $H$ 随场值缓慢变化的精度内无关**（$k_0$ 主要改变盒子与 $k$ 轴的
+标号；实测 `n400` 与 `box_n400_k0_1e-9` 的 $\Delta x$ 差 0.44%，即源于起始 $H$ 的 0.44% 差别）。
+由于 USR 前后 $H\simeq2.70\times10^{-5}$ 几乎不变，真空能占比只随 ${\rm sub}\cdot N$ 变化。
+用现有日志标定（`sub=1.3`）：
+
+$$
+\frac{\rho_{\rm vac}}{\rho_{\rm tot}}\simeq 5.3\times10^{-13}\,N^4,
+\qquad
+\frac{\delta H}{H}\simeq\frac12\frac{\rho_{\rm vac}}{\rho_{\rm tot}} .
+$$
+
+| $N$ | $\langle(\nabla\phi)^2\rangle/a^2$ | $\rho_{\rm vac}/\rho_{\rm tot}$ | $\delta H/H$ |
+|---:|---:|---:|---:|
+| 64 | $1.955\times10^{-14}$ | $8.9\times10^{-6}$ | $4.5\times10^{-6}$ |
+| 128 | $3.128\times10^{-13}$ | $1.43\times10^{-4}$ | $7.1\times10^{-5}$ |
+| 200（外推） | $1.86\times10^{-12}$ | $8.5\times10^{-4}$ | $4.2\times10^{-4}$ |
+| 300 | $9.429\times10^{-12}$ | $4.31\times10^{-3}$ | $2.15\times10^{-3}$ |
+| 400 | $2.979\times10^{-11}$ | $1.36\times10^{-2}$ | $6.78\times10^{-3}$ |
+
+比值实测为 16.00 / 30.14 / 3.160，对应 $(N_2/N_1)^4=$ 16.00 / 30.20 / 3.160，
+即 $N^4$ 精确成立（0.2% 以内）。2026-11-12 启动的 `box_n400_k0_1e-9` 也验证了这一点：
+它的打印值是 $3.032\times10^{-11}$，与 `n400` 的 $2.979\times10^{-11}$ 只差 1.8%
+（来自起始 $H$ 的 0.4% 差别），**因为 $N$ 没变**。
+
+三条推论（很重要，会改变测试设计）：
+
+1. **任何"固定 $\Delta x$、改 $L$"的 box 测试都不能降低真空能占比**——$N$ 没变，
+   $\Lambda/H$ 就没变。所以 lit-survey 里"方案 C（固定物理 UV 截断）"的原始设想不成立：
+   它固定的是 $\rho_{\rm vac}$ 的绝对值，不是 $\rho_{\rm vac}/\rho_{\rm tot}$。
+2. 想降低占比只能减小 $N$ 或减小 `sub`；而 `sub` 是初始条件 $k_{\min}={\rm sub}\cdot aH$ 的
+   容差，必须 $>1$，减小它意味着最低 $k$ 在起始时已经在视界外，BB 初始条件不成立。
+   所以**在物理可接受的参数范围内，$\rho_{\rm vac}/\rho_{\rm tot}\propto N^4$ 无法回避**。
+3. 因此 **$N$ 扫描本身无法把"空间分辨率"和"零点能"分开**，唯一干净的解法是显式减除
+   （lit-survey 的方案 A），或者做一个把 $\Lambda_{\rm UV}$ 与 $N$ 解耦的改动。
+
+#### 4.2.4 `box_n400_k0_1e-9` 能判别什么、不能判别什么
+
+`box_n400_k0_1e-9` 的实测参数：$N=400$、$L=9.720$ pc（$2L_{\rm base}$）、
+$\Delta x=0.02430$ pc（$=\Delta x_{\rm base}$）、$\Lambda_{\rm UV}=2.205\times10^{-7}$ Hz
+（$=\Lambda_{\rm UV,base}$）、起始 $H=2.71265\times10^{-5}$、峰位预计在
+$k\simeq1.0\times10^{-8}$ Hz。
+
+三者对照：
+
+| 算例 | $\Delta x$ | $L$ | $\Lambda/H$ | $\rho_{\rm vac}/\rho_{\rm tot}$ |
+|---|---:|---:|---:|---:|
+| baseline N=200 | 0.0243 | 4.86 | 143 | $8.5\times10^{-4}$ |
+| `n400` | 0.01215 | 4.86 | 287 | $1.36\times10^{-2}$ |
+| `box_n400_k0_1e-9` | 0.0243 | 9.72 | 287 | $1.36\times10^{-2}$ |
+
+所以它与 `n400` 的真空能占比**相同**，与 baseline 的 $\Delta x$ 和 $\Lambda_{\rm UV}$ **相同**。
+判别逻辑：
+
+- 若 `box_n400` 在共同窗口内**回到 baseline 的 2–3%**（尽管真空能占比和 `n400` 一样高）
+  $\Rightarrow$ 压低来自 $\Delta x$/色散通道，§4.2.1 的零点能猜想可以降级；
+- 若 `box_n400` 仍然**偏低 10–17%** $\Rightarrow$ 压低与 $\Delta x$ 无关，只与"$N$ 决定的那些量"
+  （真空能占比，以及可能的 IR/盒子）有关，§4.2.1 升级为已定位的系统误差；
+- 若两者都不像（中间值），说明有两条以上通道叠加，必须做显式减除才能分开。
+
+注意它**不**改变真空能占比，所以它不是"减除对照"，真正的减除对照仍是方案 A。
+另外，由于峰值落在 $k\simeq10^{-8}$ Hz，正好在 `COMPARISON_K_MIN = 1e-8` 的左边缘，
+统计窗口应放宽到 $[2.6\times10^{-9},0.7k_{\max}]$ 再用 Python 重算，
+不要直接用 `summary.csv` 里的 `rel_baseline_*`。
 
 ### 4.3 图
 
@@ -656,12 +808,18 @@ n400.final_field.npz
 n400.lattice.bincode
 n400.lattice.checkpoint.bincode
 n400.lattice.zeta.checkpoint.bincode
+n400_super500.summary.npz          # 2026-11-12 补下载（仅 summary，完整结果在远端）
+dt4_n128.*, dt8_n128.*             # 结果可疑，见 §7 第 15 条
 summary.csv
 comparison.npz
 resolution.*.html
 timestep.*.html
 all.*.html
 ```
+
+2026-11-12 起 `box_n400_k0_1e-9` 正在远端运行，本地暂时只有日志；预计产出
+`box_n400_k0_1e-9.{lattice.bincode,final_field.npz,summary.npz}`，单个算例约 4.4 GB
+（远端根分区当时剩 80 GB，够用）。
 
 远端全部原始输出仍保留在：
 
@@ -718,9 +876,21 @@ N=300 与 N=400 分辨率算例均已完成（结果见第 4 节）。N=400 在�
 2. `N=256`，`k0=1.5625e-9`，`dt=2.0`（固定 $\Delta x$，盒子 $1.28L$）
 3. `N=320`，`k0=2e-9`（可选，分辨率）
 4. `N=320`，`k0=1.25e-9`（固定 $\Delta x$，盒子 $1.6L$）
-5. `N=400`，`k0=1e-9`（可选，固定 $\Delta x$，盒子 $2L$）
+5. `N=400`，`k0=1e-9`（固定 $\Delta x$，盒子 $2L$）——**2026-11-12 已启动**，
+   `box_n400_k0_1e-9`，ETA 约 92 h，判别逻辑见 §4.2.4
 6. **优先**：在 N=400 上补 `seed=11,12` 和 `super=500`，确认 4.2 中约 10% 的偏差是随机实现还是系统误差
+   —— `super=500` 已完成（`n400_super500`，峰值只变 $-2.3\%$、峰位不动，见 §4.1）；
+   `seed=11,12` 目前只有 N=128 的配置，N=400 的还没加
 7. `N=512`，`k0=2e-9`，`dt=2.0`（分辨率；实测外推约 9 天）
+8. **新增（2026-11-12）**：实现 lit-survey 方案 A（格点零点能减除）后重跑 N=200/N=400。
+   这是唯一能把"空间分辨率"和"UV 真空能"分开的测试，理由见 §4.2.3。
+   论文 arXiv:2610.26669 给了连续极限的绝热 counterterm 形式（其式 3.10、3.17–3.18），
+   但格点上应直接减 $\frac{1}{2V}\sum_{\mathbf k}\omega_{\mathbf k}(t)$（含 $V''$ 质量项），
+   并把 $\rho$ 与 $p$ 一起减（$p=\rho/3$）。
+
+> **顺序说明**：第 5 项之所以排在第 8 项之前，是因为它不需要改代码、只花机时，
+> 且能立刻给出"$\Delta x$ 通道 vs $N$ 通道"的第一刀；但它**不能**替代第 8 项，
+> 因为固定 $\Delta x$ 的 box 测试并不改变 $\rho_{\rm vac}/\rho_{\rm tot}$（见 §4.2.3）。
 
 对应频率范围：
 
@@ -936,7 +1106,23 @@ python3 papers/gauss-bonnet/plot_convergence.py
 14. **N=400 尚未收敛**
     - 共同窗口内相对 baseline 中位 10.41%、最大 17.35%，差于 N=128/N=300 的 2–3%。
     - 谱整体偏低、峰位更低（$2.02\times10^{-8}$ Hz），而 N=400 的演化反而最长，因此不是「时间不够」。
-    - 在 seed / `super=500` 对照完成前，不要把 N=400 当作分辨率收敛的证据。
+    - `n400_super500` 已排除"末态未冻结"（峰值只再降 2.3%、峰位不动）。
+    - 在 seed 对照和 UV 真空能减除（§4.2.3/§4.2.4）完成前，不要把 N=400 当作分辨率收敛的证据。
+
+15. **`dt4_n128` 与 `dt8_n128` 的结果可疑（待核实，2026-11-12 发现）**
+    - 两个算例的最终场一致到 $10^{-13}$（`zeta` 差 $6.1\times10^{-6}$，`a` 差 $3\times10^{-9}$，
+      末态 $\ln a$ 都是 9.8353057），而 `n128`(dt=2) 与 `dt4_n128` 的 `zeta` 差 $1.4\times10^{-2}$。
+    - 二阶格式下 dt=4→8 的差应该比 dt=2→4 **大** 4 倍，现在却小了约 $2\times10^{3}$ 倍；
+      这不像是收敛，更像是 dt 被截断在 4，或 dt8 复用了 dt4 的 checkpoint。
+    - 在查清之前，**"$\Delta t=2$ 已收敛"只能依据 `dt1_n64` 那条（N=64, dt=1 vs 2）**，
+      不要引用 dt4/dt8 的结果做收敛性论证。
+    - 最快的判据：把 `dt` 提到 16 再跑一次 N=128，看是否还是同一个结果。
+
+16. **`box_n400_k0_1e-9` 的峰值落在比较窗口左边缘**
+    - 由于 $k$ 轴整体减半，预计峰位在 $k\simeq1.0\times10^{-8}$ Hz，
+      正好等于 `COMPARISON_K_MIN = 1e-8`。
+    - 分析时把窗口放宽到 $[2.6\times10^{-9},0.7k_{\max}]$ 用 Python 重算，
+      不要直接用 `summary.csv` 的 `rel_baseline_*`。
 
 ---
 
@@ -986,6 +1172,26 @@ ssh reex-zerotier 'tail -5 ~/computations-cfy/out/gauss_bonnet_convergence/n400.
 rsync -avz -e 'ssh -o BatchMode=yes' \
     reex-zerotier:~/computations-cfy/out/gauss_bonnet_convergence/ \
     inflat/out/gauss_bonnet_convergence_remote_n400/
+
+# ---- 2026-11-12: box_n400_k0_1e-9（正在跑，screen 名 gb_box400）----
+
+# 启动（已执行，勿重复启动；中断后重跑同一命令会从 checkpoint 续算）
+ssh -o BatchMode=yes reex-zerotier \
+    'cd ~/computations-cfy && screen -dmS gb_box400 bash -lc \
+     "./target/release/gauss_bonnet_convergence \
+        --baseline baseline/case1-final.output.npz \
+        --run --config box_n400_k0_1e-9 \
+        > out/gauss_bonnet_convergence/box_n400_k0_1e-9.run.log 2>&1"'
+
+# 监控（ETA 在日志里；预计约 92 h）
+ssh reex-zerotier 'screen -ls'
+ssh reex-zerotier 'tail -3 ~/computations-cfy/out/gauss_bonnet_convergence/box_n400_k0_1e-9.run.log'
+ssh reex-zerotier 'df -h /root | tail -1; du -sh ~/computations-cfy/out/gauss_bonnet_convergence'
+
+# 完成后只下载 summary 先看数（final_field/bincode 约 4.4 GB）
+rsync -avz -e 'ssh -o BatchMode=yes' \
+    reex-zerotier:~/computations-cfy/out/gauss_bonnet_convergence/alpha_1.13412e7/box_n400_k0_1e-9.summary.npz \
+    inflat/out/gauss_bonnet_convergence/alpha_1.13412e7/
 ```
 
 ---
