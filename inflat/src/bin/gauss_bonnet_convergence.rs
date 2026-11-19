@@ -297,6 +297,32 @@ fn configs() -> Vec<Config> {
             sup: BASELINE_SUPER,
             seed: BASELINE_SEED,
         },
+        // Reproduction of the production N=200 baseline with the *current*
+        // binary.  The baseline npz was produced ~13 months earlier, so this
+        // run separates "dt effect" from "code-version drift": `dt1_n200` is
+        // the dt=1 partner of this configuration.
+        Config {
+            name: "n200",
+            group: "repro",
+            n: 200,
+            k0: BASELINE_K0,
+            dt: BASELINE_DT,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
+        // Timestep control at the *production* resolution: the N=200 baseline
+        // uses dt=2.  Offsets the /2 from the 8x smaller cost per cell.
+        Config {
+            name: "dt1_n200",
+            group: "timestep",
+            n: 200,
+            k0: BASELINE_K0,
+            dt: 1.0,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: BASELINE_SEED,
+        },
         Config {
             name: "dt4_n128",
             group: "timestep",
@@ -1081,6 +1107,8 @@ fn color_for(name: &str) -> &'static str {
         "box_n128_k0_3p125e-9" => "#8c564b",
         "box_n400_k0_1e-9" => "#e377c2",
         "dt1_n64" => "#2ca02c",
+        "dt1_n200" => "#e377c2",
+        "n200" => "#7f7f7f",
         "dt4_n128" => "#98df8a",
         "dt8_n128" => "#bcbd22",
         "sub2_n128" => "#ff7f0e",
