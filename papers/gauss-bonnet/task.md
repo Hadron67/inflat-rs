@@ -314,6 +314,7 @@ seed    = 10
 | `super500_n128` | times | 128 | 2e-9 | 2.0 | 1.3 | 500 | 10 |
 | `seed11_n128` | seed | 128 | 2e-9 | 2.0 | 1.3 | 200 | 11 |
 | `seed12_n128` | seed | 128 | 2e-9 | 2.0 | 1.3 | 200 | 12 |
+| `seed11_n400` | seed | 400 | 2e-9 | 2.0 | 1.3 | 200 | 11 |
 
 `box_n128_k0_3p125e-9` 和 `box_n64_k0_6p25e-9` 保持 $Nk_0=4\times10^{-7}$，即固定 $\Delta x$，盒子分别只有 baseline 的 $1/1.5625$ 和 $1/3.125$。它们测试的是更小的盒子，不是更大的盒子。
 
@@ -551,6 +552,7 @@ ssh -t reex-zerotier 'screen -r gb_conv'
 | `box_n400_k0_1e-9` | `reex-zerotier` | 400 | 1e-9 | 2.0 | 1.3 | 200 | 10 | 完成（2026-11-16，见 4.2.5） |
 | `dt1_n200` | `reex-zerotier` | 200 | 2e-9 | 1.0 | 1.3 | 200 | 10 | 完成（2026-11-18，见 4.2.7） |
 | `n200` | `reex-zerotier` | 200 | 2e-9 | 2.0 | 1.3 | 200 | 10 | 完成（2026-11-19，13.5 h；**新基准**，见 4.2.7） |
+| `seed11_n400` | `reex-zerotier` | 400 | 2e-9 | 2.0 | 1.3 | 200 | 11 | **运行中**（2026-11-20 19:50 启动，日志 ETA ≈ 94 h） |
 
 > `n64` 使用旧 $\delta N$ 算法，数据已删除，需重新计算；表中 n64 相关数值作废。
 
@@ -947,7 +949,7 @@ $\zeta_{\rm lin}$ 也一样（`spectrums[-1]`：中位差 $0.00045\%$、最大 $
 
 **所以 $\Delta t$ 从 1 改到 2 对谱的影响是 $10^{-5}$ 量级，完全可以忽略。**
 之前那 $0.92\%$（以及高 $k$ 端的 5–23%）**不是 $\Delta t$，而是 production baseline 用的
-2025-10 那版二进制与当前代码的差别**：
+2025-10 那版二进制与当前代码的差别**（具体是 `construct_zeta`，下面给出定位）：
 
 | 区间 [Hz] | `dt1_n200`/`n200` $-1$ | baseline/`n200` $-1$ |
 |---|---:|---:|
@@ -963,10 +965,31 @@ $\zeta_{\rm lin}$ 也一样（`spectrums[-1]`：中位差 $0.00045\%$、最大 $
 所以不是单纯的归一化）。注意"公平窗口"若一直延伸到 $0.7k_{\max}=1.54\times10^{-7}$，
 中位差会变成 $5.4\%$（因为窗口里大多数 bin 在 $6\times10^{-8}$ 以上）。
 **所以任何用到 $k\gtrsim6\times10^{-8}$ 的比较都必须用 `n200` 作基准；只用到 $k\lesssim6\times10^{-8}$
-（含峰值）时，旧 baseline 与新基准差 $<1\%$。**`case1-final.output.npz` 产生于 2025-10，而本仓库的 git 历史从
-2026-10 才开始（`inflat/src/scalar.rs` 最早一条是 `f7dc444 2026-10-24`），**没法直接 diff
-出那次改动**。按时间顺序最可能的是 $\zeta$ 的 $\delta N$ 重建（`construct_zeta`）被重写过
-（`task.md` §4.1 记过 n64 用的是"旧 $\delta N$ 算法"），但这一点**未经验证**。
+（含峰值）时，旧 baseline 与新基准差 $<1\%$。**
+
+**原因已定位（2026-11-20，只查代码/git 历史与既有数据，未重跑）**：差值全部来自
+`inflat/src/scalar.rs` 的 $\delta N$ 重建 `construct_zeta` 的修复。
+旧实现（`f7dc444` 与 2025-10 的 production 二进制，二者等价于 `9e76236 2025-10-07`）里，
+若格点的场值已越过 `reference_phi`（即 `(reference_phi - phi) * v_phi < 0`），
+`evaluate_to_phi` 的 while 循环一次都不执行，该格点直接返回 $\ln(a/a)=0$，
+即 **$\zeta=0$**。`401e0e9`（2026-10-25）把 `zeta_at_site` 的步长改成
+$|\Delta\phi|/|v_\phi|$ 并新增 `evaluate_to_phi_directed`：对已越过目标的格点
+**反向积分**回 $\phi=\phi_{\rm ref}$ 的时刻，返回真正的 $\delta N$。
+（同一时期 `667ca0c` 还给最后一步加了二分收敛，消除 overshoot 的高 $k$ 假功率，
+但该修正对本算例谱的残差 $<0.1\%$。）
+
+`n200` 末态（`n200.final_field.npz`）中满足"已越过 `reference_phi` = 9.88577"的格点
+只有 1750 个（$2.19\times10^{-4}$，全是 $\phi$ 最大的点，$\zeta\approx-1.3516$）。
+把这 1750 个点置零后对既有场做 shell 谱（只做 FFT，没有重跑），
+与 production baseline 的谱逐 bin 吻合到**中位 $0.001\%$、最大 $0.06\%$**：
+峰值 bin $+0.930\%$、$6\times10^{-8}$–$1.2\times10^{-7}$ Hz 带 $-4.62\%$、
+$1.2\times10^{-7}$–$2.3\times10^{-7}$ Hz 带 $-19.43\%$，与上表 baseline 列逐位相同。
+**所以旧 baseline 的 UV 偏低不是物理差异，而是这 1750 个格点的 $\zeta$ 被错误置零**；
+低 $k$ 的 $+0.36$–$0.95\%$ 同样由置零引起（改变了场的均值/方差）。
+
+由 git 时间线可知：除 baseline 与 `n64` 外，其余收敛算例都在 `401e0e9` 之后运行，
+用的是新算法；`n64`（2026-10-24 06:19 启动）早于 667ca0c/401e0e9，所以确实带旧算法，
+与 §4.1 将其"作废"一致。
 
 **因此：以后所有算例间比较都应该用 `n200` 作为基准，不要用 production baseline。**
 用 `n200` 重做第 4 节的主要对比（$k\in[10^{-8},0.7k_{\max}(N{=}64)]$ 与峰值带）：
@@ -1196,7 +1219,11 @@ N=300 与 N=400 分辨率算例均已完成（结果见第 4 节）。N=400 在�
    结论见 §4.2.7：$\Delta t$ 无影响（$10^{-5}$），baseline 与当前代码差 $\sim1\%$，
    **以后用 `n200` 当基准**；
    (b) 补 `N=400` 的 `seed=11`（91 h），检验非线性段的实现敏感性——这现在是唯一没被排除的
-   "便宜"解释；
+   "便宜"解释；**已启动**（`seed11_n400`，2026-11-20 19:50，screen `gb_seed11n400`，
+   日志 ETA ≈ 94 h）。启动时 `<∇φ²>/a² = 2.97853×10^{-11}`（`n400` 为 $2.97906\times10^{-11}$）、
+   $H_{\rm ini}=2.71900\times10^{-5}$（`n400` 为 $2.71901\times10^{-5}$），即除随机相位外
+   与 `n400` 完全同构。判据：与 `n400` 的逐 bin 差若落到 shell 统计误差（峰值 ≈2.8%）以内，
+   则 N=400 的 10–17% 是随机实现；若仍在 10% 量级且形状相似，则是系统误差。
    (c) 若要用 $k\gtrsim6\times10^{-8}$ 的部分（SIGW），必须先修 `sigw_2_spectrum` 的边界处理。
 9. 实现 lit-survey 方案 A（格点零点能减除）后重跑 N=200/N=400。
    论文 arXiv:2610.26669 给了连续极限的绝热 counterterm 形式（其式 3.10、3.17–3.18），
@@ -1430,6 +1457,8 @@ python3 papers/gauss-bonnet/plot_convergence.py
     - 但 $\Delta x$ 加密与 $L$ 放大各带来约 10% 方向相反的改变，所以**也没有收敛到 10% 以下**。
     - `n200`（当前代码）进一步证明 $\Delta t$ 从 1 到 2 只让谱动 $10^{-5}$，所以 $\Delta t$ 彻底排除；
       同时发现 **production baseline 与当前代码差 $\sim1\%$（高 $k$ 到 $20\%$）**，
+      原因已定位为旧版 `construct_zeta` 把越过 `reference_phi` 的格点（$N=200$ 时 1750 个）
+      的 $\zeta$ 置零（§4.2.7），**故这不是物理差异，也不是 N=400 偏低的线索**；
       以后一律用 `n200` 作基准（§4.2.7）。
     - 至此"便宜"的解释里，零点能与 $\Delta t$ 已被排除，随机实现被 shell 统计压低到
       $\approx3\%$（非直接检验，没有跨 seed 的算例），
@@ -1570,6 +1599,27 @@ ssh reex-zerotier 'tail -2 ~/computations-cfy/out/gauss_bonnet_convergence/dt1_n
 # 所以 `--plot-only` 不会自动带上它，直接用 analyze 脚本或 Python 读 npz）
 rsync -avz -e 'ssh -o BatchMode=yes' \
     reex-zerotier:~/computations-cfy/out/gauss_bonnet_convergence/alpha_1.13412e7/dt1_n200.summary.npz \
+    inflat/out/gauss_bonnet_convergence/alpha_1.13412e7/
+
+# ---- 2026-11-20: seed11_n400（运行中，screen 名 gb_seed11n400，ETA ≈ 94 h）----
+
+# 启动（已执行，勿重复启动；中断后重跑同一命令会从 checkpoint 续算）
+ssh -o BatchMode=yes reex-zerotier \
+    'cd ~/computations-cfy && screen -dmS gb_seed11n400 bash -lc \
+     "./target/release/gauss_bonnet_convergence \
+        --baseline baseline/case1-final.output.npz \
+        --run --config seed11_n400 \
+        > out/gauss_bonnet_convergence/seed11_n400.run.log 2>&1"'
+
+# 监控
+ssh reex-zerotier 'screen -ls | head -3'
+ssh reex-zerotier 'tail -2 ~/computations-cfy/out/gauss_bonnet_convergence/seed11_n400.run.log'
+
+# 完成后先只下载 summary 与 final_field（约 1.4 GB），bincode 需要时再拉
+CASE=alpha_1.13412e7/seed11_n400
+rsync -avz -e 'ssh -o BatchMode=yes' \
+    reex-zerotier:~/computations-cfy/out/gauss_bonnet_convergence/$CASE.summary.npz \
+    reex-zerotier:~/computations-cfy/out/gauss_bonnet_convergence/$CASE.final_field.npz \
     inflat/out/gauss_bonnet_convergence/alpha_1.13412e7/
 ```
 

@@ -393,6 +393,20 @@ fn configs() -> Vec<Config> {
             sup: BASELINE_SUPER,
             seed: 12,
         },
+        // Random-implementation control at the resolution where the anomaly
+        // appears: identical to `n400` except for the seed.  Its same-N
+        // reference is `n400` (seed=10); see papers/gauss-bonnet/task.md
+        // sections 4.2.6 (item 2) and 6.1 (item 8b).
+        Config {
+            name: "seed11_n400",
+            group: "seed",
+            n: 400,
+            k0: BASELINE_K0,
+            dt: BASELINE_DT,
+            sub: BASELINE_SUB,
+            sup: BASELINE_SUPER,
+            seed: 11,
+        },
     ]
 }
 
@@ -1116,6 +1130,7 @@ fn color_for(name: &str) -> &'static str {
         "n400_super500" => "#8c564b",
         "seed11_n128" => "#17becf",
         "seed12_n128" => "#aec7e8",
+        "seed11_n400" => "#17becf",
         _ => "#7f7f7f",
     }
 }
@@ -1360,6 +1375,8 @@ fn write_csv(path: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Result<()> 
             let reference_name = match l.cfg.n {
                 64 => "n64",
                 128 => "n128",
+                200 => "n200",
+                400 => "n400",
                 _ => "",
             };
             if l.cfg.name == reference_name {
@@ -1486,6 +1503,8 @@ fn write_outputs(case_dir: &Path, baseline: &Baseline, loaded: &[Loaded]) -> Res
                 let reference_name = match l.cfg.n {
                     64 => "n64",
                     128 => "n128",
+                    200 => "n200",
+                    400 => "n400",
                     _ => continue,
                 };
                 if let Some(reference) = loaded.iter().find(|r| r.cfg.name == reference_name)
