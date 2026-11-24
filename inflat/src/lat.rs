@@ -208,6 +208,29 @@ pub trait Lattice<const D: usize, T> {
         let (p1, _) = shift_coord(coord, self.dim(), dir);
         (self.get_by_coord(&p1) - self.get_by_coord(coord)) / dx
     }
+    fn backward_derivative_dir_at(&self, coord: &VecN<D, usize>, dx: T, dir: usize) -> T
+    where
+        T: Sub<T, Output = T> + Div<T, Output = T>,
+    {
+        let (_, m1) = shift_coord(coord, self.dim(), dir);
+        (self.get_by_coord(coord) - self.get_by_coord(&m1)) / dx
+    }
+    /// $(\nabla\phi)^2$ at one site, as half the sum of the two one-sided
+    /// differences in every direction:
+    ///
+    /// $$
+    /// \frac12\sum_d\left[\left(\frac{\phi_{i+e_d}-\phi_i}{\Delta x}\right)^2
+    /// +\left(\frac{\phi_i-\phi_{i-e_d}}{\Delta x}\right)^2\right]
+    /// =\frac12\sum_{j\sim i}\frac{(\phi_i-\phi_j)^2}{\Delta x^2}.
+    /// $$
+    ///
+    /// This is the bond-centred gradient energy: for a weight $f$ it gives
+    /// exactly $\sum_{\rm bonds}\frac{f_i+f_j}{2}(\Delta\phi/\Delta x)^2$, so it
+    /// is the exact discrete partner of [`Self::laplacian_at`] under summation
+    /// by parts, and its volume average equals that of the forward-only form.
+    /// Using both one-sided differences (rather than forward only) matters
+    /// whenever the gradient energy is multiplied by a site-dependent
+    /// coefficient.
     fn derivative_square_at<T2>(&self, coord: &VecN<D, usize>, dx: &VecN<D, T2>) -> T
     where
         T: Sub<T, Output = T>
@@ -218,13 +241,18 @@ pub trait Lattice<const D: usize, T> {
             + Clone,
         T2: Into<T> + Clone,
     {
-        let mut ret = {
-            let a = self.forward_derivative_dir_at(coord, dx[0].clone().into(), 0);
-            a.clone() * a
+        let two = T::from_i32(2).unwrap();
+        let dir_square = |dir: usize| -> T {
+            let d: T = dx[dir].clone().into();
+            let fp = self.forward_derivative_dir_at(coord, d.clone(), dir);
+            let fm = self.backward_derivative_dir_at(coord, d, dir);
+            let mut r = fp.clone() * fp;
+            r += fm.clone() * fm;
+            r / two.clone()
         };
+        let mut ret = dir_square(0);
         for dir in 1..D {
-            let a = self.forward_derivative_dir_at(coord, dx[dir].clone().into(), dir);
-            ret += a.clone() * a;
+            ret += dir_square(dir);
         }
         ret
     }
@@ -516,7 +544,8 @@ pub struct LatticeLaplacian<const D: usize, T, F> {
 impl<const D: usize, T, F> Lattice<D, T> for LatticeLaplacian<D, T, F>
 where
     F: Lattice<D, T>,
-    T: Sub<T, Output = T>
+    T: Zero
+        + Sub<T, Output = T>
         + Div<T, Output = T>
         + FromPrimitive
         + AddAssign<T>
@@ -528,7 +557,7 @@ where
     }
 
     fn get(&self, _index: usize, coord: &VecN<D, usize>) -> T {
-        self.field.derivative_square_at(coord, &self.dx)
+        self.field.laplacian_at(coord, &self.dx)
     }
 }
 
@@ -920,7 +949,7 @@ impl<T> IndexMut<usize> for ArrayMut<'_, T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        lat::{BoxLattice, Lattice, LatticeMut},
+        lat::{shift_coord, BoxLattice, Lattice, LatticeMut},
         util::VecN,
     };
 
@@ -968,6 +997,84 @@ mod tests {
                 lat.get(index, &coord),
                 flipped.get(flipped_index, &flipped_coord)
             );
+        }
+    }
+
+    fn random_lattice(dim: VecN<3, usize>) -> BoxLattice<3, f64> {
+        let mut lat = BoxLattice::zeros(dim);
+        lat.for_each(|ptr, index, _| {
+            let x = index as f64;
+            *ptr = (0.7 * x).sin() * (1.3 * x).cos();
+        });
+        lat
+    }
+
+    /// `derivative_square_at` must be half the sum of the two one-sided
+    /// differences, i.e. the bond-centred value, and its total must equal the
+    /// forward-only total.
+    #[test]
+    fn derivative_square_is_bond_centred() {
+        let dim = VecN::new([6; 3]);
+        let dx = VecN::new([0.37; 3]);
+        let lat: BoxLattice<3, f64> = random_lattice(dim);
+        let mut total_sym = 0.0;
+        let mut total_fwd = 0.0;
+        for index in 0..dim.product() {
+            let coord = dim.decode_coord(index);
+            let mut expect = 0.0;
+            let mut fwd = 0.0;
+            for dir in 0..3 {
+                let (p1, m1) = shift_coord(&coord, &dim, dir);
+                let fp = (lat.get_by_coord(&p1) - lat.get_by_coord(&coord)) / dx[dir];
+                let fm = (lat.get_by_coord(&coord) - lat.get_by_coord(&m1)) / dx[dir];
+                expect += 0.5 * (fp * fp + fm * fm);
+                fwd += fp * fp;
+            }
+            let got = lat.derivative_square_at(&coord, &dx);
+            assert!((got - expect).abs() < 1e-12 * (1.0 + expect.abs()));
+            total_sym += got;
+            total_fwd += fwd;
+        }
+        assert!(
+            (total_sym - total_fwd).abs() < 1e-12 * total_fwd.abs(),
+            "sym {} vs fwd {}",
+            total_sym,
+            total_fwd
+        );
+    }
+
+    /// A linear field has an exact gradient and a vanishing laplacian.  Only
+    /// interior sites are checked: a linear field is not periodic, so the
+    /// wrapped bond across the boundary is not a linear difference.
+    #[test]
+    fn derivative_square_of_linear_field() {
+        let dim = VecN::new([4; 3]);
+        let dx = VecN::new([0.25; 3]);
+        let slope = 2.5;
+        let mut lat: BoxLattice<3, f64> = BoxLattice::zeros(dim);
+        lat.for_each(|ptr, _, coord| *ptr = slope * coord[0] as f64 * dx[0]);
+        for index in 0..dim.product() {
+            let coord = dim.decode_coord(index);
+            if coord[0] == 0 || coord[0] + 1 == dim[0] {
+                continue;
+            }
+            assert!((lat.derivative_square_at(&coord, &dx) - slope * slope).abs() < 1e-12);
+            assert!(lat.laplacian_at(&coord, &dx).abs() < 1e-12);
+        }
+    }
+
+    /// Regression test: `LatticeLaplacian::get` used to return
+    /// `derivative_square_at`.
+    #[test]
+    fn laplacian_wrapper_matches_pointwise_laplacian() {
+        let dim = VecN::new([5; 3]);
+        let dx = VecN::new([0.3; 3]);
+        let lat: BoxLattice<3, f64> = random_lattice(dim);
+        for index in 0..dim.product() {
+            let coord = dim.decode_coord(index);
+            let got = lat.as_ref().laplacian(&dx).get(index, &coord);
+            let want = lat.laplacian_at(&coord, &dx);
+            assert_eq!(got, want);
         }
     }
 }
