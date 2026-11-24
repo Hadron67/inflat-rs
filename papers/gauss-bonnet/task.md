@@ -201,6 +201,7 @@ idx = np.where(np.abs(params - 1.13412e7) < 1.0)[0]
 | `inflat/src/bin/gauss_bonnet.rs` | 原生产程序，包含 14 个 $\alpha$ 的扫描和旧输出逻辑。**不要随意运行，避免覆盖旧数据。** |
 | `inflat/src/scalar.rs` | `LatticeInput`、`LatticeOutputData`、`from_background_and_k_normalized`、`run`、`spectrum`、$\delta N$ 提取等核心库。 |
 | `inflat/src/gauss_bonnet.rs` | SGB 背景、场演化、RK4、$V_{\rm eff}$、度规扰动等。 |
+| `inflat/src/lat.rs` | 格点容器与离散算子（`laplacian_at`、`derivative_square_at` 等）。2026-11-24 修过两处离散化 bug，见 §4.2.10。 |
 | `inflat/src/igw.rs` | SIGW 积分 `sigw_2_spectrum`。 |
 | `inflat/src/util.rs` | `ParamRange`、插值、bincode 缓存等。 |
 | `inflat/src/bin/gauss_bonnet_convergence.rs` | 本次新增的收敛测试程序。 |
@@ -1185,6 +1186,44 @@ $9.3\%\pm2.3\%$，约 $4\sigma$。
 > 显式零点能减除（§4.2.6 第 9 条 / 方案 A）**不是**候选解释——它在 §4.2.5 已被排除。
 > 它现在的用途只是给文章一个干净的连续极限和可陈述的系统误差，别把它列进"N=400 为什么低"。
 
+#### 4.2.10 格点梯度的离散化：已修正，但不是 N=400 偏低的原因（2026-11-24）
+
+`inflat/src/lat.rs` 里有两处相关的离散化 bug，已修：
+
+1. **`derivative_square_at` 原先只用前向差分**。$(\nabla\phi)^2(i)$ 现在取两个单侧差分的平均
+   $$
+   g_i=\frac12\sum_d\left[\left(\frac{\phi_{i+e_d}-\phi_i}{\Delta x}\right)^2
+   +\left(\frac{\phi_i-\phi_{i-e_d}}{\Delta x}\right)^2\right]
+   =\frac12\sum_{j\sim i}\frac{(\phi_i-\phi_j)^2}{\Delta x^2},
+   $$
+   也就是键中心梯度能 $\sum_{\rm bonds}\frac{f_i+f_j}{2}(\Delta\phi/\Delta x)^2$：
+   与 3 点 `laplacian_at` 在求和分部意义下严格共轭、二阶精度。
+   **注意不是把 6 个邻居直接相加**——那是这个量的 2 倍；直接相加会把梯度能和
+   $H_{\rm ini}$ 的 N⁴ 真空污染整体翻倍（N=400：$6.8\times10^{-3}\to1.0\times10^{-2}$）。
+2. **`LatticeLaplacian::get` 返回的是 `derivative_square_at`**（复制粘贴），所以
+   `phi.laplacian(&dx).times(xi').average()`（`gauss_bonnet.rs:824, 880`）算的其实是
+   $\langle(\nabla\phi)^2\xi'\rangle$，不是 $\langle\Delta\phi\,\xi'\rangle$。已改为 `laplacian_at`。
+
+**对结果的影响**（N=400 初始态，复现脚本 `papers/gauss-bonnet/grad-fix/init_h_check.py`）：
+
+| 修正 | $H_{\rm ini}$ 的变化 | 其他量 |
+|---|---:|---|
+| 前向 → 对称梯度 | $10^{-11}$ 量级 | $\delta(a''/a)\sim8\times10^{-9}$，$\mathrm{rms}\,\delta\ddot\phi/|\ddot\phi|\sim10^{-9}$ |
+| 修正 `LatticeLaplacian` | $+4.2\times10^{-6}$（$2.71900335\to2.71901488\times10^{-5}$） | 恢复 $\langle\Delta\phi\xi'\rangle+\langle(\nabla\phi)^2\xi''\rangle\approx0$（实测 $9\times10^{-8}$，两项各约 $5\times10^{-5}$） |
+
+- 前向/对称之差是一个格点全导数：
+  $\langle f g_{\rm fwd}\rangle-\langle f g_{\rm sym}\rangle=\frac12\sum_d\langle A_d(f_i-f_{i+e_d})\rangle$，
+  $f$ 为常数时**精确为零**。所以所有只经过无权平均的量（包括 $c_0=\frac12[(\nabla\phi)^2+\dot\phi^2]+V$，
+  即 §4.2.1 里 N⁴ 真空抬高 $H_{\rm ini}$ 的那一项）逐位不变。逐点差别虽然是 $\mathcal O(1)$
+  （$\mathrm{rms}(\delta g)/\langle g\rangle=0.52$），但它是纯散度，不会传到 IR。
+- 两处修正合起来只改 $H_{\rm ini}$ 的 $\lesssim10^{-5}$，比 §4.2.1 的 N⁴ 真空项
+  （N=400：$6.8\times10^{-3}$）小两个数量级以上，更远小于要解释的 9% 谱亏损。
+  **所以这不是 N=400 偏低的原因**，§4.2.6 剩下的候选不变。
+- 现有 N=64…400 / box / seed 结果都是旧离散化跑的。差异远小于实现散度（3%）和统计噪声，
+  **不需要重跑**；但 2026-11-24 之后新跑的算例会带这两处修正（$H_{\rm ini}$ 相对变化 $\lesssim10^{-5}$）。
+- 新增单元测试：`lat::tests::derivative_square_is_bond_centred`、
+  `derivative_square_of_linear_field`、`laplacian_wrapper_matches_pointwise_laplacian`。
+
 ### 4.3 图
 
 - `papers/gauss-bonnet/fig/convergence-resolution.pdf`
@@ -1619,6 +1658,12 @@ python3 papers/gauss-bonnet/plot_convergence.py
       `spectrums[0]` 之比为 3.99 $=(k_{\rm unit}$ 之比$)^2$；而 `n300`/`n400` 是 0.99（$k_{\rm unit}$ 相同）。
     - `p`（最终谱，从无量纲的 $\zeta$ 算出）没有这个问题。
     - 所以 `plot_evolution.py` 的跨算例比较只在 $k_0$ 相同时成立。
+
+18. **2026-11-24 之后的代码与旧数据差一个离散化版本**
+    - `lat.rs` 修了 `derivative_square_at`（前向 → 双侧平均）和 `LatticeLaplacian::get`
+      （原来返回 `derivative_square_at`）。详见 §4.2.10。
+    - 对 $H_{\rm ini}$ 的总影响 $\lesssim10^{-5}$ 相对，**旧算例不必重跑**，新旧数据可以直接混用比较。
+    - 但若以后要严格复现某个旧算例，注意二进制行为已变；重跑会得到 $\lesssim10^{-5}$ 不同的 $H_{\rm ini}$。
 
 ---
 
