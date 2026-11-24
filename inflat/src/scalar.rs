@@ -1593,7 +1593,11 @@ mod tests {
         let (phi1, ds1) = run_noise_test(16, 1.0);
         let (phi2, ds2) = run_noise_test(64, 1.0);
         println!("phi1 = {phi1}, phi2 = {phi2}, ds1 = {ds1}, ds2 = {ds2}");
-        assert!((phi1 - phi2).abs() < 1e-10);
-        assert!((ds1 - ds2).abs() < 1e-10);
+        // Same box L, so dx shrinks by 4 and the UV cutoff grows by 4.  The
+        // zero-point noise is UV dominated: <phi^2> ~ Lambda^2/8pi^2 ~ N^2 and
+        // <(grad phi)^2> ~ Lambda^4/16pi^2 ~ N^4, so these are *not* equal at
+        // different N: a finite lattice does not reproduce the same vacuum.
+        assert!((phi2 / phi1 / 16.0 - 1.0).abs() < 0.05, "phi ratio {}", phi2 / phi1);
+        assert!((ds2 / ds1 / 256.0 - 1.0).abs() < 0.05, "ds ratio {}", ds2 / ds1);
     }
 }
